@@ -5,8 +5,19 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
+	"unicode"
+
+	"github.com/tosnetwork/tos-ai/pkg/admission"
+)
+
+const (
+	MaxCapabilityStringBytes = 256
+	MaxAcceptedPriorities    = 3
+	MaxInputOutputBytesHard  = uint64(64 << 20)
 )
 
 type Priority uint8
@@ -30,6 +41,7 @@ type Capability struct {
 	MaxInputBytes      uint64
 	MaxOutputBytes     uint64
 	AcceptedPriorities []Priority
+	Admission          admission.Resources
 }
 
 type Request struct {
@@ -60,6 +72,57 @@ type Adapter interface {
 	Execute(context.Context, Request) (Response, error)
 }
 
+// AdapterCloser is implemented by adapters with connection pools or other
+// process-local resources that must be released during worker shutdown.
+type AdapterCloser interface {
+	Adapter
+	Close() error
+}
+
+type ErrorKind string
+
+const (
+	ErrorInvalid     ErrorKind = "invalid_request"
+	ErrorCanceled    ErrorKind = "canceled"
+	ErrorTimeout     ErrorKind = "timeout"
+	ErrorUnavailable ErrorKind = "unavailable"
+	ErrorRemote      ErrorKind = "runtime_rejected"
+	ErrorProtocol    ErrorKind = "invalid_runtime_response"
+	ErrorLimit       ErrorKind = "resource_limit"
+	ErrorInternal    ErrorKind = "runtime_failure"
+)
+
+type Error struct {
+	Kind  ErrorKind
+	Cause error
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return "runtime failure"
+	}
+	return string(e.Kind)
+}
+
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func NewError(kind ErrorKind, cause error) error {
+	return &Error{Kind: kind, Cause: cause}
+}
+
+func ErrorKindOf(err error) ErrorKind {
+	var runtimeError *Error
+	if errors.As(err, &runtimeError) {
+		return runtimeError.Kind
+	}
+	return ErrorInternal
+}
+
 func ValidateRequest(capability Capability, request Request) error {
 	if request.RequestID == "" || len(request.RequestID) > 128 {
 		return errors.New("invalid request ID")
@@ -72,6 +135,45 @@ func ValidateRequest(capability Capability, request Request) error {
 	}
 	if request.MaxOutputBytes == 0 || request.MaxOutputBytes > capability.MaxOutputBytes {
 		return errors.New("output limit is invalid")
+	}
+	return nil
+}
+
+func ValidateCapability(capability Capability) error {
+	values := []string{
+		capability.ServiceID, capability.Operation, capability.Model,
+		capability.Runtime, capability.RuntimeRevision,
+	}
+	for _, value := range values {
+		if value == "" || len(value) > MaxCapabilityStringBytes ||
+			strings.IndexFunc(value, unicode.IsControl) >= 0 {
+			return errors.New("invalid capability identity")
+		}
+	}
+	if len(capability.ModelDigest) != len("sha256:")+64 ||
+		!strings.HasPrefix(capability.ModelDigest, "sha256:") {
+		return errors.New("capability model digest must be SHA-256")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(capability.ModelDigest, "sha256:")); err != nil {
+		return errors.New("capability model digest must be SHA-256")
+	}
+	if capability.MaxInputBytes == 0 || capability.MaxInputBytes > MaxInputOutputBytesHard ||
+		capability.MaxOutputBytes == 0 || capability.MaxOutputBytes > MaxInputOutputBytesHard ||
+		len(capability.AcceptedPriorities) == 0 ||
+		len(capability.AcceptedPriorities) > MaxAcceptedPriorities ||
+		capability.Admission.RAMBytes == 0 || capability.Admission.ContextTokens == 0 ||
+		capability.Admission.BatchSize == 0 || capability.Admission.ExecutionTime <= 0 {
+		return errors.New("invalid capability bounds")
+	}
+	seen := make(map[Priority]struct{}, len(capability.AcceptedPriorities))
+	for _, priority := range capability.AcceptedPriorities {
+		if priority < PriorityLocalAsync || priority > PriorityBackground {
+			return errors.New("capability contains a forbidden priority")
+		}
+		if _, exists := seen[priority]; exists {
+			return errors.New("capability contains a duplicate priority")
+		}
+		seen[priority] = struct{}{}
 	}
 	return nil
 }

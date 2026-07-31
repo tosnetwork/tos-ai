@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "adapters": [
+    {
+      "type": "ollama",
+      "baseUrl": "http://127.0.0.1:11434",
+      "model": "operator-approved-model",
+      "modelDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "maxInputBytes": 1048576,
+      "maxOutputBytes": 1048576,
+      "maxRequestBytes": 8388608,
+      "maxResponseBytes": 8388608,
+      "maxConnections": 8,
+      "maxResponseHeaderBytes": 16384,
+      "timeoutMillis": 120000,
+      "connectTimeoutMillis": 5000,
+      "admission": {
+        "ramBytes": 1073741824,
+        "vramBytes": 0,
+        "kvCacheBytes": 0,
+        "contextTokens": 8192,
+        "batchSize": 1,
+        "executionMillis": 120000
+      }
+    }
+  ]
+}

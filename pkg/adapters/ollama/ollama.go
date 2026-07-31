@@ -8,63 +8,91 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/pkg/adapters/internal/httpclient"
+	"github.com/tosnetwork/tos-ai/pkg/admission"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
 
 type Config struct {
-	BaseURL        string
-	Model          string
-	ModelDigest    string
-	MaxInputBytes  uint64
-	MaxOutputBytes uint64
-	Timeout        time.Duration
+	BaseURL                string
+	Model                  string
+	ModelDigest            string
+	MaxInputBytes          uint64
+	MaxOutputBytes         uint64
+	MaxRequestBytes        uint64
+	MaxResponseBytes       uint64
+	MaxConnections         int
+	MaxResponseHeaderBytes int64
+	Timeout                time.Duration
+	ConnectTimeout         time.Duration
+	AllowedPlaintextCIDRs  []string
+	Admission              admission.Resources
 }
 
+const (
+	maxBodyBytesHard = uint64(64 << 20)
+	responseOverhead = uint64(64 << 10)
+	jsonExpansion    = uint64(6)
+)
+
 type Adapter struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	capability airuntime.Capability
+	endpoint    string
+	httpClient  *http.Client
+	capability  airuntime.Capability
+	maxRequest  uint64
+	maxResponse uint64
 }
 
 func New(config Config) (*Adapter, error) {
-	baseURL, err := url.Parse(config.BaseURL)
-	if err != nil || baseURL.Host == "" || (baseURL.Scheme != "https" && baseURL.Scheme != "http") {
-		return nil, errors.New("Ollama base URL must be absolute HTTP(S)")
-	}
-	host := baseURL.Hostname()
-	if baseURL.Scheme == "http" && host != "localhost" && net.ParseIP(host) == nil {
-		return nil, errors.New("plaintext Ollama is allowed only on a literal IP or localhost")
-	}
 	if config.Model == "" || config.ModelDigest == "" || config.MaxInputBytes == 0 ||
-		config.MaxOutputBytes == 0 || config.Timeout <= 0 {
+		config.MaxOutputBytes == 0 || config.MaxRequestBytes == 0 ||
+		config.MaxResponseBytes < config.MaxOutputBytes ||
+		config.MaxInputBytes > maxBodyBytesHard || config.MaxOutputBytes > maxBodyBytesHard ||
+		config.MaxRequestBytes > maxBodyBytesHard ||
+		config.MaxResponseBytes > maxBodyBytesHard ||
+		config.Admission.RAMBytes == 0 || config.Admission.ContextTokens == 0 ||
+		config.Admission.BatchSize == 0 || config.Admission.ExecutionTime <= 0 {
 		return nil, errors.New("invalid Ollama adapter configuration")
 	}
-	return &Adapter{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: config.Timeout},
-		capability: airuntime.Capability{
-			ServiceID:       "tos.ai.ollama",
-			Operation:       "generate",
-			Model:           config.Model,
-			ModelDigest:     config.ModelDigest,
-			Runtime:         "ollama",
-			RuntimeRevision: "ollama-http-v1",
-			MaxInputBytes:   config.MaxInputBytes,
-			MaxOutputBytes:  config.MaxOutputBytes,
-			AcceptedPriorities: []airuntime.Priority{
-				airuntime.PriorityLocalAsync,
-				airuntime.PriorityExternalService,
-				airuntime.PriorityBackground,
-			},
+	config.Admission.OutputBytes = config.MaxOutputBytes
+	capability := airuntime.Capability{
+		ServiceID:       "tos.ai.ollama",
+		Operation:       "generate",
+		Model:           config.Model,
+		ModelDigest:     config.ModelDigest,
+		Runtime:         "ollama",
+		RuntimeRevision: "ollama-http-v1",
+		MaxInputBytes:   config.MaxInputBytes,
+		MaxOutputBytes:  config.MaxOutputBytes,
+		AcceptedPriorities: []airuntime.Priority{
+			airuntime.PriorityLocalAsync,
+			airuntime.PriorityExternalService,
+			airuntime.PriorityBackground,
 		},
+		Admission: config.Admission,
+	}
+	if err := airuntime.ValidateCapability(capability); err != nil {
+		return nil, errors.New("invalid Ollama capability")
+	}
+	baseURL, client, err := httpclient.Build(httpclient.Config{
+		BaseURL: config.BaseURL, Timeout: config.Timeout, ConnectTimeout: config.ConnectTimeout,
+		MaxConnections: config.MaxConnections, MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
+		AllowedPlaintextCIDRs: config.AllowedPlaintextCIDRs,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Adapter{
+		endpoint:    httpclient.Endpoint(baseURL, "/api/generate"),
+		httpClient:  client,
+		maxRequest:  config.MaxRequestBytes,
+		maxResponse: config.MaxResponseBytes,
+		capability:  capability,
 	}, nil
 }
 
@@ -72,9 +100,14 @@ func (a *Adapter) Capability() airuntime.Capability {
 	return a.capability
 }
 
+func (a *Adapter) Close() error {
+	a.httpClient.CloseIdleConnections()
+	return nil
+}
+
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
 	if err := airuntime.ValidateRequest(a.capability, request); err != nil {
-		return airuntime.Response{}, err
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorInvalid, err)
 	}
 	body, err := json.Marshal(map[string]interface{}{
 		"model":  a.capability.Model,
@@ -84,30 +117,47 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 	if err != nil {
 		return airuntime.Response{}, err
 	}
-	endpoint := *a.baseURL
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/generate"
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if uint64(len(body)) > a.maxRequest {
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorLimit, errors.New("request body limit"))
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return airuntime.Response{}, err
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorInternal, nil)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	start := time.Now()
 	httpResponse, err := a.httpClient.Do(httpRequest)
 	if err != nil {
-		return airuntime.Response{}, fmt.Errorf("Ollama request: %w", err)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorCanceled, context.Canceled)
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
+		}
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
+		}
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorUnavailable, nil)
 	}
 	defer httpResponse.Body.Close()
 	if httpResponse.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(httpResponse.Body, 4<<10))
-		return airuntime.Response{}, fmt.Errorf("Ollama HTTP status %d", httpResponse.StatusCode)
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorRemote, nil)
 	}
-	maxResponse := int64(request.MaxOutputBytes) + 64<<10
+	maxResponse := int64(responseLimit(a.maxResponse, request.MaxOutputBytes))
 	data, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxResponse+1))
 	if err != nil {
-		return airuntime.Response{}, err
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorCanceled, context.Canceled)
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
+		}
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorUnavailable, nil)
 	}
 	if int64(len(data)) > maxResponse {
-		return airuntime.Response{}, errors.New("Ollama response exceeds byte limit")
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorLimit, nil)
 	}
 	var response struct {
 		Output          string `json:"response"`
@@ -120,12 +170,12 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 		// Ollama adds timing and state fields. Decode the bounded response a
 		// second time without treating those documented extensions as authority.
 		if err := json.Unmarshal(data, &response); err != nil {
-			return airuntime.Response{}, fmt.Errorf("decode Ollama response: %w", err)
+			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
 		}
 	}
 	output := []byte(response.Output)
 	if uint64(len(output)) > request.MaxOutputBytes {
-		return airuntime.Response{}, errors.New("Ollama output exceeds requested limit")
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorLimit, nil)
 	}
 	return airuntime.Response{
 		Output: output,
@@ -139,4 +189,12 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 		ModelRevision:   a.capability.ModelDigest,
 		RuntimeRevision: a.capability.RuntimeRevision,
 	}, nil
+}
+
+func responseLimit(maximum, outputBytes uint64) uint64 {
+	encoded := outputBytes*jsonExpansion + responseOverhead
+	if encoded < outputBytes || encoded > maximum {
+		return maximum
+	}
+	return encoded
 }

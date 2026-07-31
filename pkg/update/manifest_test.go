@@ -44,4 +44,13 @@ func TestManifestSignatureArtifactAndAntiRollback(t *testing.T) {
 	if err := manifest.VerifyArtifact(bytes.NewReader([]byte("other"))); err == nil {
 		t.Fatal("wrong artifact accepted")
 	}
+	if err := manifest.Verify(publicKey, "linux/amd64/cuda", 5, now.Add(2*time.Hour)); err == nil {
+		t.Fatal("expired manifest accepted for a new import")
+	}
+	if err := manifest.VerifyInstalled(publicKey, "linux/amd64/cuda", 5); err != nil {
+		t.Fatalf("installed artifact failed authenticity revalidation: %v", err)
+	}
+	if err := manifest.VerifyInstalled(publicKey, "linux/amd64/cuda", 6); err == nil {
+		t.Fatal("installed artifact security rollback accepted")
+	}
 }
