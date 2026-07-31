@@ -32,19 +32,39 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/update"
 )
 
-func TestConfiguredAdaptersDefaultsToMockAndRejectsMixedMode(t *testing.T) {
-	runtimes, err := configuredRuntimes("", "", 0)
+func TestConfiguredAdaptersRequireExplicitModeAndRejectMixing(t *testing.T) {
+	if _, err := configuredRuntimes("", "", false, 0); err == nil {
+		t.Fatal("missing production configuration failed open to mock")
+	}
+	runtimes, err := configuredRuntimes("", "", true, 0)
 	if err != nil || len(runtimes.adapters) != 1 ||
 		runtimes.adapters[0].Capability().Runtime != "mock" {
-		t.Fatalf("default runtimes=%v err=%v", runtimes, err)
+		t.Fatalf("explicit development runtimes=%v err=%v", runtimes, err)
 	}
 	if _, err := configuredRuntimes(
-		"/private/runtime.json", "", time.Millisecond,
+		"/private/runtime.json", "", true, 0,
 	); err == nil {
 		t.Fatal("mock and production runtime configuration accepted together")
 	}
-	if _, err := configuredRuntimes("", "/private/trust.json", 0); err == nil {
+	if _, err := configuredRuntimes(
+		"", "/private/trust.json", false, 0,
+	); err == nil {
 		t.Fatal("model trust without a production runtime was accepted")
+	}
+	if _, err := configuredRuntimes(
+		"", "", false, time.Millisecond,
+	); err == nil {
+		t.Fatal("mock delay enabled the development runtime implicitly")
+	}
+	if _, err := configuredRuntimes(
+		"/private/runtime.json", "", false, time.Millisecond,
+	); err == nil {
+		t.Fatal("mock delay was mixed with production configuration")
+	}
+	for _, delay := range []time.Duration{-time.Nanosecond, time.Minute + 1} {
+		if _, err := configuredRuntimes("", "", true, delay); err == nil {
+			t.Fatalf("out-of-bounds development mock delay accepted: %v", delay)
+		}
 	}
 }
 
@@ -103,7 +123,7 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 		"verifyTimeoutMillis":1000,
 		"signers":[{"keyId":"models","publicKey":%q}]
 	}`, cacheDir, base64.StdEncoding.EncodeToString(publicKey)))
-	runtimes, err := configuredRuntimes(runtimePath, trustPath, 0)
+	runtimes, err := configuredRuntimes(runtimePath, trustPath, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +147,7 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 	)
 	missingPath := writeWorkerPrivate(t, "missing-runtime.json", missingRuntime)
 	if _, err := configuredRuntimes(
-		missingPath, trustPath, 0,
+		missingPath, trustPath, false, 0,
 	); err == nil || strings.Contains(err.Error(), cacheDir) {
 		t.Fatalf("missing approved digest error=%v", err)
 	}
@@ -206,7 +226,9 @@ func TestConfiguredRuntimesActivatesRecoversAndCleansApprovedOllamaModel(
 
 	start := func() *runtimeResources {
 		t.Helper()
-		resources, err := configuredRuntimes(runtimePath, trustPath, 0)
+		resources, err := configuredRuntimes(
+			runtimePath, trustPath, false, 0,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -270,7 +292,9 @@ func TestConfiguredRuntimesRequiresTrustAndSeparateActivationState(t *testing.T)
 			"activation":{"slotId":"primary"}
 		}]
 	}`, stateDir, digest))
-	if _, err := configuredRuntimes(runtimePath, "", 0); err == nil {
+	if _, err := configuredRuntimes(
+		runtimePath, "", false, 0,
+	); err == nil {
 		t.Fatal("activation without signed model trust succeeded")
 	}
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
@@ -284,7 +308,7 @@ func TestConfiguredRuntimesRequiresTrustAndSeparateActivationState(t *testing.T)
 		"signers":[{"keyId":"models","publicKey":%q}]
 	}`, cacheDir, base64.StdEncoding.EncodeToString(publicKey)))
 	if _, err := configuredRuntimes(
-		runtimePath, trustPath, 0,
+		runtimePath, trustPath, false, 0,
 	); err == nil {
 		t.Fatal("overlapping model cache and activation state succeeded")
 	}

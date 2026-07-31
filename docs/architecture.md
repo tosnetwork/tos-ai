@@ -11,7 +11,8 @@ tos-edge (future wallet/payment/auth boundary)
 tos-ai-worker
        |
        +-- private administrator runtime configuration
-       +-- bounded connection and RPC body limits
+       +-- exclusive private socket ownership and bounded connections
+       +-- bounded RPC body limits
        +-- idempotent quote/invocation replay stores
        +-- authoritative local admission reservations
        +-- bounded priority scheduler
@@ -249,9 +250,11 @@ current-user-owned, non-symlink regular file. Unknown fields, duplicate keys,
 excessive nesting, multiple JSON values, more than 64 adapters, and insecure
 file modes fail startup. An OpenAI-compatible API key may only be loaded from
 a separate private file; credentials and endpoints are not task-controlled.
-If the flag is omitted, the worker retains its deterministic development mock.
-If the flag is present, the mock is not mixed into the configured production
-capabilities. Adapter connection pools are closed once after scheduler drain.
+The worker requires this flag unless `-dev-mock` explicitly selects the
+deterministic development adapter. Missing mode selection fails startup;
+development mock flags cannot be mixed with runtime or model-trust
+configuration. Adapter connection pools are closed once after scheduler
+drain.
 
 Optional `-model-trust-config` is accepted only with `-runtime-config`. It is
 capped at 64 KiB and uses the same private-file, duplicate-key, nesting, and
@@ -276,11 +279,25 @@ limits, and explicitly authorized GPU/network access. Policy rejects
 privileged mode, host mounts, writable root, runtime sockets, root identity,
 unpinned images, and resource overflow.
 
+## Process ownership
+
+The Unix listener creates a per-socket, current-user, mode-0600 advisory lock
+inside an exact mode-0700 directory before inspecting the socket path. A
+second compliant process therefore cannot unlink an active worker. For a
+socket left by a version without the ownership lock, startup performs one
+bounded local stream connection probe: a successful connection proves the
+listener is active, `ECONNREFUSED` permits stale-socket removal, and every
+other outcome fails closed. Listener cleanup and lock release execute exactly
+once, so a repeated or concurrent close cannot remove a successor socket.
+The lock is local operational coordination, not a distributed lock or a
+defense against a hostile process with the same Unix identity.
+
 ## Implemented versus planned
 
 Implemented:
 
-- private bounded Unix-socket worker and diagnostic CLI
+- exclusively owned private bounded Unix-socket worker and diagnostic CLI
+- fail-closed runtime selection with an explicit development mock mode
 - readiness/draining health summary without secret data
 - bounded replay, scheduler, local admission, and owner reserve
 - graceful cancellation and shutdown resource cleanup

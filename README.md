@@ -9,8 +9,9 @@ daemon, public shell, or wallet process.
 
 The Go 1.24 module currently contains:
 
-- `tos-ai-worker`, a private ConnectRPC worker served only on a mode-0600 Unix
-  socket, with bounded connections and no public listener;
+- `tos-ai-worker`, a private ConnectRPC worker served only on an exclusively
+  owned mode-0600 Unix socket, with bounded connections and no public
+  listener;
 - `tos-ai-cli`, with `health`, `capabilities`, `quote`, `invoke`, and `cancel`
   diagnostics;
 - CPU, RAM, OS, and architecture discovery plus NVIDIA/go-nvml GPU, VRAM,
@@ -76,6 +77,7 @@ workspace with `go work init ./tos-protocol ./tos-ai`.
 
 ```sh
 go run ./cmd/tos-ai-worker \
+  -dev-mock \
   -socket /run/user/$(id -u)/tos-ai/worker.sock
 
 go run ./cmd/tos-ai-cli \
@@ -91,12 +93,14 @@ go run ./cmd/tos-ai-cli \
   -socket /run/user/$(id -u)/tos-ai/worker.sock invoke hello
 ```
 
-Without `-runtime-config`, the worker enables only the deterministic
-development adapter. Passing `-runtime-config /absolute/private/runtime.json`
-replaces the mock with the explicitly configured Ollama and OpenAI-compatible
-adapters. An invocation payload can never select or override an endpoint.
-Model import similarly accepts a bounded reader and an approved signed
-manifest, not an arbitrary Internet URL.
+The worker fails closed unless exactly one runtime mode is selected:
+`-runtime-config /absolute/private/runtime.json` for configured Ollama and
+OpenAI-compatible adapters, or explicit `-dev-mock` for the deterministic
+development adapter. `-dev-mock`, `-mock-delay`, production runtime
+configuration, and model trust cannot be ambiguously mixed. An invocation
+payload can never select or override an endpoint. Model import similarly
+accepts a bounded reader and an approved signed manifest, not an arbitrary
+Internet URL.
 
 Production adapters may additionally be constrained to the signed local model
 cache:
@@ -198,6 +202,11 @@ TTL; it creates no periodic watcher.
   admitted until a bounded preflight succeeds again.
 - Runtime adapter connection pools are closed exactly once during graceful
   shutdown.
+- The private socket name has an adjacent current-user mode-0600 advisory lock.
+  A second worker cannot unlink or replace a live socket. A pre-lock legacy
+  socket is removed only when a bounded local connection probe proves it is
+  stale; ambiguous probe errors fail closed. Repeated or concurrent listener
+  close calls cannot remove a successor's socket.
 - On Linux, model caches and persistent activation-state directories use
   non-blocking advisory `flock` ownership on private, current-user, mode-0600
   regular lock files. Locks survive for the manager/controller lifetime,

@@ -41,6 +41,7 @@ func run() error {
 	var workers int
 	var maxQueue int
 	var maxConnections int
+	var devMock bool
 	var mockDelay time.Duration
 	var runtimeConfigPath string
 	var modelTrustConfigPath string
@@ -48,6 +49,7 @@ func run() error {
 	flag.IntVar(&workers, "workers", 1, "concurrent runtime workers")
 	flag.IntVar(&maxQueue, "max-queue", 64, "maximum queued work items")
 	flag.IntVar(&maxConnections, "max-connections", 128, "maximum private socket connections")
+	flag.BoolVar(&devMock, "dev-mock", false, "explicitly enable the development-only mock runtime")
 	flag.DurationVar(&mockDelay, "mock-delay", 0, "development mock execution delay")
 	flag.StringVar(&runtimeConfigPath, "runtime-config", "", "private administrator runtime configuration")
 	flag.StringVar(
@@ -73,7 +75,7 @@ func run() error {
 		return err
 	}
 	runtimes, err := configuredRuntimes(
-		runtimeConfigPath, modelTrustConfigPath, mockDelay,
+		runtimeConfigPath, modelTrustConfigPath, devMock, mockDelay,
 	)
 	if err != nil {
 		return err
@@ -171,21 +173,32 @@ type runtimeResources struct {
 func configuredRuntimes(
 	configPath string,
 	modelTrustPath string,
+	devMock bool,
 	mockDelay time.Duration,
 ) (*runtimeResources, error) {
 	if mockDelay < 0 || mockDelay > time.Minute {
 		return nil, fmt.Errorf("mock delay exceeds hard limits")
 	}
-	if configPath == "" {
-		if modelTrustPath != "" {
-			return nil, fmt.Errorf("model trust requires a runtime configuration")
+	if devMock {
+		if configPath != "" || modelTrustPath != "" {
+			return nil, fmt.Errorf(
+				"development mock cannot be mixed with production configuration",
+			)
 		}
 		return &runtimeResources{
 			adapters: []airuntime.Adapter{mock.New(mockDelay)},
 		}, nil
 	}
 	if mockDelay != 0 {
-		return nil, fmt.Errorf("mock delay cannot be used with a runtime configuration")
+		return nil, fmt.Errorf("mock delay requires explicit development mock")
+	}
+	if configPath == "" {
+		if modelTrustPath != "" {
+			return nil, fmt.Errorf("model trust requires a runtime configuration")
+		}
+		return nil, fmt.Errorf(
+			"runtime configuration is required unless development mock is explicit",
+		)
 	}
 	configuration, err := operatorconfig.Load(configPath)
 	if err != nil {
