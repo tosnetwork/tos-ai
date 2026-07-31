@@ -5,6 +5,8 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,6 +41,9 @@ type Config struct {
 	Timeout                time.Duration
 	ConnectTimeout         time.Duration
 	AllowedPlaintextCIDRs  []string
+	RootCAs                *x509.CertPool
+	ClientCertificate      *tls.Certificate
+	TLSServerName          string
 	Admission              admission.Resources
 }
 
@@ -83,6 +88,8 @@ func New(config Config) (*Adapter, error) {
 		BaseURL: config.BaseURL, Timeout: config.Timeout, ConnectTimeout: config.ConnectTimeout,
 		MaxConnections: config.MaxConnections, MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
 		AllowedPlaintextCIDRs: config.AllowedPlaintextCIDRs,
+		RootCAs:               config.RootCAs, ClientCertificate: config.ClientCertificate,
+		TLSServerName: config.TLSServerName,
 	})
 	if err != nil {
 		return nil, err

@@ -62,9 +62,10 @@ The Go 1.24 module currently contains:
   mock mode and bounds scheduler capacity, socket connections, replay state,
   deadlines, runtime health work, admission resources, and owner reserve;
 - bounded HTTP transports with administrator-selected endpoints, HTTPS for
-  remote endpoints, whole-range validation for explicit local-CIDR plaintext
-  exceptions, loopback-pinned `localhost` resolution, deadline propagation,
-  and stable redacted runtime error categories;
+  remote endpoints, strict private-CA and optional mTLS identities, whole-range
+  validation for explicit local-CIDR plaintext exceptions, loopback-pinned
+  `localhost` resolution, deadline propagation, and stable redacted runtime
+  error categories;
 - a fail-closed container execution policy and narrow future containerd client
   contract. No containerd backend is enabled;
 - Ed25519-signed update manifest verification, SHA-256 artifact verification,
@@ -225,12 +226,14 @@ concurrent waiters are capped at 256. Periodic full refresh uses at most 16
 workers across at most 64 fixed adapter slots; it does not create an
 unbounded watcher per request or retry.
 
-The runtime configuration must be a regular, non-symlink file owned by the
-worker user with no group or other permissions. It is capped at 1 MiB and 64
-adapters. OpenAI-compatible credentials are referenced through `apiKeyFile`;
-that file is subject to the same ownership and permission checks and is capped
-at 8 KiB. Credentials must contain only printable non-space ASCII bytes, with
-no trailing newline. Inline credentials are not accepted. See
+The current runtime configuration schema is version 2; version 1 remains
+accepted when no `tls` object is present. The configuration must be a regular,
+non-symlink file owned by the worker user with no group or other permissions.
+It is capped at 1 MiB and 64 adapters. OpenAI-compatible credentials are
+referenced through `apiKeyFile`; that file is subject to the same ownership and
+permission checks and is capped at 8 KiB. Credentials must contain only
+printable non-space ASCII bytes, with no trailing newline. Inline credentials
+are not accepted. See
 [docs/runtime-config.example.json](docs/runtime-config.example.json).
 
 Omitted adapter bounds default to 1 MiB input/output, 8 MiB encoded
@@ -250,7 +253,19 @@ prefix that crosses into public address space fails startup. `localhost`
 resolution accepts at most 16 addresses, requires every result to be
 loopback, binds the configured port, and includes resolution plus connection
 attempts in the configured connect timeout. Every runtime transport also pins
-dials to the configured host and port; redirects remain disabled.
+dials to the configured host and port; redirects remain disabled. HTTPS uses a
+TLS 1.2 minimum and normal hostname verification. Version 2 can replace system
+trust with up to 64 private CA certificates and can present one client identity
+with a chain of at most eight certificates. The CA and client-certificate files
+are each capped at 1 MiB; the client-key file is capped at 256 KiB. These files
+use the same private regular-file policy as credentials, reject duplicate or
+extraneous PEM material, and must be rotated by restarting the worker. A
+restricted DNS `serverName` override supports an IP-pinned endpoint whose
+certificate uses an administrator-selected internal name. TLS identity fields
+on a plaintext endpoint and partial client identities fail worker startup. The
+same TLS policy is used for Ollama activation and request traffic. A runtime
+client key authenticates only to the configured model runtime; it is not and
+must never be a wallet owner key.
 
 Development mock defaults are one concurrent task, 64 queued tasks, 128
 private socket connections, 1 MiB output per request, a 15-minute execution

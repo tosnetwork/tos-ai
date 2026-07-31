@@ -5,6 +5,7 @@ package runtimehttp
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -16,11 +17,15 @@ import (
 )
 
 const (
-	MaxConnectionsHard = 256
-	MaxHeaderBytesHard = 64 << 10
-	MaxEndpointBytes   = 2048
-	MaxPlaintextCIDRs  = 16
-	MaxResolvedIPsHard = 16
+	MaxConnectionsHard    = 256
+	MaxHeaderBytesHard    = 64 << 10
+	MaxEndpointBytes      = 2048
+	MaxPlaintextCIDRs     = 16
+	MaxResolvedIPsHard    = 16
+	MaxTLSRootsHard       = 64
+	MaxTLSChainHard       = 8
+	MaxTLSMaterialBytes   = 1 << 20
+	MaxTLSServerNameBytes = 253
 )
 
 var localPlaintextNetworks = [...]netip.Prefix{
@@ -41,6 +46,9 @@ type Config struct {
 	MaxConnections         int
 	MaxResponseHeaderBytes int64
 	AllowedPlaintextCIDRs  []string
+	RootCAs                *x509.CertPool
+	ClientCertificate      *tls.Certificate
+	TLSServerName          string
 }
 
 func Build(config Config) (*url.URL, *http.Client, error) {
@@ -91,6 +99,10 @@ func build(
 	if err != nil {
 		return nil, nil, err
 	}
+	tlsConfig, err := boundedTLSConfig(config, baseURL.Scheme)
+	if err != nil {
+		return nil, nil, err
+	}
 	port := baseURL.Port()
 	if port == "" {
 		port = "443"
@@ -127,7 +139,7 @@ func build(
 		ResponseHeaderTimeout:  config.Timeout,
 		ExpectContinueTimeout:  time.Second,
 		MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
-		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:        tlsConfig,
 	}
 	client := &http.Client{
 		Timeout:   config.Timeout,
@@ -137,6 +149,117 @@ func build(
 		},
 	}
 	return baseURL, client, nil
+}
+
+func boundedTLSConfig(config Config, scheme string) (*tls.Config, error) {
+	hasTLSAuthority := config.RootCAs != nil ||
+		config.ClientCertificate != nil || config.TLSServerName != ""
+	if scheme != "https" {
+		if hasTLSAuthority {
+			return nil, errors.New("TLS identity requires an HTTPS runtime endpoint")
+		}
+		return &tls.Config{MinVersion: tls.VersionTLS12}, nil
+	}
+	result := &tls.Config{ // #nosec G402 -- TLS 1.2 is the explicit floor.
+		MinVersion: tls.VersionTLS12,
+		ServerName: config.TLSServerName,
+	}
+	if config.TLSServerName != "" &&
+		!validTLSServerName(config.TLSServerName) {
+		return nil, errors.New("invalid runtime TLS server name")
+	}
+	if config.RootCAs != nil {
+		subjects := config.RootCAs.Subjects()
+		total := 0
+		if len(subjects) == 0 || len(subjects) > MaxTLSRootsHard {
+			return nil, errors.New("runtime TLS roots exceed hard limits")
+		}
+		for _, subject := range subjects {
+			if len(subject) == 0 || total > MaxTLSMaterialBytes-len(subject) {
+				return nil, errors.New("runtime TLS roots exceed hard limits")
+			}
+			total += len(subject)
+		}
+		result.RootCAs = config.RootCAs.Clone()
+	}
+	if config.ClientCertificate != nil {
+		certificate, err := cloneClientCertificate(*config.ClientCertificate)
+		if err != nil {
+			return nil, err
+		}
+		result.Certificates = []tls.Certificate{certificate}
+	}
+	return result, nil
+}
+
+func cloneClientCertificate(source tls.Certificate) (tls.Certificate, error) {
+	if len(source.Certificate) == 0 ||
+		len(source.Certificate) > MaxTLSChainHard || source.PrivateKey == nil ||
+		len(source.OCSPStaple) != 0 ||
+		len(source.SignedCertificateTimestamps) != 0 ||
+		len(source.SupportedSignatureAlgorithms) > MaxTLSChainHard*4 {
+		return tls.Certificate{}, errors.New(
+			"runtime TLS client certificate exceeds hard limits",
+		)
+	}
+	result := source
+	result.Certificate = make([][]byte, len(source.Certificate))
+	total := 0
+	for index, certificate := range source.Certificate {
+		if len(certificate) == 0 ||
+			total > MaxTLSMaterialBytes-len(certificate) {
+			return tls.Certificate{}, errors.New(
+				"runtime TLS client certificate exceeds hard limits",
+			)
+		}
+		total += len(certificate)
+		result.Certificate[index] = append([]byte(nil), certificate...)
+	}
+	result.OCSPStaple = append([]byte(nil), source.OCSPStaple...)
+	result.SignedCertificateTimestamps = cloneByteSlices(
+		source.SignedCertificateTimestamps,
+	)
+	result.SupportedSignatureAlgorithms = append(
+		[]tls.SignatureScheme(nil), source.SupportedSignatureAlgorithms...,
+	)
+	// The leaf is derived from the copied DER when needed. Do not retain a
+	// caller-owned mutable parsed certificate pointer.
+	result.Leaf = nil
+	return result, nil
+}
+
+func cloneByteSlices(source [][]byte) [][]byte {
+	if source == nil {
+		return nil
+	}
+	result := make([][]byte, len(source))
+	for index := range source {
+		result[index] = append([]byte(nil), source[index]...)
+	}
+	return result
+}
+
+func validTLSServerName(value string) bool {
+	if len(value) == 0 || len(value) > MaxTLSServerNameBytes ||
+		strings.HasSuffix(value, ".") || net.ParseIP(value) != nil {
+		return false
+	}
+	labels := strings.Split(value, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' ||
+			label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if character >= 'a' && character <= 'z' ||
+				character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || character == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 type authorityDialer struct {

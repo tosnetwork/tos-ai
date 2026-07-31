@@ -5,7 +5,11 @@ package operatorconfig
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/runtimehttp"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/ollama"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/openai"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
@@ -24,7 +29,8 @@ import (
 )
 
 const (
-	Version                  = 1
+	Version                  = 2
+	previousVersion          = 1
 	MaxConfigBytes           = int64(1 << 20)
 	MaxAdapters              = 64
 	MaxJSONDepth             = 16
@@ -49,6 +55,7 @@ const (
 	defaultActivationTimeout = int64((5 * time.Minute) / time.Millisecond)
 	defaultCleanupTimeout    = int64((30 * time.Second) / time.Millisecond)
 	defaultMaxModelBytes     = uint64(64 << 30)
+	maxTLSPrivateKeyBytes    = int64(256 << 10)
 )
 
 type fileConfig struct {
@@ -64,23 +71,37 @@ type activationConfig struct {
 }
 
 type adapterConfig struct {
-	Type                   string         `json:"type"`
-	BaseURL                string         `json:"baseUrl"`
-	APIKeyFile             string         `json:"apiKeyFile,omitempty"`
-	Model                  string         `json:"model"`
-	ModelDigest            string         `json:"modelDigest"`
-	RuntimeRevision        string         `json:"runtimeRevision,omitempty"`
-	MaxInputBytes          uint64         `json:"maxInputBytes,omitempty"`
-	MaxOutputBytes         uint64         `json:"maxOutputBytes,omitempty"`
-	MaxRequestBytes        uint64         `json:"maxRequestBytes,omitempty"`
-	MaxResponseBytes       uint64         `json:"maxResponseBytes,omitempty"`
-	MaxConnections         int            `json:"maxConnections,omitempty"`
-	MaxResponseHeaderBytes int64          `json:"maxResponseHeaderBytes,omitempty"`
-	TimeoutMillis          int64          `json:"timeoutMillis,omitempty"`
-	ConnectTimeoutMillis   int64          `json:"connectTimeoutMillis,omitempty"`
-	AllowedPlaintextCIDRs  []string       `json:"allowedPlaintextCidrs,omitempty"`
-	Admission              resourceConfig `json:"admission,omitempty"`
-	Activation             *slotConfig    `json:"activation,omitempty"`
+	Type                   string          `json:"type"`
+	BaseURL                string          `json:"baseUrl"`
+	APIKeyFile             string          `json:"apiKeyFile,omitempty"`
+	Model                  string          `json:"model"`
+	ModelDigest            string          `json:"modelDigest"`
+	RuntimeRevision        string          `json:"runtimeRevision,omitempty"`
+	MaxInputBytes          uint64          `json:"maxInputBytes,omitempty"`
+	MaxOutputBytes         uint64          `json:"maxOutputBytes,omitempty"`
+	MaxRequestBytes        uint64          `json:"maxRequestBytes,omitempty"`
+	MaxResponseBytes       uint64          `json:"maxResponseBytes,omitempty"`
+	MaxConnections         int             `json:"maxConnections,omitempty"`
+	MaxResponseHeaderBytes int64           `json:"maxResponseHeaderBytes,omitempty"`
+	TimeoutMillis          int64           `json:"timeoutMillis,omitempty"`
+	ConnectTimeoutMillis   int64           `json:"connectTimeoutMillis,omitempty"`
+	AllowedPlaintextCIDRs  []string        `json:"allowedPlaintextCidrs,omitempty"`
+	TLS                    *runtimeTLSFile `json:"tls,omitempty"`
+	Admission              resourceConfig  `json:"admission,omitempty"`
+	Activation             *slotConfig     `json:"activation,omitempty"`
+}
+
+type runtimeTLSFile struct {
+	CAFile         string `json:"caFile,omitempty"`
+	ClientCertFile string `json:"clientCertFile,omitempty"`
+	ClientKeyFile  string `json:"clientKeyFile,omitempty"`
+	ServerName     string `json:"serverName,omitempty"`
+}
+
+type runtimeTLSMaterial struct {
+	rootCAs           *x509.CertPool
+	clientCertificate *tls.Certificate
+	serverName        string
 }
 
 type slotConfig struct {
@@ -145,7 +166,8 @@ func Load(path string) (Configuration, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Configuration{}, errors.New("invalid operator runtime configuration")
 	}
-	if config.Version != Version || len(config.Adapters) == 0 ||
+	if (config.Version != Version && config.Version != previousVersion) ||
+		len(config.Adapters) == 0 ||
 		len(config.Adapters) > MaxAdapters {
 		return Configuration{},
 			errors.New("operator runtime configuration exceeds hard limits")
@@ -161,6 +183,13 @@ func Load(path string) (Configuration, error) {
 	seenDigests := make(map[string]struct{}, len(config.Adapters))
 	totalConnections := 0
 	for index, value := range config.Adapters {
+		if config.Version == previousVersion && value.TLS != nil {
+			closeAdapters(adapters)
+			closeBackendClosers(closers)
+			return Configuration{}, errors.New(
+				"runtime TLS identity requires configuration version 2",
+			)
+		}
 		applyDefaults(&value)
 		connections := value.MaxConnections
 		if value.Activation != nil {
@@ -270,6 +299,10 @@ func buildAdapter(
 	timeout := time.Duration(config.TimeoutMillis) * time.Millisecond
 	connectTimeout := time.Duration(config.ConnectTimeoutMillis) * time.Millisecond
 	executionTime := time.Duration(config.Admission.ExecutionMillis) * time.Millisecond
+	tlsMaterial, err := loadRuntimeTLS(config.TLS)
+	if err != nil {
+		return nil, nil, errors.New("invalid runtime TLS identity")
+	}
 	resources := admission.Resources{
 		RAMBytes: config.Admission.RAMBytes, VRAMBytes: config.Admission.VRAMBytes,
 		KVCacheBytes: config.Admission.KVCacheBytes, ContextTokens: config.Admission.ContextTokens,
@@ -316,6 +349,9 @@ func buildAdapter(
 			MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
 			Timeout:                timeout, ConnectTimeout: connectTimeout,
 			AllowedPlaintextCIDRs: config.AllowedPlaintextCIDRs, Admission: resources,
+			RootCAs:           tlsMaterial.rootCAs,
+			ClientCertificate: tlsMaterial.clientCertificate,
+			TLSServerName:     tlsMaterial.serverName,
 		})
 		if err != nil || config.Activation == nil {
 			return adapter, nil, err
@@ -334,6 +370,9 @@ func buildAdapter(
 			MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
 			MaxResponseBytes:       activationollama.MaxResponseBytesHard,
 			AllowedPlaintextCIDRs:  config.AllowedPlaintextCIDRs,
+			RootCAs:                tlsMaterial.rootCAs,
+			ClientCertificate:      tlsMaterial.clientCertificate,
+			TLSServerName:          tlsMaterial.serverName,
 		})
 		if err != nil {
 			_ = adapter.Close()
@@ -377,11 +416,154 @@ func buildAdapter(
 			MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
 			Timeout:                timeout, ConnectTimeout: connectTimeout,
 			AllowedPlaintextCIDRs: config.AllowedPlaintextCIDRs, Admission: resources,
+			RootCAs:           tlsMaterial.rootCAs,
+			ClientCertificate: tlsMaterial.clientCertificate,
+			TLSServerName:     tlsMaterial.serverName,
 		})
 		return adapter, nil, err
 	default:
 		return nil, nil, errors.New("unsupported runtime adapter")
 	}
+}
+
+func loadRuntimeTLS(config *runtimeTLSFile) (runtimeTLSMaterial, error) {
+	if config == nil {
+		return runtimeTLSMaterial{}, nil
+	}
+	hasClientCert := config.ClientCertFile != ""
+	hasClientKey := config.ClientKeyFile != ""
+	if (config.CAFile == "" && !hasClientCert && !hasClientKey &&
+		config.ServerName == "") || hasClientCert != hasClientKey {
+		return runtimeTLSMaterial{}, errors.New("incomplete runtime TLS identity")
+	}
+	result := runtimeTLSMaterial{serverName: config.ServerName}
+	if config.CAFile != "" {
+		data, err := readPrivateFile(
+			config.CAFile, int64(runtimehttp.MaxTLSMaterialBytes), false,
+		)
+		if err != nil {
+			return runtimeTLSMaterial{}, errors.New("load runtime TLS roots")
+		}
+		roots, parseErr := parseRootCertificates(data)
+		clear(data)
+		if parseErr != nil {
+			return runtimeTLSMaterial{}, errors.New("invalid runtime TLS roots")
+		}
+		result.rootCAs = roots
+	}
+	if hasClientCert {
+		certificatePEM, err := readPrivateFile(
+			config.ClientCertFile,
+			int64(runtimehttp.MaxTLSMaterialBytes), false,
+		)
+		if err != nil {
+			return runtimeTLSMaterial{}, errors.New(
+				"load runtime TLS client certificate",
+			)
+		}
+		defer clear(certificatePEM)
+		if err := validateClientCertificatePEM(certificatePEM); err != nil {
+			return runtimeTLSMaterial{}, err
+		}
+		keyPEM, err := readPrivateFile(
+			config.ClientKeyFile, maxTLSPrivateKeyBytes, false,
+		)
+		if err != nil {
+			return runtimeTLSMaterial{}, errors.New(
+				"load runtime TLS client key",
+			)
+		}
+		defer clear(keyPEM)
+		if err := validatePrivateKeyPEM(keyPEM); err != nil {
+			return runtimeTLSMaterial{}, err
+		}
+		certificate, err := tls.X509KeyPair(certificatePEM, keyPEM)
+		if err != nil {
+			return runtimeTLSMaterial{}, errors.New(
+				"invalid runtime TLS client identity",
+			)
+		}
+		result.clientCertificate = &certificate
+	}
+	return result, nil
+}
+
+func parseRootCertificates(data []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	seen := make(map[[sha256.Size]byte]struct{}, runtimehttp.MaxTLSRootsHard)
+	remaining := data
+	for count := 0; ; count++ {
+		remaining = bytes.TrimSpace(remaining)
+		if len(remaining) == 0 {
+			if count == 0 {
+				return nil, errors.New("empty runtime TLS roots")
+			}
+			return pool, nil
+		}
+		if count >= runtimehttp.MaxTLSRootsHard ||
+			!bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----")) {
+			return nil, errors.New("runtime TLS roots exceed hard limits")
+		}
+		block, rest := pem.Decode(remaining)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, errors.New("invalid runtime TLS root PEM")
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !certificate.BasicConstraintsValid || !certificate.IsCA {
+			return nil, errors.New("invalid runtime TLS root certificate")
+		}
+		digest := sha256.Sum256(certificate.Raw)
+		if _, duplicate := seen[digest]; duplicate {
+			return nil, errors.New("duplicate runtime TLS root certificate")
+		}
+		seen[digest] = struct{}{}
+		pool.AddCert(certificate)
+		remaining = rest
+	}
+}
+
+func validateClientCertificatePEM(data []byte) error {
+	remaining := data
+	for count := 0; ; count++ {
+		remaining = bytes.TrimSpace(remaining)
+		if len(remaining) == 0 {
+			if count == 0 {
+				return errors.New("empty runtime TLS client certificate")
+			}
+			return nil
+		}
+		if count >= runtimehttp.MaxTLSChainHard ||
+			!bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----")) {
+			return errors.New("runtime TLS client chain exceeds hard limits")
+		}
+		block, rest := pem.Decode(remaining)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return errors.New("invalid runtime TLS client certificate PEM")
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return errors.New("invalid runtime TLS client certificate")
+		}
+		remaining = rest
+	}
+}
+
+func validatePrivateKeyPEM(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if !bytes.HasPrefix(trimmed, []byte("-----BEGIN ")) {
+		return errors.New("invalid runtime TLS client key PEM")
+	}
+	block, rest := pem.Decode(trimmed)
+	if block == nil {
+		return errors.New("invalid runtime TLS client key PEM")
+	}
+	defer clear(block.Bytes)
+	validType := block.Type == "PRIVATE KEY" ||
+		block.Type == "RSA PRIVATE KEY" || block.Type == "EC PRIVATE KEY"
+	if len(block.Headers) != 0 || !validType || len(block.Bytes) == 0 ||
+		len(bytes.TrimSpace(rest)) != 0 {
+		return errors.New("invalid runtime TLS client key PEM")
+	}
+	return nil
 }
 
 func applyActivationDefaults(config *activationConfig) error {

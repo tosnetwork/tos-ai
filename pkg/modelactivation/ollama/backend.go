@@ -6,6 +6,8 @@ package ollama
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -47,6 +49,9 @@ type Config struct {
 	MaxResponseHeaderBytes int64
 	MaxResponseBytes       uint64
 	AllowedPlaintextCIDRs  []string
+	RootCAs                *x509.CertPool
+	ClientCertificate      *tls.Certificate
+	TLSServerName          string
 }
 
 type Backend struct {
@@ -85,6 +90,8 @@ func New(config Config) (*Backend, error) {
 		MaxConnections:         config.MaxConnections,
 		MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
 		AllowedPlaintextCIDRs:  config.AllowedPlaintextCIDRs,
+		RootCAs:                config.RootCAs, ClientCertificate: config.ClientCertificate,
+		TLSServerName: config.TLSServerName,
 	})
 	if err != nil {
 		return nil, errors.New("invalid Ollama activation endpoint")

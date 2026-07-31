@@ -307,13 +307,13 @@ evidence level.
 
 HTTP adapters cap request/response/header sizes, connections, and timeouts;
 disable redirects; propagate context cancellation; require HTTPS remotely;
-and allow HTTP only for loopback or an explicitly configured private/local
-CIDR. Every plaintext CIDR must be wholly contained inside a recognized
-loopback, RFC 1918 private, link-local, or IPv6 ULA range; validating only the
-network address is insufficient because a shorter prefix could also cover
-public addresses. Invalid CIDRs fail startup even when attached to an HTTPS
-adapter. Returned errors are categorized without endpoint, filesystem, or
-credential details.
+support bounded private roots and optional mutual TLS; and allow HTTP only for
+loopback or an explicitly configured private/local CIDR. Every plaintext CIDR
+must be wholly contained inside a recognized loopback, RFC 1918 private,
+link-local, or IPv6 ULA range; validating only the network address is
+insufficient because a shorter prefix could also cover public addresses.
+Invalid CIDRs fail startup even when attached to an HTTPS adapter. Returned
+errors are categorized without endpoint, filesystem, or credential details.
 
 Plaintext `localhost` is resolved inside the connection timeout through a
 bounded path accepting at most 16 answers. Every answer must be loopback
@@ -325,6 +325,21 @@ hosts must be literal addresses, so they do not acquire a DNS rebinding path.
 All runtime transports additionally reject a dial whose host or port differs
 from the administrator-configured endpoint, including HTTPS transports; the
 HTTP client is not a general-purpose egress client.
+
+Runtime configuration version 2 can replace the system trust store with an
+administrator-owned CA bundle, present one client certificate identity, and
+set a restricted DNS verification name for an IP-pinned endpoint. Version 1
+remains compatible only without a TLS identity. TLS has a 1.2 minimum, never
+sets `InsecureSkipVerify`, and rejects TLS material on plaintext endpoints.
+Root bundles contain at most 64 unique CA certificates; client chains contain
+at most eight certificates; CA and certificate files are capped at 1 MiB and
+private keys at 256 KiB. All files are private, regular, non-symlink files owned
+by the worker user. PEM parsing rejects non-certificate roots, non-CA roots,
+duplicates, headers, extra blocks, partial identities, and mismatched keypairs.
+Ollama activation and inference receive the same immutable TLS material, so a
+model-management request cannot bypass the adapter transport boundary. TLS
+keys authenticate the runtime connection only and are unrelated to TOS wallet
+owner keys. Identity rotation currently requires a worker restart.
 
 A separately managed Ollama model preflight reads `/api/tags`, accepts at most
 1 MiB and 256 entries, and requires one exact model-name and SHA-256 digest
@@ -431,6 +446,8 @@ Implemented:
 - bounded runtime preflight, readiness filtering, and evidence-preserving
   model binding, with active bounded health refresh and lifecycle cancellation
 - private bounded operator configuration and production adapter wiring
+- bounded runtime private-CA trust and optional mTLS for inference, preflight,
+  and Ollama activation, with strict private-file and PEM validation
 - mandatory private production terminal policy with observed RAM/free-VRAM
   startup validation and a single resource authority
 - signed bounded model-manager and update-verification foundations

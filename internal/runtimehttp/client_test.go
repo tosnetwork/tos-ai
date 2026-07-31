@@ -2,7 +2,14 @@ package runtimehttp
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +63,204 @@ func TestBuildRejectsInvalidEndpointPorts(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		client.CloseIdleConnections()
+	}
+}
+
+func TestBuildUsesPrivateRootsAndMutualTLS(t *testing.T) {
+	clientCertificate, clientRoot := selfSignedClientCertificate(t)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.TLS == nil || len(request.TLS.PeerCertificates) != 1 {
+			t.Error("runtime did not receive the configured client identity")
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	server.TLS = &tls.Config{ // #nosec G402 -- test server policy.
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  clientRoot,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	serverRoots := x509.NewCertPool()
+	serverRoots.AddCert(server.Certificate())
+	config := testConfig(server.URL)
+	config.RootCAs = serverRoots
+	config.ClientCertificate = &clientCertificate
+	_, client, err := Build(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.TLSClientConfig == nil ||
+		transport.TLSClientConfig.MinVersion != tls.VersionTLS12 ||
+		transport.TLSClientConfig.InsecureSkipVerify ||
+		transport.TLSClientConfig.RootCAs == serverRoots ||
+		len(transport.TLSClientConfig.Certificates) != 1 {
+		t.Fatal("runtime client did not enforce an isolated bounded TLS policy")
+	}
+	response, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+
+	config.ClientCertificate = nil
+	_, clientWithoutIdentity, err := Build(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientWithoutIdentity.CloseIdleConnections()
+	if response, err := clientWithoutIdentity.Get(server.URL); err == nil {
+		response.Body.Close()
+		t.Fatal("mTLS runtime accepted a client without an identity")
+	}
+}
+
+func TestBuildRejectsUnsafeOrAmbiguousTLSAuthority(t *testing.T) {
+	root := x509.NewCertPool()
+	root.AddCert(testCertificate(t, true, x509.ExtKeyUsageClientAuth))
+	tooManyRoots := x509.NewCertPool()
+	for range MaxTLSRootsHard + 1 {
+		tooManyRoots.AddCert(testCertificate(t, true, x509.ExtKeyUsageClientAuth))
+	}
+	clientCertificate, _ := selfSignedClientCertificate(t)
+	tests := []struct {
+		name   string
+		config func() Config
+	}{
+		{name: "plaintext roots", config: func() Config {
+			value := testConfig("http://localhost:11434")
+			value.RootCAs = root
+			return value
+		}},
+		{name: "plaintext client identity", config: func() Config {
+			value := testConfig("http://localhost:11434")
+			value.ClientCertificate = &clientCertificate
+			return value
+		}},
+		{name: "empty roots", config: func() Config {
+			value := testConfig("https://runtime.example")
+			value.RootCAs = x509.NewCertPool()
+			return value
+		}},
+		{name: "too many roots", config: func() Config {
+			value := testConfig("https://runtime.example")
+			value.RootCAs = tooManyRoots
+			return value
+		}},
+		{name: "invalid server name", config: func() Config {
+			value := testConfig("https://runtime.example")
+			value.TLSServerName = "*.runtime.example"
+			return value
+		}},
+		{name: "IP server name override", config: func() Config {
+			value := testConfig("https://runtime.example")
+			value.TLSServerName = "127.0.0.1"
+			return value
+		}},
+		{name: "missing private key", config: func() Config {
+			value := testConfig("https://runtime.example")
+			value.ClientCertificate = &tls.Certificate{
+				Certificate: clientCertificate.Certificate,
+			}
+			return value
+		}},
+		{name: "oversized chain", config: func() Config {
+			value := testConfig("https://runtime.example")
+			chain := make([][]byte, MaxTLSChainHard+1)
+			for index := range chain {
+				chain[index] = []byte{1}
+			}
+			value.ClientCertificate = &tls.Certificate{
+				Certificate: chain, PrivateKey: clientCertificate.PrivateKey,
+			}
+			return value
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, err := Build(test.config()); err == nil {
+				t.Fatal("unsafe runtime TLS authority accepted")
+			}
+		})
+	}
+}
+
+func selfSignedClientCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := testCertificateTemplate(t, false, x509.ExtKeyUsageClientAuth)
+	der, err := x509.CreateCertificate(
+		rand.Reader, template, template, &key.PublicKey, key,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	return tls.Certificate{
+		Certificate: [][]byte{der}, PrivateKey: key, Leaf: certificate,
+	}, roots
+}
+
+func testCertificate(t *testing.T, isCA bool, usage x509.ExtKeyUsage) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := testCertificateTemplate(t, isCA, usage)
+	der, err := x509.CreateCertificate(
+		rand.Reader, template, template, &key.PublicKey, key,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return certificate
+}
+
+func testCertificateTemplate(
+	t *testing.T,
+	isCA bool,
+	usage x509.ExtKeyUsage,
+) *x509.Certificate {
+	t.Helper()
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyUsage := x509.KeyUsageDigitalSignature
+	if isCA {
+		keyUsage |= x509.KeyUsageCertSign
+	}
+	return &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "tos-ai-runtime-test-" + serial.String()},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           []x509.ExtKeyUsage{usage},
+		IsCA:                  isCA,
+		BasicConstraintsValid: true,
 	}
 }
 

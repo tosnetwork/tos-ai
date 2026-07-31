@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "activation": {
     "stateDir": "/var/lib/tos-ai/activation",
     "operationTimeoutMillis": 300000,
