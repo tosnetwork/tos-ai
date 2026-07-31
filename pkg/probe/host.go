@@ -56,11 +56,10 @@ type ResourceHealthProvider interface {
 }
 
 func CollectHost() (Host, error) {
-	memory, err := totalMemory()
+	memory, cpus, err := effectiveResources()
 	if err != nil {
 		return Host{}, err
 	}
-	cpus := runtime.NumCPU()
 	if cpus > MaxLogicalCPUs {
 		cpus = MaxLogicalCPUs
 	}

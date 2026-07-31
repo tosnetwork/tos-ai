@@ -74,9 +74,15 @@ controller.
 
 The probe layer separates a small backend interface from NVIDIA/go-nvml, so CI
 uses fake devices and does not need a GPU. Host data includes OS,
-architecture, bounded logical CPU count, and RAM. NVIDIA data includes a
-bounded device list, device class, VRAM, driver, CUDA compute capability,
-temperature, and power state.
+architecture, bounded logical CPU count, and RAM. On Linux, CPU and RAM are
+effective process resources: the probe takes the minimum of host resources,
+process scheduler affinity, cgroup CPU quota/cpuset, and every applicable
+cgroup ancestor memory limit. Both cgroup v2 and the memory, CPU, and cpuset
+v1 controllers are supported. Membership files, mount metadata, scalar
+values, controller and mount counts, paths, CPU indices, and hierarchy depth
+are hard-bounded and ambiguous observations fail closed. Cgroup paths never
+leave the probe. NVIDIA data includes a bounded device list, device class,
+VRAM, driver, CUDA compute capability, temperature, and power state.
 
 Missing NVML, missing drivers, and zero devices are normal health states.
 Invalid counts and telemetry are omitted or marked degraded. Reports never
@@ -127,16 +133,19 @@ consumer work. This reservation is availability isolation, not caller
 authentication or hard real-time preemption.
 
 After NVML and host probing but before allocating runtime state or creating a
-listener, startup also limits configured RAM to 75 percent of observed host
-RAM and configured VRAM to the sum of currently observed free device memory.
-Missing GPUs therefore remain a normal CPU-only state but cannot satisfy a
-positive VRAM policy.
+listener, startup also limits configured RAM to 75 percent of observed
+effective RAM and configured VRAM to the sum of currently observed free
+device memory. In a Linux container or systemd cgroup, the effective RAM
+already includes all visible ancestor hard limits. Missing GPUs therefore
+remain a normal CPU-only state but cannot satisfy a positive VRAM policy.
 
-During operation, the resource guard verifies the configured RAM backing and,
-for positive VRAM policies, the presence of an available NVIDIA driver,
-devices, and sufficient total VRAM. It intentionally checks total rather than
-free VRAM: runtime/model allocations make free-memory telemetry unsuitable
-for resizing admission underneath active reservations. Consecutive failures
+During operation, each isolated probe subprocess re-reads process affinity and
+cgroup membership, mounts, CPU quota/cpuset, and memory limits. The resource
+guard verifies the configured effective RAM backing and, for positive VRAM
+policies, the presence of an available NVIDIA driver, devices, and sufficient
+total VRAM. It intentionally checks total rather than free VRAM:
+runtime/model allocations make free-memory telemetry unsuitable for resizing
+admission underneath active reservations. Consecutive failures
 close the new-work gate; consecutive healthy observations reopen it. While
 closed, readiness reports `resources=degraded`, capabilities are empty, and
 new Quote and Invoke owners fail unavailable. Exact Quote retries and
@@ -145,8 +154,9 @@ tasks are not preempted. The health transition is also reflected in the
 capacity revision.
 
 The policy is intentionally not hot-reloaded. This liveness gate does not
-resize resource budgets, react to transient free-memory changes, or prevent
-independent worker processes from overcommitting the same host. Intervals are
+resize resource budgets, measure cgroup working-set consumption or pressure,
+react to transient free-memory changes, or prevent independent worker
+processes from overcommitting the same host. Intervals are
 bounded from one second through five minutes, subprocess timeouts from 100
 milliseconds through 30 seconds and no longer than the interval, and both
 hysteresis thresholds from one through ten.
@@ -413,7 +423,8 @@ Implemented:
 - bounded replay, scheduler, local admission, resource owner reserve, and
   owner-reserved execution workers
 - graceful cancellation and shutdown resource cleanup
-- Linux host and NVIDIA NVML probes with fake backends
+- Linux host, cgroup v1/v2 effective-resource, and NVIDIA NVML probes with
+  fake backends
 - timeout-isolated continuous host/GPU-class liveness gating with bounded
   failure and recovery hysteresis
 - deterministic, Ollama, and OpenAI-compatible adapters

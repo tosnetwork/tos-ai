@@ -2,6 +2,8 @@
 
 package probe
 
-func totalMemory() (uint64, error) {
-	return 0, nil
+import "runtime"
+
+func effectiveResources() (uint64, int, error) {
+	return 0, runtime.NumCPU(), nil
 }

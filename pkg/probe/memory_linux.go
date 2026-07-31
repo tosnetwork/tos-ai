@@ -2,12 +2,18 @@
 
 package probe
 
-import "syscall"
+import (
+	"runtime"
+	"syscall"
+)
 
-func totalMemory() (uint64, error) {
+func effectiveResources() (uint64, int, error) {
 	var info syscall.Sysinfo_t
 	if err := syscall.Sysinfo(&info); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return info.Totalram * uint64(info.Unit), nil
+	memory := info.Totalram * uint64(info.Unit)
+	return effectiveLinuxResources(
+		memory, runtime.NumCPU(), readLimitedResourceFile,
+	)
 }

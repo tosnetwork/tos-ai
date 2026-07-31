@@ -15,7 +15,10 @@ The Go 1.24 module currently contains:
 - `tos-ai-cli`, with `health`, `capabilities`, `quote`, `invoke`, and `cancel`
   diagnostics;
 - CPU, RAM, OS, and architecture discovery plus NVIDIA/go-nvml GPU, VRAM,
-  driver, CUDA capability, temperature, and power probes;
+  driver, CUDA capability, temperature, and power probes. On Linux, reported
+  CPU is bounded by scheduler affinity, while CPU and RAM both honor strict,
+  bounded cgroup v1 or v2 ancestor limits rather than blindly advertising
+  host totals;
 - graceful `unavailable` or `no-devices` NVIDIA states when NVML or a GPU is
   absent;
 - a bounded continuous resource-liveness guard that runs host/NVML probes in
@@ -138,8 +141,10 @@ isolation. Version 3 also requires a bounded `resourceMonitor` interval,
 subprocess timeout, and failure/recovery thresholds. External and background
 work runs only on general workers, while local asynchronous work can use both
 general and owner-reserved workers. Startup rejects RAM
-capacity above 75 percent of locally observed host RAM or VRAM capacity above
-the currently observed free VRAM, before creating the listener. A nonzero
+capacity above 75 percent of locally observed effective RAM or VRAM capacity
+above the currently observed free VRAM, before creating the listener. On
+Linux, effective RAM is the smaller of physical RAM and every applicable
+cgroup ancestor hard limit. A nonzero
 resource owner reserve is mandatory for RAM, context, batch, and output, and
 for VRAM when VRAM capacity is enabled. The policy is immutable for the
 process lifetime; changing it requires a restart. See
@@ -153,8 +158,12 @@ Version 1 maps to zero reserved workers. Older versions cannot carry newer
 fields; operators should migrate deliberately to version 3.
 
 The resource monitor owns exactly one goroutine and at most one probe
-subprocess at a time. Probe output is strict and capped at 64 KiB; a timeout
-kills the subprocess, so a stuck NVML call cannot pin worker shutdown. After
+subprocess at a time. Probe output is strict and capped at 64 KiB; Linux
+cgroup membership, mount metadata, scalar files, hierarchy depth, controller
+count, and mount count all have independent hard bounds. A timeout kills the
+subprocess, so a stuck NVML call cannot pin worker shutdown. Each fresh child
+re-observes scheduler affinity plus cgroup v1/v2 memory, CPU-quota, and cpuset
+constraints without returning cgroup paths. After
 the configured failure threshold, readiness reports `resources=degraded`,
 capabilities become empty, and new Quote/Invoke owners receive unavailable.
 Exact Quote retries and in-flight or completed Invoke replays preserve their
@@ -283,8 +292,10 @@ thresholds from one through ten.
 - Quote is an expiring capability observation, not a permanent reservation.
   Invoke repeats local admission before adapter execution.
 - Production admission and process-capacity values come only from a private
-  startup policy and are checked against observed RAM/free VRAM before the
-  socket is created. Task payloads cannot increase or replace them.
+  startup policy and are checked against effective observed RAM/free VRAM
+  before the socket is created. On Linux, host totals are reduced by
+  applicable cgroup ancestor hard limits. Task payloads cannot increase or
+  replace them.
 - Host-class liveness is continuously re-probed in a bounded subprocess. A
   degraded observation gates new work without dynamically shrinking budgets
   underneath existing reservations or preempting in-flight work.
@@ -340,10 +351,12 @@ not support arbitrary consumer containers/programs/models, unrestricted
 fine-tuning, training, token issuance, or bare GPU rental.
 
 Terminal policy reload and dynamic RAM/VRAM capacity rebalancing are not
-implemented. The current monitor verifies that configured RAM backing and any
-required GPU/driver/device/total-VRAM class still exist; it intentionally does
-not resize admission from fluctuating free memory or coordinate capacity
-across multiple worker processes.
+implemented. The current monitor verifies that configured RAM backing,
+including Linux cgroup hard limits, and any required
+GPU/driver/device/total-VRAM class still exist; it intentionally does not
+resize admission from current memory consumption, pressure signals,
+fluctuating free memory, or coordinate capacity across multiple worker
+processes.
 
 Protocol fields needed for richer resource and admission exchange are recorded
 in [docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).
