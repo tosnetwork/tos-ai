@@ -12,6 +12,8 @@ import (
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+const MaxAllowedImagesHard = 1024
+
 type NetworkMode string
 
 const (
@@ -30,14 +32,25 @@ type Limits struct {
 }
 
 type Spec struct {
-	ImageDigest  string
-	Entrypoint   []string
-	Environment  map[string]string
-	ReadOnlyRoot bool
-	Network      NetworkMode
-	AllowedHosts []string
-	AllowGPU     bool
-	Limits       Limits
+	ImageDigest         string
+	Entrypoint          []string
+	Environment         map[string]string
+	ReadOnlyRoot        bool
+	Network             NetworkMode
+	AllowedHosts        []string
+	AllowGPU            bool
+	UserID              uint32
+	GroupID             uint32
+	Privileged          bool
+	NoNewPrivileges     bool
+	HostMounts          []Mount
+	ExposeRuntimeSocket bool
+	Limits              Limits
+}
+
+type Mount struct {
+	Source string
+	Target string
 }
 
 type Result struct {
@@ -57,13 +70,37 @@ type Executor interface {
 	Execute(context.Context, Spec, []byte) (Result, error)
 }
 
+// ContainerdClient is the narrow client a future audited backend must
+// implement. This package intentionally does not provide a concrete
+// containerd implementation yet.
+type ContainerdClient interface {
+	RunIsolated(context.Context, ContainerRequest, []byte) (Result, error)
+}
+
+type ContainerRequest struct {
+	ImageDigest     string
+	Entrypoint      []string
+	Environment     map[string]string
+	UserID          uint32
+	GroupID         uint32
+	ReadOnlyRoot    bool
+	NoNewPrivileges bool
+	Network         NetworkMode
+	AllowedHosts    []string
+	AllowGPU        bool
+	Limits          Limits
+}
+
 // Policy is a terminal-owned ceiling. A remote task may request less, never
 // more, and may not enable capabilities absent from this policy.
 type Policy struct {
 	AllowedImages       map[string]struct{}
+	MaxAllowedImages    int
 	MaxEnvironment      int
 	MaxArguments        int
 	MaxAllowedHosts     int
+	MaxStringBytes      int
+	MaxInputBytes       uint64
 	Ceiling             Limits
 	PermitGPU           bool
 	PermitNetwork       bool
@@ -71,6 +108,17 @@ type Policy struct {
 }
 
 func (p Policy) Validate(spec Spec) error {
+	if p.MaxAllowedImages <= 0 || p.MaxAllowedImages > MaxAllowedImagesHard ||
+		len(p.AllowedImages) > p.MaxAllowedImages ||
+		p.MaxEnvironment < 0 || p.MaxArguments <= 0 || p.MaxAllowedHosts < 0 ||
+		p.MaxStringBytes <= 0 || p.MaxInputBytes == 0 {
+		return errors.New("invalid executor policy")
+	}
+	for digest := range p.AllowedImages {
+		if !digestPattern.MatchString(digest) {
+			return errors.New("executor policy contains an unpinned image")
+		}
+	}
 	if !digestPattern.MatchString(spec.ImageDigest) {
 		return errors.New("container image must be pinned by sha256 digest")
 	}
@@ -78,8 +126,36 @@ func (p Policy) Validate(spec Spec) error {
 		return errors.New("container image is not allowlisted")
 	}
 	if len(spec.Entrypoint) == 0 || len(spec.Entrypoint) > p.MaxArguments ||
-		len(spec.Environment) > p.MaxEnvironment || len(spec.AllowedHosts) > p.MaxAllowedHosts {
+		len(spec.Environment) > p.MaxEnvironment || len(spec.AllowedHosts) > p.MaxAllowedHosts ||
+		len(spec.HostMounts) != 0 {
 		return errors.New("executor argument or environment bounds exceeded")
+	}
+	for _, argument := range spec.Entrypoint {
+		if len(argument) == 0 || len(argument) > p.MaxStringBytes {
+			return errors.New("executor argument is invalid")
+		}
+	}
+	for key, value := range spec.Environment {
+		if len(key) == 0 || len(key) > p.MaxStringBytes || len(value) > p.MaxStringBytes {
+			return errors.New("executor environment is invalid")
+		}
+	}
+	for _, host := range spec.AllowedHosts {
+		if len(host) == 0 || len(host) > p.MaxStringBytes {
+			return errors.New("executor allowed host is invalid")
+		}
+	}
+	if spec.Privileged {
+		return errors.New("privileged execution is forbidden")
+	}
+	if spec.UserID == 0 || spec.GroupID == 0 {
+		return errors.New("container must run as a non-root user and group")
+	}
+	if !spec.NoNewPrivileges {
+		return errors.New("no-new-privileges is required")
+	}
+	if spec.ExposeRuntimeSocket {
+		return errors.New("container runtime socket exposure is forbidden")
 	}
 	if p.RequireReadOnlyRoot && !spec.ReadOnlyRoot {
 		return errors.New("read-only root filesystem is required")
@@ -108,6 +184,13 @@ func (p Policy) Validate(spec Spec) error {
 	}
 	if err := withinCeiling(spec.Limits, p.Ceiling); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (p Policy) ValidateInput(input []byte) error {
+	if uint64(len(input)) > p.MaxInputBytes {
+		return errors.New("executor input exceeds policy")
 	}
 	return nil
 }

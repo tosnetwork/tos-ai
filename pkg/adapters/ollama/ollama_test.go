@@ -4,11 +4,26 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/pkg/admission"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
+
+func config(baseURL string) Config {
+	return Config{
+		BaseURL: baseURL, Model: "qwen", ModelDigest: "sha256:" + strings.Repeat("a", 64),
+		MaxInputBytes: 1024, MaxOutputBytes: 1024, MaxResponseBytes: 1 << 20,
+		MaxConnections: 2, MaxResponseHeaderBytes: 4096,
+		Timeout: time.Second, ConnectTimeout: time.Second,
+		Admission: admission.Resources{
+			RAMBytes: 1, ContextTokens: 128, BatchSize: 1,
+			ExecutionTime: time.Second,
+		},
+	}
+}
 
 func TestExecuteIsBoundedAndCapturesUsage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -19,14 +34,7 @@ func TestExecuteIsBoundedAndCapturesUsage(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"response":"answer","prompt_eval_count":2,"eval_count":1,"done":true}`))
 	}))
 	defer server.Close()
-	adapter, err := New(Config{
-		BaseURL:        server.URL,
-		Model:          "qwen",
-		ModelDigest:    "sha256:test",
-		MaxInputBytes:  1024,
-		MaxOutputBytes: 1024,
-		Timeout:        time.Second,
-	})
+	adapter, err := New(config(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,14 +54,8 @@ func TestExecuteIsBoundedAndCapturesUsage(t *testing.T) {
 }
 
 func TestNewRejectsRemotePlaintextHostname(t *testing.T) {
-	_, err := New(Config{
-		BaseURL:        "http://runtime.example",
-		Model:          "qwen",
-		ModelDigest:    "sha256:test",
-		MaxInputBytes:  1,
-		MaxOutputBytes: 1,
-		Timeout:        time.Second,
-	})
+	value := config("http://runtime.example")
+	_, err := New(value)
 	if err == nil {
 		t.Fatal("remote plaintext URL accepted")
 	}

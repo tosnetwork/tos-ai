@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/pkg/admission"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
 
@@ -33,6 +34,10 @@ func New(delay time.Duration) *Adapter {
 				airuntime.PriorityLocalAsync,
 				airuntime.PriorityExternalService,
 				airuntime.PriorityBackground,
+			},
+			Admission: admission.Resources{
+				RAMBytes: 1 << 20, ContextTokens: 4096, BatchSize: 1,
+				OutputBytes: 1 << 20, ExecutionTime: 15 * time.Minute,
 			},
 		},
 		delay: delay,

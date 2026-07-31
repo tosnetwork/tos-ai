@@ -6,16 +6,27 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type Listener struct {
 	net.Listener
-	path string
+	path      string
+	sem       chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func Listen(path string) (*Listener, error) {
+	return ListenLimited(path, 128)
+}
+
+func ListenLimited(path string, maxConnections int) (*Listener, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("Unix socket path must be absolute")
+	}
+	if maxConnections <= 0 || maxConnections > 4096 {
+		return nil, errors.New("invalid Unix socket connection limit")
 	}
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -46,14 +57,47 @@ func Listen(path string) (*Listener, error) {
 		listener.Close()
 		return nil, err
 	}
-	return &Listener{Listener: listener, path: path}, nil
+	return &Listener{
+		Listener: listener, path: path, sem: make(chan struct{}, maxConnections),
+		closed: make(chan struct{}),
+	}, nil
+}
+
+func (l *Listener) Accept() (net.Conn, error) {
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+	connection, err := l.Listener.Accept()
+	if err != nil {
+		<-l.sem
+		return nil, err
+	}
+	return &limitedConn{Conn: connection, release: func() { <-l.sem }}, nil
 }
 
 func (l *Listener) Close() error {
-	listenErr := l.Listener.Close()
+	var listenErr error
+	l.closeOnce.Do(func() {
+		close(l.closed)
+		listenErr = l.Listener.Close()
+	})
 	removeErr := os.Remove(l.path)
 	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return removeErr
 	}
 	return listenErr
+}
+
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }

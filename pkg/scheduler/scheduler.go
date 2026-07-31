@@ -20,6 +20,11 @@ var (
 	ErrCanceled  = errors.New("request canceled")
 )
 
+const (
+	MaxWorkersHard = 128
+	MaxQueueHard   = 4096
+)
+
 type Work func(context.Context) (airuntime.Response, error)
 
 type Item struct {
@@ -58,16 +63,20 @@ type Scheduler struct {
 	started  bool
 	stopped  bool
 	workers  sync.WaitGroup
+	done     chan struct{}
+	waitOnce sync.Once
 }
 
 func New(config Config) (*Scheduler, error) {
-	if config.Workers <= 0 || config.MaxQueue <= 0 {
+	if config.Workers <= 0 || config.Workers > MaxWorkersHard ||
+		config.MaxQueue <= 0 || config.MaxQueue > MaxQueueHard {
 		return nil, errors.New("workers and MaxQueue must be positive")
 	}
 	scheduler := &Scheduler{
 		config:  config,
 		pending: make(map[string]*queuedItem, config.MaxQueue),
 		running: make(map[string]context.CancelFunc, config.Workers),
+		done:    make(chan struct{}),
 	}
 	scheduler.cond = sync.NewCond(&scheduler.mu)
 	heap.Init(&scheduler.queue)
@@ -166,13 +175,14 @@ func (s *Scheduler) Shutdown(ctx context.Context) error {
 		s.cond.Broadcast()
 	}
 	s.mu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		s.workers.Wait()
-		close(done)
-	}()
+	s.waitOnce.Do(func() {
+		go func() {
+			s.workers.Wait()
+			close(s.done)
+		}()
+	})
 	select {
-	case <-done:
+	case <-s.done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -196,7 +206,7 @@ func (s *Scheduler) worker() {
 		s.running[queued.item.ID] = cancel
 		s.mu.Unlock()
 
-		response, err := queued.item.Work(runContext)
+		response, err := safeWork(runContext, queued.item.Work)
 		cancel()
 
 		s.mu.Lock()
@@ -205,6 +215,16 @@ func (s *Scheduler) worker() {
 		queued.result <- Result{Response: response, Err: err}
 		close(queued.result)
 	}
+}
+
+func safeWork(ctx context.Context, work Work) (response airuntime.Response, err error) {
+	defer func() {
+		if recover() != nil {
+			response = airuntime.Response{}
+			err = airuntime.NewError(airuntime.ErrorInternal, nil)
+		}
+	}()
+	return work(ctx)
 }
 
 type priorityQueue []*queuedItem
