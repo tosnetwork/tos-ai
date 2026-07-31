@@ -27,6 +27,8 @@ The Go 1.24 module currently contains:
   active, draining, failed, and absent states, bounded LRU storage, protected
   active/pinned/in-use entries, atomic activation, and temporary-file cleanup;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
+- strict administrator-owned JSON runtime configuration with bounded defaults,
+  duplicate/unknown-field rejection, and private credential-file loading;
 - bounded HTTP transports with administrator-selected endpoints, HTTPS for
   remote endpoints, explicit local-CIDR exceptions for plaintext, deadline
   propagation, and stable redacted runtime error categories;
@@ -72,11 +74,29 @@ go run ./cmd/tos-ai-cli \
   -socket /run/user/$(id -u)/tos-ai/worker.sock invoke hello
 ```
 
-The worker currently enables only the deterministic development adapter.
-Ollama and OpenAI-compatible adapters are libraries that must be constructed
-from trusted administrator configuration; an invocation payload can never
-select or override their endpoint. Model import similarly accepts a bounded
-reader and an approved signed manifest, not an arbitrary Internet URL.
+Without `-runtime-config`, the worker enables only the deterministic
+development adapter. Passing `-runtime-config /absolute/private/runtime.json`
+replaces the mock with the explicitly configured Ollama and OpenAI-compatible
+adapters. An invocation payload can never select or override an endpoint.
+Model import similarly accepts a bounded reader and an approved signed
+manifest, not an arbitrary Internet URL.
+
+The runtime configuration must be a regular, non-symlink file owned by the
+worker user with no group or other permissions. It is capped at 1 MiB and 64
+adapters. OpenAI-compatible credentials are referenced through `apiKeyFile`;
+that file is subject to the same ownership and permission checks and is capped
+at 8 KiB. Credentials must contain only printable non-space ASCII bytes, with
+no trailing newline. Inline credentials are not accepted. See
+[docs/runtime-config.example.json](docs/runtime-config.example.json).
+
+Omitted adapter bounds default to 1 MiB input/output, 8 MiB encoded
+request/response, eight connections, 16 KiB response headers, a two-minute
+request/execution timeout, a five-second connect timeout, 1 GiB RAM, 8,192
+context tokens, and batch size one. Configured worker adapters cannot exceed
+1 MiB input/output, 8 MiB encoded request/response, 32 connections each or 256
+connections in aggregate, 64 KiB headers, one-hour execution, or a one-minute
+connect timeout. Admission validation may impose lower observed-capacity
+bounds. Invalid or ambiguous configuration fails worker startup.
 
 Default worker bounds are one concurrent task, 64 queued tasks, 128 private
 socket connections, 1 MiB output per request, a 15-minute execution deadline,
@@ -101,10 +121,18 @@ capacity before it is advertised or admitted.
   Invoke repeats local admission before adapter execution.
 - Runtime errors exposed across RPC are stable categories and do not include
   internal endpoints, paths, or credentials.
+- Runtime adapter connection pools are closed exactly once during graceful
+  shutdown.
 
 ## Not implemented
 
-This repository does not yet provide public ingress, TOS payment
+This repository does not yet provide model-cache recovery or automatic
+activation of imported model files in Ollama, LocalAI, or vLLM. An operator
+must ensure that each configured model name is bound to the declared digest in
+the separately managed runtime; the generic HTTP APIs do not attest that
+binding.
+
+This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet
 management, an offline journal, streaming RPC, a production containerd
 backend, physical-I/O control, or audited NVIDIA runtime packaging. It does

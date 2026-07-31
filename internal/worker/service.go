@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -49,6 +50,8 @@ type Service struct {
 	invocations  *invocationStore
 	admission    *admission.Controller
 	draining     atomic.Bool
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionController *admission.Controller, adapters []airuntime.Adapter) (*Service, error) {
@@ -582,7 +585,16 @@ func (s *Service) BeginDrain() {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.BeginDrain()
-	err := s.scheduler.Shutdown(ctx)
+	schedulerErr := s.scheduler.Shutdown(ctx)
 	s.admission.Shutdown()
-	return err
+	s.closeOnce.Do(func() {
+		for _, adapter := range s.adapters {
+			if closer, ok := adapter.(airuntime.AdapterCloser); ok {
+				if err := closer.Close(); err != nil {
+					s.closeErr = errors.New("close runtime adapter")
+				}
+			}
+		}
+	})
+	return errors.Join(schedulerErr, s.closeErr)
 }

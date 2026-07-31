@@ -2,10 +2,21 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 )
+
+func TestConfiguredAdaptersDefaultsToMockAndRejectsMixedMode(t *testing.T) {
+	adapters, err := configuredAdapters("", 0)
+	if err != nil || len(adapters) != 1 || adapters[0].Capability().Runtime != "mock" {
+		t.Fatalf("default adapters=%v err=%v", adapters, err)
+	}
+	if _, err := configuredAdapters("/private/runtime.json", time.Millisecond); err == nil {
+		t.Fatal("mock and production runtime configuration accepted together")
+	}
+}
 
 func TestDefaultAdmissionConfigSupportsNoGPUAndHasHardBounds(t *testing.T) {
 	report := probe.Report{

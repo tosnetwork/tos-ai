@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/tosnetwork/tos-ai/internal/operatorconfig"
 	"github.com/tosnetwork/tos-ai/internal/unixserver"
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
@@ -36,11 +37,13 @@ func run() error {
 	var maxQueue int
 	var maxConnections int
 	var mockDelay time.Duration
+	var runtimeConfigPath string
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", 1, "concurrent runtime workers")
 	flag.IntVar(&maxQueue, "max-queue", 64, "maximum queued work items")
 	flag.IntVar(&maxConnections, "max-connections", 128, "maximum private socket connections")
 	flag.DurationVar(&mockDelay, "mock-delay", 0, "development mock execution delay")
+	flag.StringVar(&runtimeConfigPath, "runtime-config", "", "private administrator runtime configuration")
 	flag.Parse()
 
 	report, err := probe.Collect(probe.NewNVMLBackend())
@@ -51,14 +54,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if mockDelay < 0 || mockDelay > time.Minute {
-		return fmt.Errorf("mock delay exceeds hard limits")
-	}
 	admissionController, err := admission.New(admissionConfig)
 	if err != nil {
 		return err
 	}
 	taskScheduler, err := scheduler.New(scheduler.Config{Workers: workers, MaxQueue: maxQueue})
+	if err != nil {
+		return err
+	}
+	adapters, err := configuredAdapters(runtimeConfigPath, mockDelay)
 	if err != nil {
 		return err
 	}
@@ -70,7 +74,7 @@ func run() error {
 		MaxDeadline:    15 * time.Minute,
 		PriceNanoTOS:   0,
 		GPUStatus:      report.NVIDIA.Status,
-	}, taskScheduler, admissionController, []airuntime.Adapter{mock.New(mockDelay)})
+	}, taskScheduler, admissionController, adapters)
 	if err != nil {
 		return err
 	}
@@ -123,6 +127,19 @@ func run() error {
 		return shutdownErr
 	}
 	return serviceErr
+}
+
+func configuredAdapters(configPath string, mockDelay time.Duration) ([]airuntime.Adapter, error) {
+	if mockDelay < 0 || mockDelay > time.Minute {
+		return nil, fmt.Errorf("mock delay exceeds hard limits")
+	}
+	if configPath == "" {
+		return []airuntime.Adapter{mock.New(mockDelay)}, nil
+	}
+	if mockDelay != 0 {
+		return nil, fmt.Errorf("mock delay cannot be used with a runtime configuration")
+	}
+	return operatorconfig.Load(configPath)
 }
 
 func defaultAdmissionConfig(report probe.Report, workers, maxQueue int) (admission.Config, error) {

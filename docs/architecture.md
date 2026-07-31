@@ -10,6 +10,7 @@ tos-edge (future wallet/payment/auth boundary)
        v
 tos-ai-worker
        |
+       +-- private administrator runtime configuration
        +-- bounded connection and RPC body limits
        +-- idempotent quote/invocation replay stores
        +-- authoritative local admission reservations
@@ -106,6 +107,22 @@ and allow HTTP only for loopback or an explicitly configured private/local
 CIDR. Returned errors are categorized without endpoint, filesystem, or
 credential details.
 
+`tos-ai-worker -runtime-config` loads a bounded JSON document from a private,
+current-user-owned, non-symlink regular file. Unknown fields, duplicate keys,
+excessive nesting, multiple JSON values, more than 64 adapters, and insecure
+file modes fail startup. An OpenAI-compatible API key may only be loaded from
+a separate private file; credentials and endpoints are not task-controlled.
+If the flag is omitted, the worker retains its deterministic development mock.
+If the flag is present, the mock is not mixed into the configured production
+capabilities. Adapter connection pools are closed once after scheduler drain.
+
+The configured model digest is an administrator assertion used to bind quotes
+and responses. Ollama and generic OpenAI-compatible HTTP APIs do not provide a
+common cryptographic attestation that their named model currently matches that
+digest. Deployments must enforce that binding in the separately managed
+runtime; automatic activation of `pkg/modelmanager` artifacts is still
+planned.
+
 ## Execution isolation
 
 `pkg/executor` remains fail closed. `DenyAll` is the default and there is no
@@ -126,13 +143,13 @@ Implemented:
 - graceful cancellation and shutdown resource cleanup
 - Linux host and NVIDIA NVML probes with fake backends
 - deterministic, Ollama, and OpenAI-compatible adapters
+- private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
 - container isolation contract and validation layer with `DenyAll`
 
 Planned, not claimed by this release:
 
-- operator configuration and lifecycle wiring for production runtime adapters
-  and model slots
+- automatic activation and persistent recovery of signed model slots
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core

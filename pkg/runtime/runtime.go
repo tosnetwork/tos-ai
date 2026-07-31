@@ -72,6 +72,13 @@ type Adapter interface {
 	Execute(context.Context, Request) (Response, error)
 }
 
+// AdapterCloser is implemented by adapters with connection pools or other
+// process-local resources that must be released during worker shutdown.
+type AdapterCloser interface {
+	Adapter
+	Close() error
+}
+
 type ErrorKind string
 
 const (

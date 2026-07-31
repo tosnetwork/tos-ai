@@ -24,6 +24,7 @@ type Config struct {
 	ModelDigest            string
 	MaxInputBytes          uint64
 	MaxOutputBytes         uint64
+	MaxRequestBytes        uint64
 	MaxResponseBytes       uint64
 	MaxConnections         int
 	MaxResponseHeaderBytes int64
@@ -33,19 +34,26 @@ type Config struct {
 	Admission              admission.Resources
 }
 
-const maxBodyBytesHard = uint64(64 << 20)
+const (
+	maxBodyBytesHard = uint64(64 << 20)
+	responseOverhead = uint64(64 << 10)
+	jsonExpansion    = uint64(6)
+)
 
 type Adapter struct {
 	endpoint    string
 	httpClient  *http.Client
 	capability  airuntime.Capability
+	maxRequest  uint64
 	maxResponse uint64
 }
 
 func New(config Config) (*Adapter, error) {
 	if config.Model == "" || config.ModelDigest == "" || config.MaxInputBytes == 0 ||
-		config.MaxOutputBytes == 0 || config.MaxResponseBytes < config.MaxOutputBytes ||
+		config.MaxOutputBytes == 0 || config.MaxRequestBytes == 0 ||
+		config.MaxResponseBytes < config.MaxOutputBytes ||
 		config.MaxInputBytes > maxBodyBytesHard || config.MaxOutputBytes > maxBodyBytesHard ||
+		config.MaxRequestBytes > maxBodyBytesHard ||
 		config.MaxResponseBytes > maxBodyBytesHard ||
 		config.Admission.RAMBytes == 0 || config.Admission.ContextTokens == 0 ||
 		config.Admission.BatchSize == 0 || config.Admission.ExecutionTime <= 0 {
@@ -82,6 +90,7 @@ func New(config Config) (*Adapter, error) {
 	return &Adapter{
 		endpoint:    httpclient.Endpoint(baseURL, "/api/generate"),
 		httpClient:  client,
+		maxRequest:  config.MaxRequestBytes,
 		maxResponse: config.MaxResponseBytes,
 		capability:  capability,
 	}, nil
@@ -89,6 +98,11 @@ func New(config Config) (*Adapter, error) {
 
 func (a *Adapter) Capability() airuntime.Capability {
 	return a.capability
+}
+
+func (a *Adapter) Close() error {
+	a.httpClient.CloseIdleConnections()
+	return nil
 }
 
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
@@ -102,6 +116,9 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 	})
 	if err != nil {
 		return airuntime.Response{}, err
+	}
+	if uint64(len(body)) > a.maxRequest {
+		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorLimit, errors.New("request body limit"))
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -128,10 +145,7 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 		_, _ = io.Copy(io.Discard, io.LimitReader(httpResponse.Body, 4<<10))
 		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorRemote, nil)
 	}
-	maxResponse := int64(a.maxResponse)
-	if requested := int64(request.MaxOutputBytes) + 64<<10; requested < maxResponse {
-		maxResponse = requested
-	}
+	maxResponse := int64(responseLimit(a.maxResponse, request.MaxOutputBytes))
 	data, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxResponse+1))
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -175,4 +189,12 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 		ModelRevision:   a.capability.ModelDigest,
 		RuntimeRevision: a.capability.RuntimeRevision,
 	}, nil
+}
+
+func responseLimit(maximum, outputBytes uint64) uint64 {
+	encoded := outputBytes*jsonExpansion + responseOverhead
+	if encoded < outputBytes || encoded > maximum {
+		return maximum
+	}
+	return encoded
 }

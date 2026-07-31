@@ -15,8 +15,9 @@ import (
 func config(baseURL string) Config {
 	return Config{
 		BaseURL: baseURL, Model: "qwen", ModelDigest: "sha256:" + strings.Repeat("a", 64),
-		MaxInputBytes: 1024, MaxOutputBytes: 1024, MaxResponseBytes: 1 << 20,
-		MaxConnections: 2, MaxResponseHeaderBytes: 4096,
+		MaxInputBytes: 1024, MaxOutputBytes: 1024, MaxRequestBytes: 2048,
+		MaxResponseBytes: 1 << 20,
+		MaxConnections:   2, MaxResponseHeaderBytes: 4096,
 		Timeout: time.Second, ConnectTimeout: time.Second,
 		Admission: admission.Resources{
 			RAMBytes: 1, ContextTokens: 128, BatchSize: 1,
@@ -58,5 +59,30 @@ func TestNewRejectsRemotePlaintextHostname(t *testing.T) {
 	_, err := New(value)
 	if err == nil {
 		t.Fatal("remote plaintext URL accepted")
+	}
+}
+
+func TestExecuteRejectsOversizedRequestBody(t *testing.T) {
+	value := config("http://127.0.0.1:11434")
+	value.MaxRequestBytes = 8
+	adapter, err := New(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adapter.Execute(context.Background(), airuntime.Request{
+		RequestID: "request-oversize", Operation: "generate", Model: "qwen",
+		Payload: []byte("payload"), MaxOutputBytes: 32,
+	})
+	if airuntime.ErrorKindOf(err) != airuntime.ErrorLimit {
+		t.Fatalf("oversized request error = %v", err)
+	}
+}
+
+func TestResponseLimitAccountsForJSONEscaping(t *testing.T) {
+	if got := responseLimit(8<<20, 1<<20); got != 6*(1<<20)+responseOverhead {
+		t.Fatalf("response limit = %d", got)
+	}
+	if got := responseLimit(128, 32); got != 128 {
+		t.Fatalf("configured response cap = %d", got)
 	}
 }

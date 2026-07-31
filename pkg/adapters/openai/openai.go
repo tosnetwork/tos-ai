@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-ai/pkg/adapters/internal/httpclient"
@@ -21,6 +20,7 @@ import (
 const (
 	MaxBodyBytesHard   = uint64(64 << 20)
 	responseOverhead   = uint64(64 << 10)
+	jsonExpansion      = uint64(6)
 	MaxCredentialBytes = 8 << 10
 )
 
@@ -59,7 +59,7 @@ func New(config Config) (*Adapter, error) {
 		config.MaxResponseBytes < config.MaxOutputBytes ||
 		config.Admission.RAMBytes == 0 || config.Admission.ContextTokens == 0 ||
 		config.Admission.BatchSize == 0 || config.Admission.ExecutionTime <= 0 ||
-		len(config.APIKey) > MaxCredentialBytes || strings.ContainsAny(config.APIKey, "\r\n") {
+		!validCredential(config.APIKey) {
 		return nil, errors.New("invalid OpenAI-compatible adapter configuration")
 	}
 	config.Admission.OutputBytes = config.MaxOutputBytes
@@ -98,6 +98,11 @@ func (a *Adapter) Capability() airuntime.Capability {
 	return a.capability
 }
 
+func (a *Adapter) Close() error {
+	a.httpClient.CloseIdleConnections()
+	return nil
+}
+
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
 	if err := airuntime.ValidateRequest(a.capability, request); err != nil {
 		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorInvalid, err)
@@ -132,10 +137,7 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 		_, _ = io.Copy(io.Discard, io.LimitReader(httpResponse.Body, 4<<10))
 		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorRemote, nil)
 	}
-	limit := a.maxResponse
-	if request.MaxOutputBytes+responseOverhead < limit {
-		limit = request.MaxOutputBytes + responseOverhead
-	}
+	limit := responseLimit(a.maxResponse, request.MaxOutputBytes)
 	data, err := io.ReadAll(io.LimitReader(httpResponse.Body, int64(limit)+1))
 	if err != nil {
 		return airuntime.Response{}, classifyTransportError(ctx, err)
@@ -164,6 +166,26 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 		},
 		ModelRevision: a.capability.ModelDigest, RuntimeRevision: a.capability.RuntimeRevision,
 	}, nil
+}
+
+func responseLimit(maximum, outputBytes uint64) uint64 {
+	encoded := outputBytes*jsonExpansion + responseOverhead
+	if encoded < outputBytes || encoded > maximum {
+		return maximum
+	}
+	return encoded
+}
+
+func validCredential(value string) bool {
+	if len(value) > MaxCredentialBytes {
+		return false
+	}
+	for index := range len(value) {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 type message struct {

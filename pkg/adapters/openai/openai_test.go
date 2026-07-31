@@ -123,3 +123,28 @@ func TestPlaintextEndpointPolicy(t *testing.T) {
 		t.Fatalf("explicit local plaintext rejected: %v", err)
 	}
 }
+
+func TestNewRejectsCredentialControlCharacters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	config := Config{
+		BaseURL: server.URL, APIKey: "token\x00value", Model: "m",
+		ModelDigest: "sha256:" + strings.Repeat("a", 64), RuntimeRevision: "v1",
+		MaxInputBytes: 1, MaxOutputBytes: 1, MaxRequestBytes: 128, MaxResponseBytes: 128,
+		MaxConnections: 1, MaxResponseHeaderBytes: 1024, Timeout: time.Second,
+		ConnectTimeout: time.Second,
+		Admission:      admission.Resources{RAMBytes: 1, ContextTokens: 1, BatchSize: 1, ExecutionTime: time.Second},
+	}
+	if _, err := New(config); err == nil {
+		t.Fatal("credential control character accepted")
+	}
+}
+
+func TestResponseLimitAccountsForJSONEscaping(t *testing.T) {
+	if got := responseLimit(8<<20, 1<<20); got != 6*(1<<20)+responseOverhead {
+		t.Fatalf("response limit = %d", got)
+	}
+	if got := responseLimit(128, 32); got != 128 {
+		t.Fatalf("configured response cap = %d", got)
+	}
+}

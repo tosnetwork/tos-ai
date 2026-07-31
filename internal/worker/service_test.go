@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,11 +164,17 @@ func TestInvokeRejectsRequestIDReuseWithDifferentPayload(t *testing.T) {
 type faultAdapter struct {
 	capability airuntime.Capability
 	execute    func(context.Context, airuntime.Request) (airuntime.Response, error)
+	closeCount atomic.Int32
+	closeErr   error
 }
 
 func (a *faultAdapter) Capability() airuntime.Capability { return a.capability }
 func (a *faultAdapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
 	return a.execute(ctx, request)
+}
+func (a *faultAdapter) Close() error {
+	a.closeCount.Add(1)
+	return a.closeErr
 }
 
 func newFaultService(t *testing.T, execute func(context.Context, airuntime.Request) (airuntime.Response, error)) *Service {
@@ -351,6 +359,24 @@ func TestShutdownDrainsAndReleasesReservation(t *testing.T) {
 	assertNoReservations(t, service)
 	if service.Readiness().Status != "draining" {
 		t.Fatalf("readiness = %#v", service.Readiness())
+	}
+}
+
+func TestShutdownClosesRuntimeOnceAndRedactsCloseError(t *testing.T) {
+	service := newFaultService(t, func(context.Context, airuntime.Request) (airuntime.Response, error) {
+		return airuntime.Response{}, nil
+	})
+	adapter := service.adapters[adapterKey("tos.ai.mock", "generate", "deterministic-echo")].(*faultAdapter)
+	adapter.closeErr = errors.New("credential and endpoint must not leak")
+	if err := service.Shutdown(context.Background()); err == nil ||
+		strings.Contains(err.Error(), "credential") {
+		t.Fatalf("shutdown error = %v", err)
+	}
+	if err := service.Shutdown(context.Background()); err == nil {
+		t.Fatal("stable adapter close error was lost")
+	}
+	if adapter.closeCount.Load() != 1 {
+		t.Fatalf("adapter close count = %d", adapter.closeCount.Load())
 	}
 }
 
