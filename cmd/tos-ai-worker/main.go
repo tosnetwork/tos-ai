@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -16,6 +20,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/tosnetwork/tos-ai/internal/operatorconfig"
+	"github.com/tosnetwork/tos-ai/internal/resourceguard"
 	"github.com/tosnetwork/tos-ai/internal/unixserver"
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
@@ -35,6 +40,9 @@ const (
 	defaultMaxConnections   = 128
 	defaultPreflightRefresh = 5 * time.Second
 	defaultPreflightWorkers = 4
+	initialResourceTimeout  = 30 * time.Second
+	maxResourceProbeOutput  = 64 << 10
+	resourceProbeWaitDelay  = time.Second
 )
 
 func main() {
@@ -56,6 +64,7 @@ func run() error {
 	var runtimeConfigPath string
 	var modelTrustConfigPath string
 	var terminalPolicyPath string
+	var internalResourceProbe bool
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
 	flag.IntVar(&maxQueue, "max-queue", defaultMaxQueue, "development maximum queued work items")
@@ -79,11 +88,22 @@ func run() error {
 		&terminalPolicyPath, "terminal-policy-config", "",
 		"private administrator terminal resource policy",
 	)
+	flag.BoolVar(
+		&internalResourceProbe, "internal-resource-probe", false,
+		"internal resource probe subprocess",
+	)
 	flag.Parse()
+	if internalResourceProbe {
+		return runInternalResourceProbe(flag.Args(), os.Stdout)
+	}
 
-	report, err := probe.Collect(probe.NewNVMLBackend())
+	resourceContext, cancelResources := context.WithTimeout(
+		context.Background(), initialResourceTimeout,
+	)
+	report, err := sampleResourceReport(resourceContext)
+	cancelResources()
 	if err != nil {
-		return err
+		return errors.New("collect local resources")
 	}
 	policy, err := configuredTerminalPolicy(
 		terminalPolicyPath, devMock, report, terminalPolicyFlags{
@@ -107,11 +127,29 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	resourceMonitor, err := resourceguard.New(resourceguard.Config{
+		Interval:          policy.ResourceMonitor.Interval,
+		Timeout:           policy.ResourceMonitor.Timeout,
+		FailureThreshold:  policy.ResourceMonitor.FailureThreshold,
+		RecoveryThreshold: policy.ResourceMonitor.RecoveryThreshold,
+		RequiredRAMBytes:  policy.Admission.Capacity.RAMBytes,
+		RequiredVRAMBytes: policy.Admission.Capacity.VRAMBytes,
+		Initial:           report,
+		Sample:            sampleResourceReport,
+	})
+	if err != nil {
+		return err
+	}
 	runtimes, err := configuredRuntimes(
 		runtimeConfigPath, modelTrustConfigPath, devMock, mockDelay,
 	)
 	if err != nil {
-		return err
+		resourceContext, cancelResources := context.WithTimeout(
+			context.Background(), policy.ResourceMonitor.Timeout,
+		)
+		resourceErr := resourceMonitor.Shutdown(resourceContext)
+		cancelResources()
+		return errors.Join(err, resourceErr)
 	}
 	service, err := worker.NewService(worker.Config{
 		Version:             "0.1.0-dev",
@@ -127,14 +165,22 @@ func run() error {
 		PreflightWorkers:    policy.PreflightWorkers,
 		PriceNanoTOS:        0,
 		GPUStatus:           report.NVIDIA.Status,
+		ResourceHealth:      resourceMonitor,
 	}, taskScheduler, admissionController, runtimes.adapters)
 	if err != nil {
+		resourceContext, cancelResources := context.WithTimeout(
+			context.Background(), policy.ResourceMonitor.Timeout,
+		)
+		resourceErr := resourceMonitor.Shutdown(resourceContext)
+		cancelResources()
 		closeRuntimeAdapters(runtimes.adapters)
 		shutdownContext, cancel := context.WithTimeout(
 			context.Background(), runtimes.activationCleanupTimeout(),
 		)
 		defer cancel()
-		return errors.Join(err, runtimes.closeRuntimeState(shutdownContext))
+		return errors.Join(
+			err, resourceErr, runtimes.closeRuntimeState(shutdownContext),
+		)
 	}
 	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 10*time.Second)
 	readiness := service.RefreshRuntimes(preflightContext)
@@ -213,6 +259,97 @@ func run() error {
 	return errors.Join(
 		serveErr, shutdownErr, forceCloseErr, serviceErr, activationErr,
 	)
+}
+
+type boundedProbeOutput struct {
+	buffer   bytes.Buffer
+	maximum  int
+	exceeded bool
+}
+
+func (w *boundedProbeOutput) Write(value []byte) (int, error) {
+	written := len(value)
+	remaining := w.maximum - w.buffer.Len()
+	if remaining > 0 {
+		if remaining > len(value) {
+			remaining = len(value)
+		}
+		_, _ = w.buffer.Write(value[:remaining])
+	}
+	if remaining < len(value) {
+		w.exceeded = true
+	}
+	return written, nil
+}
+
+func runInternalResourceProbe(arguments []string, output io.Writer) error {
+	if len(arguments) != 0 || output == nil {
+		return errors.New("invalid internal resource probe invocation")
+	}
+	report, err := probe.Collect(probe.NewNVMLBackend())
+	if err != nil {
+		return errors.New("collect local resources")
+	}
+	if err := json.NewEncoder(output).Encode(report); err != nil {
+		return errors.New("encode local resources")
+	}
+	return nil
+}
+
+func sampleResourceReport(ctx context.Context) (probe.Report, error) {
+	if ctx == nil {
+		return probe.Report{}, errors.New("resource probe context is required")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return probe.Report{}, errors.New("locate resource probe")
+	}
+	return runResourceProbeCommand(ctx, executable, "-internal-resource-probe")
+}
+
+func runResourceProbeCommand(
+	ctx context.Context,
+	executable string,
+	arguments ...string,
+) (probe.Report, error) {
+	if ctx == nil || executable == "" {
+		return probe.Report{}, errors.New("invalid resource probe command")
+	}
+	output := &boundedProbeOutput{maximum: maxResourceProbeOutput}
+	command := exec.CommandContext(ctx, executable, arguments...)
+	command.Stdout = output
+	command.Stderr = io.Discard
+	command.WaitDelay = resourceProbeWaitDelay
+	if err := command.Run(); err != nil {
+		if ctx.Err() != nil {
+			return probe.Report{}, ctx.Err()
+		}
+		return probe.Report{}, errors.New("resource probe process failed")
+	}
+	if output.exceeded {
+		return probe.Report{}, errors.New("resource probe output exceeds limit")
+	}
+	return decodeResourceReport(output.buffer.Bytes())
+}
+
+func decodeResourceReport(data []byte) (probe.Report, error) {
+	if len(data) == 0 || len(data) > maxResourceProbeOutput {
+		return probe.Report{}, errors.New("invalid resource probe output")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var report probe.Report
+	if err := decoder.Decode(&report); err != nil {
+		return probe.Report{}, errors.New("invalid resource probe output")
+	}
+	var trailing struct{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return probe.Report{}, errors.New("invalid resource probe output")
+	}
+	if err := probe.ValidateReport(report); err != nil {
+		return probe.Report{}, errors.New("invalid resource probe output")
+	}
+	return report, nil
 }
 
 type runtimeResources struct {
@@ -475,7 +612,11 @@ func configuredTerminalPolicy(
 			FailureTTL:       2 * time.Second,
 			RefreshInterval:  flags.preflightRefresh,
 			PreflightWorkers: flags.preflightWorkers,
-			Admission:        admissionConfig,
+			ResourceMonitor: operatorconfig.ResourceMonitorPolicy{
+				Interval: 10 * time.Second, Timeout: 5 * time.Second,
+				FailureThreshold: 2, RecoveryThreshold: 2,
+			},
+			Admission: admissionConfig,
 		}, nil
 	}
 	if flags != defaultTerminalPolicyFlags() {

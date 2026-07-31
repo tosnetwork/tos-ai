@@ -311,7 +311,7 @@ func TestCapabilitiesHideUnavailableRuntimeAndRecover(t *testing.T) {
 	))
 	if err != nil || len(first.Msg.Capabilities) != 0 ||
 		service.Readiness().Status != "degraded" ||
-		!strings.HasPrefix(first.Msg.CapacityRevision, "tier1-0-") {
+		!strings.HasPrefix(first.Msg.CapacityRevision, "tier1-1-0-") {
 		t.Fatalf("unavailable capabilities=%v readiness=%#v err=%v",
 			first, service.Readiness(), err)
 	}
@@ -322,7 +322,7 @@ func TestCapabilitiesHideUnavailableRuntimeAndRecover(t *testing.T) {
 	))
 	if err != nil || len(second.Msg.Capabilities) != 1 ||
 		service.Readiness().Status != "ready" ||
-		!strings.HasPrefix(second.Msg.CapacityRevision, "tier1-1-") {
+		!strings.HasPrefix(second.Msg.CapacityRevision, "tier1-1-1-") {
 		t.Fatalf("recovered capabilities=%v readiness=%#v err=%v",
 			second, service.Readiness(), err)
 	}

@@ -24,7 +24,11 @@ func TestLoadTerminalPolicy(t *testing.T) {
 		policy.PreflightTTL != 2*time.Minute ||
 		policy.FailureTTL != 2*time.Second ||
 		policy.RefreshInterval != 5*time.Second ||
-		policy.PreflightWorkers != 4 {
+		policy.PreflightWorkers != 4 ||
+		policy.ResourceMonitor.Interval != 10*time.Second ||
+		policy.ResourceMonitor.Timeout != 5*time.Second ||
+		policy.ResourceMonitor.FailureThreshold != 2 ||
+		policy.ResourceMonitor.RecoveryThreshold != 2 {
 		t.Fatalf("terminal policy=%#v", policy)
 	}
 	if policy.Admission.MaxConcurrent != policy.Workers ||
@@ -53,9 +57,10 @@ func TestLoadTerminalPolicyAllowsExplicitZeroReservedWorker(t *testing.T) {
 }
 
 func TestLoadTerminalPolicyMigratesVersionOneWithoutReservedWorker(t *testing.T) {
-	value := strings.Replace(validTerminalPolicyJSON(), `"version":2`, `"version":1`, 1)
+	value := strings.Replace(validTerminalPolicyJSON(), `"version":3`, `"version":1`, 1)
 	value = strings.Replace(value, `  "ownerReservedWorkers":1,
 `, "", 1)
+	value = removeResourceMonitor(value)
 	policy, err := LoadTerminalPolicy(writePrivate(
 		t, "version-one-policy.json", value, 0o600,
 	))
@@ -67,14 +72,31 @@ func TestLoadTerminalPolicyMigratesVersionOneWithoutReservedWorker(t *testing.T)
 	}
 }
 
+func TestLoadTerminalPolicyMigratesVersionTwoMonitorDefaults(t *testing.T) {
+	value := strings.Replace(validTerminalPolicyJSON(), `"version":3`, `"version":2`, 1)
+	value = removeResourceMonitor(value)
+	policy, err := LoadTerminalPolicy(writePrivate(
+		t, "version-two-policy.json", value, 0o600,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.OwnerReservedWorkers != 1 ||
+		policy.ResourceMonitor.Interval != 10*time.Second ||
+		policy.ResourceMonitor.Timeout != 5*time.Second {
+		t.Fatalf("version-two migration=%#v", policy)
+	}
+}
+
 func TestLoadTerminalPolicyRejectsInvalidAndAmbiguousValues(t *testing.T) {
 	valid := validTerminalPolicyJSON()
 	tests := []struct {
 		name string
 		data string
 	}{
-		{"version", strings.Replace(valid, `"version":2`, `"version":3`, 1)},
-		{"new field on legacy version", strings.Replace(valid, `"version":2`, `"version":1`, 1)},
+		{"version", strings.Replace(valid, `"version":3`, `"version":4`, 1)},
+		{"new field on previous version", strings.Replace(valid, `"version":3`, `"version":2`, 1)},
+		{"new field on legacy version", strings.Replace(valid, `"version":3`, `"version":1`, 1)},
 		{"workers", strings.Replace(valid, `"workers":2`, `"workers":0`, 1)},
 		{"missing owner workers", strings.Replace(valid, `  "ownerReservedWorkers":1,
 `, "", 1)},
@@ -89,13 +111,23 @@ func TestLoadTerminalPolicyRejectsInvalidAndAmbiguousValues(t *testing.T) {
 		{"failure ttl", strings.Replace(valid, `"failureTtlMillis":2000`, `"failureTtlMillis":120001`, 1)},
 		{"refresh", strings.Replace(valid, `"refreshMillis":5000`, `"refreshMillis":249`, 1)},
 		{"preflight workers", strings.Replace(valid, `"workers":4`, `"workers":17`, 1)},
+		{"missing resource monitor", removeResourceMonitor(valid)},
+		{"resource interval", strings.Replace(valid, `"intervalMillis":10000`, `"intervalMillis":999`, 1)},
+		{"resource timeout", strings.Replace(valid, `"timeoutMillis":5000,
+    "failureThreshold"`, `"timeoutMillis":30001,
+    "failureThreshold"`, 1)},
+		{"resource timeout above interval", strings.Replace(valid, `"timeoutMillis":5000,
+    "failureThreshold"`, `"timeoutMillis":11000,
+    "failureThreshold"`, 1)},
+		{"resource failure threshold", strings.Replace(valid, `"failureThreshold":2`, `"failureThreshold":11`, 1)},
+		{"resource recovery threshold", strings.Replace(valid, `"recoveryThreshold":2`, `"recoveryThreshold":0`, 1)},
 		{"owner ram", strings.Replace(valid, `"ramBytes":2147483648`, `"ramBytes":0`, 1)},
 		{"owner vram", strings.Replace(valid, `"vramBytes":1073741824`, `"vramBytes":0`, 1)},
 		{"owner overflow", strings.Replace(valid, `"ramBytes":2147483648`, `"ramBytes":17179869184`, 1)},
 		{"request overflow", strings.Replace(valid, `"ramBytes":4294967296`, `"ramBytes":17179869184`, 1)},
 		{"execution", strings.Replace(valid, `"executionMillis":300000`, `"executionMillis":-1`, 1)},
-		{"unknown", strings.Replace(valid, `"version":2`, `"version":2,"endpoint":"bad"`, 1)},
-		{"duplicate", strings.Replace(valid, `"version":2`, `"version":2,"version":2`, 1)},
+		{"unknown", strings.Replace(valid, `"version":3`, `"version":3,"endpoint":"bad"`, 1)},
+		{"duplicate", strings.Replace(valid, `"version":3`, `"version":3,"version":3`, 1)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -135,7 +167,7 @@ func TestLoadTerminalPolicyRejectsInsecureAndOversizedFiles(t *testing.T) {
 
 func validTerminalPolicyJSON() string {
 	return `{
-  "version":2,
+  "version":3,
   "workers":2,
   "ownerReservedWorkers":1,
   "maxQueue":8,
@@ -150,6 +182,12 @@ func validTerminalPolicyJSON() string {
     "failureTtlMillis":2000,
     "refreshMillis":5000,
     "workers":4
+  },
+  "resourceMonitor":{
+    "intervalMillis":10000,
+    "timeoutMillis":5000,
+    "failureThreshold":2,
+    "recoveryThreshold":2
   },
   "admission":{
     "capacity":{
@@ -181,4 +219,14 @@ func validTerminalPolicyJSON() string {
     }
   }
 }`
+}
+
+func removeResourceMonitor(value string) string {
+	return strings.Replace(value, `  "resourceMonitor":{
+    "intervalMillis":10000,
+    "timeoutMillis":5000,
+    "failureThreshold":2,
+    "recoveryThreshold":2
+  },
+`, "", 1)
 }

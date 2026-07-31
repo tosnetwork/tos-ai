@@ -18,6 +18,10 @@ The Go 1.24 module currently contains:
   driver, CUDA capability, temperature, and power probes;
 - graceful `unavailable` or `no-devices` NVIDIA states when NVML or a GPU is
   absent;
+- a bounded continuous resource-liveness guard that runs host/NVML probes in
+  deadline-killable subprocesses, applies failure/recovery hysteresis, and
+  blocks new capabilities, quotes, and invocations if the configured host
+  class disappears;
 - a bounded local `AdmissionController` for concurrency, queue slots, RAM,
   VRAM, KV cache, context, batch, output, execution time, owner reserve, and
   the three accepted inference priorities;
@@ -127,12 +131,13 @@ replay bounds, deadlines, preflight cadence, aggregate admission capacity,
 owner-reserved worker slots and resources, and per-request maxima. It is
 capped at 64 KiB and uses the same regular-file, ownership, mode,
 duplicate-key, nesting, and unknown-field checks as other operator
-configuration. In version 2, `ownerReservedWorkers` must be explicit,
+configuration. In version 3, `ownerReservedWorkers` must be explicit,
 non-negative, and less than `workers`; setting it to zero is supported for
 single-worker or best-effort installations but provides no execution-slot
-isolation. External and background work runs only on general workers, while
-local asynchronous work can use both general and owner-reserved workers.
-Startup rejects RAM
+isolation. Version 3 also requires a bounded `resourceMonitor` interval,
+subprocess timeout, and failure/recovery thresholds. External and background
+work runs only on general workers, while local asynchronous work can use both
+general and owner-reserved workers. Startup rejects RAM
 capacity above 75 percent of locally observed host RAM or VRAM capacity above
 the currently observed free VRAM, before creating the listener. A nonzero
 resource owner reserve is mandatory for RAM, context, batch, and output, and
@@ -141,10 +146,22 @@ process lifetime; changing it requires a restart. See
 [docs/terminal-policy-config.example.json](docs/terminal-policy-config.example.json)
 and size it for the actual host and configured adapters.
 
-The current policy schema is version 2. Version 1 remains accepted for
-upgrade compatibility and maps to zero reserved workers; it cannot carry the
-version-2 field. Operators should migrate deliberately to version 2 to obtain
-execution-slot isolation.
+The current policy schema is version 3. Versions 1 and 2 remain accepted for
+upgrade compatibility with fixed safe monitor defaults of a ten-second
+interval, five-second timeout, and two-sample failure/recovery thresholds.
+Version 1 maps to zero reserved workers. Older versions cannot carry newer
+fields; operators should migrate deliberately to version 3.
+
+The resource monitor owns exactly one goroutine and at most one probe
+subprocess at a time. Probe output is strict and capped at 64 KiB; a timeout
+kills the subprocess, so a stuck NVML call cannot pin worker shutdown. After
+the configured failure threshold, readiness reports `resources=degraded`,
+capabilities become empty, and new Quote/Invoke owners receive unavailable.
+Exact Quote retries and in-flight or completed Invoke replays preserve their
+idempotent result, and already-running work is not preempted. Admission
+reopens only after the configured recovery threshold. CPU-only policies treat
+a missing GPU as normal. A positive VRAM policy requires the configured GPU
+class, driver, devices, and total VRAM to remain present.
 
 The `-workers`, `-max-queue`, `-max-connections`,
 `-runtime-health-interval`, and `-runtime-health-workers` flags are retained
@@ -241,6 +258,11 @@ refresh with four workers. Policy validation rejects refresh intervals below
 250 milliseconds or above five minutes, more than 16 health workers, or any
 timeout/interval combination that could leave a freshness gap before the
 success TTL after accounting for every configured adapter batch.
+The resource-liveness defaults are a ten-second interval, five-second probe
+timeout, and two consecutive observations for both failure and recovery.
+Hard limits permit intervals from one second through five minutes, timeouts
+from 100 milliseconds through 30 seconds and no longer than the interval, and
+thresholds from one through ten.
 
 ## Security boundaries
 
@@ -263,6 +285,9 @@ success TTL after accounting for every configured adapter batch.
 - Production admission and process-capacity values come only from a private
   startup policy and are checked against observed RAM/free VRAM before the
   socket is created. Task payloads cannot increase or replace them.
+- Host-class liveness is continuously re-probed in a bounded subprocess. A
+  degraded observation gates new work without dynamically shrinking budgets
+  underneath existing reservations or preempting in-flight work.
 - Runtime errors exposed across RPC are stable categories and do not include
   internal endpoints, paths, or credentials.
 - Cached runtime readiness expires; stale adapters are not advertised or
@@ -314,9 +339,11 @@ backend, physical-I/O control, or audited NVIDIA runtime packaging. It does
 not support arbitrary consumer containers/programs/models, unrestricted
 fine-tuning, training, token issuance, or bare GPU rental.
 
-Terminal policy reload and dynamic RAM/VRAM rebalancing are not implemented;
-the current policy is a fail-fast startup authority and observed GPU capacity
-is not continuously re-probed.
+Terminal policy reload and dynamic RAM/VRAM capacity rebalancing are not
+implemented. The current monitor verifies that configured RAM backing and any
+required GPU/driver/device/total-VRAM class still exist; it intentionally does
+not resize admission from fluctuating free memory or coordinate capacity
+across multiple worker processes.
 
 Protocol fields needed for richer resource and admission exchange are recorded
 in [docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).

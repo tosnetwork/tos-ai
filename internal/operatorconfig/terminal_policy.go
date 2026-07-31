@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/resourceguard"
 	"github.com/tosnetwork/tos-ai/internal/unixserver"
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
@@ -13,23 +14,25 @@ import (
 )
 
 const (
-	TerminalPolicyVersion        = 2
-	terminalPolicyLegacyVersion  = 1
-	MaxTerminalPolicyConfigBytes = int64(64 << 10)
+	TerminalPolicyVersion         = 3
+	terminalPolicyPreviousVersion = 2
+	terminalPolicyLegacyVersion   = 1
+	MaxTerminalPolicyConfigBytes  = int64(64 << 10)
 )
 
 type terminalPolicyFile struct {
-	Version              int                     `json:"version"`
-	Workers              int                     `json:"workers"`
-	OwnerReservedWorkers *int                    `json:"ownerReservedWorkers"`
-	MaxQueue             int                     `json:"maxQueue"`
-	MaxConnections       int                     `json:"maxConnections"`
-	QuoteTTLMillis       int64                   `json:"quoteTtlMillis"`
-	MaxQuotes            int                     `json:"maxQuotes"`
-	MaxInvocations       int                     `json:"maxInvocations"`
-	MaxDeadlineMillis    int64                   `json:"maxDeadlineMillis"`
-	Preflight            terminalPreflightPolicy `json:"preflight"`
-	Admission            terminalAdmissionPolicy `json:"admission"`
+	Version              int                            `json:"version"`
+	Workers              int                            `json:"workers"`
+	OwnerReservedWorkers *int                           `json:"ownerReservedWorkers"`
+	MaxQueue             int                            `json:"maxQueue"`
+	MaxConnections       int                            `json:"maxConnections"`
+	QuoteTTLMillis       int64                          `json:"quoteTtlMillis"`
+	MaxQuotes            int                            `json:"maxQuotes"`
+	MaxInvocations       int                            `json:"maxInvocations"`
+	MaxDeadlineMillis    int64                          `json:"maxDeadlineMillis"`
+	Preflight            terminalPreflightPolicy        `json:"preflight"`
+	ResourceMonitor      *terminalResourceMonitorPolicy `json:"resourceMonitor"`
+	Admission            terminalAdmissionPolicy        `json:"admission"`
 }
 
 type terminalPreflightPolicy struct {
@@ -38,6 +41,13 @@ type terminalPreflightPolicy struct {
 	FailureTTLMillis int64 `json:"failureTtlMillis"`
 	RefreshMillis    int64 `json:"refreshMillis"`
 	Workers          int   `json:"workers"`
+}
+
+type terminalResourceMonitorPolicy struct {
+	IntervalMillis    int64 `json:"intervalMillis"`
+	TimeoutMillis     int64 `json:"timeoutMillis"`
+	FailureThreshold  int   `json:"failureThreshold"`
+	RecoveryThreshold int   `json:"recoveryThreshold"`
 }
 
 type terminalAdmissionPolicy struct {
@@ -72,7 +82,15 @@ type TerminalPolicy struct {
 	FailureTTL           time.Duration
 	RefreshInterval      time.Duration
 	PreflightWorkers     int
+	ResourceMonitor      ResourceMonitorPolicy
 	Admission            admission.Config
+}
+
+type ResourceMonitorPolicy struct {
+	Interval          time.Duration
+	Timeout           time.Duration
+	FailureThreshold  int
+	RecoveryThreshold int
 }
 
 // LoadTerminalPolicy reads a strict private JSON file. It validates absolute
@@ -92,8 +110,8 @@ func LoadTerminalPolicy(path string) (TerminalPolicy, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return TerminalPolicy{}, errors.New("invalid terminal policy configuration")
 	}
-	ownerReservedWorkers, ok := terminalOwnerReservedWorkers(config)
-	if !ok || !validTerminalPolicyScalars(config, ownerReservedWorkers) {
+	ownerReservedWorkers, monitor, ok := terminalVersionedFields(config)
+	if !ok || !validTerminalPolicyScalars(config, ownerReservedWorkers, monitor) {
 		return TerminalPolicy{}, errors.New("terminal policy exceeds hard limits")
 	}
 	capacity, ok := terminalResources(config.Admission.Capacity, true)
@@ -144,27 +162,46 @@ func LoadTerminalPolicy(path string) (TerminalPolicy, error) {
 			config.Preflight.RefreshMillis,
 		) * time.Millisecond,
 		PreflightWorkers: config.Preflight.Workers,
+		ResourceMonitor:  monitor,
 		Admission:        admissionConfig,
 	}, nil
 }
 
-func terminalOwnerReservedWorkers(config terminalPolicyFile) (int, bool) {
+func terminalVersionedFields(
+	config terminalPolicyFile,
+) (int, ResourceMonitorPolicy, bool) {
+	legacyMonitor := ResourceMonitorPolicy{
+		Interval: 10 * time.Second, Timeout: 5 * time.Second,
+		FailureThreshold: 2, RecoveryThreshold: 2,
+	}
 	switch config.Version {
 	case terminalPolicyLegacyVersion:
-		return 0, config.OwnerReservedWorkers == nil
-	case TerminalPolicyVersion:
-		if config.OwnerReservedWorkers == nil {
-			return 0, false
+		return 0, legacyMonitor,
+			config.OwnerReservedWorkers == nil && config.ResourceMonitor == nil
+	case terminalPolicyPreviousVersion:
+		if config.OwnerReservedWorkers == nil || config.ResourceMonitor != nil {
+			return 0, ResourceMonitorPolicy{}, false
 		}
-		return *config.OwnerReservedWorkers, true
+		return *config.OwnerReservedWorkers, legacyMonitor, true
+	case TerminalPolicyVersion:
+		if config.OwnerReservedWorkers == nil || config.ResourceMonitor == nil {
+			return 0, ResourceMonitorPolicy{}, false
+		}
+		return *config.OwnerReservedWorkers, ResourceMonitorPolicy{
+			Interval:          time.Duration(config.ResourceMonitor.IntervalMillis) * time.Millisecond,
+			Timeout:           time.Duration(config.ResourceMonitor.TimeoutMillis) * time.Millisecond,
+			FailureThreshold:  config.ResourceMonitor.FailureThreshold,
+			RecoveryThreshold: config.ResourceMonitor.RecoveryThreshold,
+		}, true
 	default:
-		return 0, false
+		return 0, ResourceMonitorPolicy{}, false
 	}
 }
 
 func validTerminalPolicyScalars(
 	config terminalPolicyFile,
 	ownerReservedWorkers int,
+	monitor ResourceMonitorPolicy,
 ) bool {
 	preflight := config.Preflight
 	return config.Workers > 0 && config.Workers <= scheduler.MaxWorkersHard &&
@@ -184,7 +221,16 @@ func validTerminalPolicyScalars(
 		preflight.RefreshMillis >= int64(worker.MinPreflightRefresh/time.Millisecond) &&
 		preflight.RefreshMillis <= int64(worker.MaxPreflightRefreshHard/time.Millisecond) &&
 		preflight.Workers > 0 &&
-		preflight.Workers <= worker.MaxPreflightWorkersHard
+		preflight.Workers <= worker.MaxPreflightWorkersHard &&
+		monitor.Interval >= resourceguard.MinInterval &&
+		monitor.Interval <= resourceguard.MaxIntervalHard &&
+		monitor.Timeout >= resourceguard.MinTimeout &&
+		monitor.Timeout <= resourceguard.MaxTimeoutHard &&
+		monitor.Timeout <= monitor.Interval &&
+		monitor.FailureThreshold > 0 &&
+		monitor.FailureThreshold <= resourceguard.MaxThresholdHard &&
+		monitor.RecoveryThreshold > 0 &&
+		monitor.RecoveryThreshold <= resourceguard.MaxThresholdHard
 }
 
 func validMillis(value int64, maximum time.Duration) bool {

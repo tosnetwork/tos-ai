@@ -18,6 +18,7 @@ tos-ai-worker
        +-- authoritative local admission reservations
        +-- bounded priority scheduler
        +-- bounded runtime/model preflight
+       +-- bounded subprocess resource-liveness guard
        +-- approved runtime adapter
        +-- privacy-preserving host/NVML probe
        +-- signed model/update verification libraries
@@ -83,6 +84,14 @@ contain GPU serial/UUID, PCI address, MAC, hostname, or an intentionally
 stable hardware fingerprint. Evidence is field-source metadata, not proof that
 a self-observation is true.
 
+Startup and continuous liveness collection run in a copy of the worker binary
+with only an internal probe operation enabled. The parent accepts one strict
+JSON report capped at 64 KiB and discards child stderr. A context deadline
+kills the child, isolating the long-lived worker and its graceful shutdown
+from a stuck NVML/driver call. One fixed monitor goroutine runs at most one
+probe subprocess at a time; it retains only health, consecutive failure, and
+consecutive recovery counters.
+
 ## Terminal policy authority
 
 Production startup requires one private `-terminal-policy-config` document.
@@ -95,10 +104,13 @@ development-only mock mode may omit the document and use conservative
 probe-derived defaults with no reserved worker; its legacy resource flags
 cannot be combined with an explicit policy.
 
-The strict JSON document is capped at 64 KiB. Version 2 requires
-`ownerReservedWorkers`; the upgrade-compatible version-1 schema cannot carry
-that field and maps to zero reserved workers. The loader rejects duplicate or
-unknown fields, excessive nesting, multiple JSON values, symlinks,
+The strict JSON document is capped at 64 KiB. Version 3 requires
+`ownerReservedWorkers` and a `resourceMonitor` interval, timeout, failure
+threshold, and recovery threshold. Upgrade-compatible version 2 retains its
+worker reserve and receives fixed safe monitor defaults; version 1 maps to
+zero reserved workers and the same defaults. Older schemas cannot carry newer
+fields. The loader rejects duplicate or unknown fields, excessive nesting,
+multiple JSON values, symlinks,
 non-regular files, wrong ownership, or group/other file permissions. Central
 package hard limits cap every scheduler, connection, replay, deadline,
 preflight, and admission field. Owner reserve must be meaningful for RAM,
@@ -118,9 +130,26 @@ After NVML and host probing but before allocating runtime state or creating a
 listener, startup also limits configured RAM to 75 percent of observed host
 RAM and configured VRAM to the sum of currently observed free device memory.
 Missing GPUs therefore remain a normal CPU-only state but cannot satisfy a
-positive VRAM policy. The policy is intentionally not hot-reloaded, and the
-current foundation does not continuously re-probe capacity or overcommit
-resources across multiple worker processes.
+positive VRAM policy.
+
+During operation, the resource guard verifies the configured RAM backing and,
+for positive VRAM policies, the presence of an available NVIDIA driver,
+devices, and sufficient total VRAM. It intentionally checks total rather than
+free VRAM: runtime/model allocations make free-memory telemetry unsuitable
+for resizing admission underneath active reservations. Consecutive failures
+close the new-work gate; consecutive healthy observations reopen it. While
+closed, readiness reports `resources=degraded`, capabilities are empty, and
+new Quote and Invoke owners fail unavailable. Exact Quote retries and
+in-flight/completed Invoke replays retain idempotent behavior, and running
+tasks are not preempted. The health transition is also reflected in the
+capacity revision.
+
+The policy is intentionally not hot-reloaded. This liveness gate does not
+resize resource budgets, react to transient free-memory changes, or prevent
+independent worker processes from overcommitting the same host. Intervals are
+bounded from one second through five minutes, subprocess timeouts from 100
+milliseconds through 30 seconds and no longer than the interval, and both
+hysteresis thresholds from one through ten.
 
 ## Model lifecycle
 
@@ -385,6 +414,8 @@ Implemented:
   owner-reserved execution workers
 - graceful cancellation and shutdown resource cleanup
 - Linux host and NVIDIA NVML probes with fake backends
+- timeout-isolated continuous host/GPU-class liveness gating with bounded
+  failure and recovery hysteresis
 - deterministic, Ollama, and OpenAI-compatible adapters
 - bounded runtime preflight, readiness filtering, and evidence-preserving
   model binding, with active bounded health refresh and lifecycle cancellation
@@ -405,7 +436,8 @@ Planned, not claimed by this release:
 
 - activation backends for LocalAI, vLLM, llama.cpp, and vendor runtimes
 - live administrator lifecycle controls for fixed activation slots
-- authenticated policy rollout, hot reload, and dynamic capacity re-probing
+- authenticated policy rollout, hot reload, and dynamic capacity resizing or
+  cross-process host coordination
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core

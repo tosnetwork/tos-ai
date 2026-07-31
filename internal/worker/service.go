@@ -16,6 +16,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
@@ -37,7 +38,10 @@ const (
 	MaxPreflightWorkersHard = 16
 )
 
-var ErrShutdownIncomplete = errors.New("worker shutdown is incomplete")
+var (
+	ErrShutdownIncomplete   = errors.New("worker shutdown is incomplete")
+	errResourcesUnavailable = errors.New("local resources are unavailable")
+)
 
 type Config struct {
 	Version             string
@@ -54,25 +58,27 @@ type Config struct {
 	PriceNanoTOS        uint64
 	Now                 func() time.Time
 	GPUStatus           string
+	ResourceHealth      probe.ResourceHealthProvider
 }
 
 type Service struct {
-	config       Config
-	scheduler    *scheduler.Scheduler
-	adapters     map[string]airuntime.Adapter
-	runtimeSlots map[string]*runtimeSlot
-	capabilities []airuntime.Capability
-	quotes       *quoteStore
-	invocations  *invocationStore
-	admission    *admission.Controller
-	draining     atomic.Bool
-	runtimeCtx   context.Context
-	runtimeStop  context.CancelFunc
-	runtimeWG    sync.WaitGroup
-	stopOnce     sync.Once
-	runtimeDone  chan struct{}
-	closeOnce    sync.Once
-	closeErr     error
+	config         Config
+	scheduler      *scheduler.Scheduler
+	adapters       map[string]airuntime.Adapter
+	runtimeSlots   map[string]*runtimeSlot
+	capabilities   []airuntime.Capability
+	quotes         *quoteStore
+	invocations    *invocationStore
+	admission      *admission.Controller
+	resourceHealth probe.ResourceHealthProvider
+	draining       atomic.Bool
+	runtimeCtx     context.Context
+	runtimeStop    context.CancelFunc
+	runtimeWG      sync.WaitGroup
+	stopOnce       sync.Once
+	runtimeDone    chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionController *admission.Controller, adapters []airuntime.Adapter) (*Service, error) {
@@ -94,7 +100,8 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		config.PreflightRefresh < MinPreflightRefresh ||
 		config.PreflightRefresh > MaxPreflightRefreshHard ||
 		config.PreflightWorkers <= 0 ||
-		config.PreflightWorkers > MaxPreflightWorkersHard {
+		config.PreflightWorkers > MaxPreflightWorkersHard ||
+		!validInitialResourceHealth(config) {
 		return nil, errors.New("invalid worker configuration")
 	}
 	if config.PreflightRefresh+preflightScanLimit(
@@ -106,14 +113,15 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		config.Now = time.Now
 	}
 	service := &Service{
-		config:       config,
-		scheduler:    taskScheduler,
-		adapters:     make(map[string]airuntime.Adapter, len(adapters)),
-		runtimeSlots: make(map[string]*runtimeSlot, len(adapters)),
-		quotes:       newQuoteStore(config.MaxQuotes),
-		invocations:  newInvocationStore(config.MaxInvocations),
-		admission:    admissionController,
-		runtimeDone:  make(chan struct{}),
+		config:         config,
+		scheduler:      taskScheduler,
+		adapters:       make(map[string]airuntime.Adapter, len(adapters)),
+		runtimeSlots:   make(map[string]*runtimeSlot, len(adapters)),
+		quotes:         newQuoteStore(config.MaxQuotes),
+		invocations:    newInvocationStore(config.MaxInvocations),
+		admission:      admissionController,
+		resourceHealth: config.ResourceHealth,
+		runtimeDone:    make(chan struct{}),
 	}
 	preflight := preflightConfig{
 		timeout: config.PreflightTimeout, successTTL: config.PreflightTTL,
@@ -180,8 +188,8 @@ func preflightScanLimit(
 
 func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequest]) (*connect.Response[edgev1.HealthResponse], error) {
 	readiness := s.Readiness()
-	status := fmt.Sprintf("%s;admission=%s;runtimes=%d/%d;binding=%s;gpu=%s;running=%d;reserved=%d",
-		readiness.Status, readiness.Admission, readiness.RuntimeReady,
+	status := fmt.Sprintf("%s;admission=%s;resources=%s;runtimes=%d/%d;binding=%s;gpu=%s;running=%d;reserved=%d",
+		readiness.Status, readiness.Admission, readiness.Resources, readiness.RuntimeReady,
 		readiness.RuntimeTotal, readiness.BindingEvidence, readiness.GPU,
 		readiness.Running, readiness.Reserved)
 	return connect.NewResponse(&edgev1.HealthResponse{Status: status, Version: s.config.Version}), nil
@@ -190,6 +198,7 @@ func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequ
 type Readiness struct {
 	Status          string
 	Admission       string
+	Resources       string
 	RuntimeReady    int
 	RuntimeTotal    int
 	BindingEvidence string
@@ -228,6 +237,10 @@ func (s *Service) Readiness() Readiness {
 			status = "starting"
 		}
 	}
+	resourceHealth := s.currentResourceHealth()
+	if status != "draining" && !resourceHealth.Ready {
+		status, admissionStatus = "degraded", "blocked"
+	}
 	bindingEvidence := "unknown"
 	switch {
 	case declared && observed:
@@ -237,12 +250,13 @@ func (s *Service) Readiness() Readiness {
 	case observed:
 		bindingEvidence = string(airuntime.BindingLocallyObserved)
 	}
-	gpu := s.config.GPUStatus
+	gpu := resourceHealth.GPU
 	if gpu == "" {
 		gpu = "unknown"
 	}
 	return Readiness{
-		Status: status, Admission: admissionStatus, RuntimeReady: runtimeReady,
+		Status: status, Admission: admissionStatus,
+		Resources: resourceHealth.Status, RuntimeReady: runtimeReady,
 		RuntimeTotal: len(s.runtimeSlots), BindingEvidence: bindingEvidence,
 		GPU: gpu, Running: snapshot.Running, Reserved: snapshot.Reserved,
 	}
@@ -327,7 +341,17 @@ func (s *Service) monitorRuntimes() {
 }
 
 func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1.GetCapabilitiesRequest]) (*connect.Response[edgev1.GetCapabilitiesResponse], error) {
+	if !s.currentResourceHealth().Ready {
+		return connect.NewResponse(&edgev1.GetCapabilitiesResponse{
+			CapacityRevision: s.capacityRevision(),
+		}), nil
+	}
 	s.refreshRuntimes(ctx, false)
+	if !s.currentResourceHealth().Ready {
+		return connect.NewResponse(&edgev1.GetCapabilitiesResponse{
+			CapacityRevision: s.capacityRevision(),
+		}), nil
+	}
 	response := &edgev1.GetCapabilitiesResponse{CapacityRevision: s.capacityRevision()}
 	for _, capability := range s.capabilities {
 		slot := s.runtimeSlots[adapterKey(capability.ServiceID, capability.Operation, capability.Model)]
@@ -392,8 +416,18 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 	} else if found {
 		return connect.NewResponse(existing), nil
 	}
+	if !s.currentResourceHealth().Ready {
+		return nil, connect.NewError(
+			connect.CodeUnavailable, errResourcesUnavailable,
+		)
+	}
 	if _, err := slot.ensure(ctx, false); err != nil {
 		return nil, normalizePreflightError(err)
+	}
+	if !s.currentResourceHealth().Ready {
+		return nil, connect.NewError(
+			connect.CodeUnavailable, errResourcesUnavailable,
+		)
 	}
 	class, err := admissionClass(priority)
 	if err != nil {
@@ -456,6 +490,11 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 	} else if found {
 		return s.awaitInvocation(ctx, input.RequestId, existing, false)
 	}
+	if !s.currentResourceHealth().Ready {
+		return nil, connect.NewError(
+			connect.CodeUnavailable, errResourcesUnavailable,
+		)
+	}
 	binding, err := s.quotes.get(input.QuoteId, s.config.Now())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
@@ -482,6 +521,10 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 	if owner {
 		if _, err := slot.ensure(ctx, true); err != nil {
 			s.invocations.finish(call, nil, newPreflightFailure(err))
+			return s.awaitInvocation(ctx, input.RequestId, call, true)
+		}
+		if !s.currentResourceHealth().Ready {
+			s.invocations.finish(call, nil, errResourcesUnavailable)
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
 		priority, _ := fromWirePriority(input.Priority)
@@ -657,6 +700,53 @@ func validGPUStatus(value string) bool {
 	}
 }
 
+func validInitialResourceHealth(config Config) bool {
+	if config.ResourceHealth == nil {
+		return true
+	}
+	_, valid := observedResourceHealth(config.ResourceHealth)
+	return valid
+}
+
+func validResourceHealth(health probe.ResourceHealth) bool {
+	return (health.Status == "ready" || health.Status == "degraded") &&
+		health.Ready == (health.Status == "ready") &&
+		validGPUStatus(health.GPU)
+}
+
+func observedResourceHealth(
+	provider probe.ResourceHealthProvider,
+) (health probe.ResourceHealth, valid bool) {
+	defer func() {
+		if recover() != nil {
+			health, valid = probe.ResourceHealth{}, false
+		}
+	}()
+	health = provider.Health()
+	return health, validResourceHealth(health)
+}
+
+func safeResourceHealth(provider probe.ResourceHealthProvider) probe.ResourceHealth {
+	health, valid := observedResourceHealth(provider)
+	if !valid {
+		return probe.ResourceHealth{
+			Ready: false, Status: "degraded", GPU: "unknown",
+		}
+	}
+	return health
+}
+
+func (s *Service) currentResourceHealth() probe.ResourceHealth {
+	if s.resourceHealth != nil {
+		return safeResourceHealth(s.resourceHealth)
+	}
+	gpu := s.config.GPUStatus
+	if gpu == "" {
+		gpu = "unknown"
+	}
+	return probe.ResourceHealth{Ready: true, Status: "ready", GPU: gpu}
+}
+
 func randomID() (string, error) {
 	value := make([]byte, 18)
 	if _, err := rand.Read(value); err != nil {
@@ -673,7 +763,14 @@ func (s *Service) capacityRevision() string {
 			ready++
 		}
 	}
-	return fmt.Sprintf("tier1-%d-%d-%d", ready, snapshot.Running, snapshot.Reserved)
+	resourcesReady := 0
+	if s.currentResourceHealth().Ready {
+		resourcesReady = 1
+	}
+	return fmt.Sprintf(
+		"tier1-%d-%d-%d-%d",
+		resourcesReady, ready, snapshot.Running, snapshot.Reserved,
+	)
 }
 
 func toWirePriority(priority airuntime.Priority) edgev1.Priority {
@@ -700,6 +797,8 @@ func normalizeExecutionError(err error) *connect.Error {
 		return connect.NewError(connect.CodeCanceled, err)
 	case errors.Is(err, context.DeadlineExceeded):
 		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	case errors.Is(err, errResourcesUnavailable):
+		return connect.NewError(connect.CodeUnavailable, errResourcesUnavailable)
 	case errors.Is(err, scheduler.ErrQueueFull):
 		return connect.NewError(connect.CodeResourceExhausted, err)
 	case errors.Is(err, admission.ErrQueueFull), errors.Is(err, admission.ErrCapacity),
@@ -815,11 +914,17 @@ func (s *Service) BeginDrain() {
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.BeginDrain()
 	s.beginRuntimeStop()
+	var resourceErr error
+	if s.resourceHealth != nil {
+		resourceErr = s.resourceHealth.Shutdown(ctx)
+	}
 	schedulerErr := s.scheduler.Shutdown(ctx)
 	runtimeErr := s.waitRuntimeStop(ctx)
 	s.admission.Shutdown()
-	if schedulerErr != nil || runtimeErr != nil {
-		return errors.Join(ErrShutdownIncomplete, schedulerErr, runtimeErr)
+	if resourceErr != nil || schedulerErr != nil || runtimeErr != nil {
+		return errors.Join(
+			ErrShutdownIncomplete, resourceErr, schedulerErr, runtimeErr,
+		)
 	}
 	s.closeOnce.Do(func() {
 		for _, adapter := range s.adapters {

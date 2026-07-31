@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -425,7 +426,9 @@ func TestConfiguredTerminalPolicyRequiresProductionConfig(t *testing.T) {
 	}
 	if policy.Workers != defaultWorkers ||
 		policy.MaxConnections != defaultMaxConnections ||
-		policy.Admission.Capacity.VRAMBytes != 0 {
+		policy.Admission.Capacity.VRAMBytes != 0 ||
+		policy.ResourceMonitor.Interval != 10*time.Second ||
+		policy.ResourceMonitor.Timeout != 5*time.Second {
 		t.Fatalf("development policy=%#v", policy)
 	}
 	if _, err := admission.New(policy.Admission); err != nil {
@@ -538,7 +541,7 @@ func TestConfiguredTerminalPolicyRejectsDevelopmentFlagMixing(t *testing.T) {
 func workerTerminalPolicyJSON(ramBytes, vramBytes uint64) string {
 	ownerVRAM := vramBytes / 4
 	return fmt.Sprintf(`{
-  "version":2,
+  "version":3,
   "workers":2,
   "ownerReservedWorkers":1,
   "maxQueue":8,
@@ -553,6 +556,12 @@ func workerTerminalPolicyJSON(ramBytes, vramBytes uint64) string {
     "failureTtlMillis":2000,
     "refreshMillis":5000,
     "workers":4
+  },
+  "resourceMonitor":{
+    "intervalMillis":10000,
+    "timeoutMillis":5000,
+    "failureThreshold":2,
+    "recoveryThreshold":2
   },
   "admission":{
     "capacity":{
@@ -748,5 +757,83 @@ func (f *workerOllamaRuntime) ServeHTTP(
 		delete(f.models, value.Model)
 	default:
 		writer.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func TestResourceProbeSubprocessIsStrictBoundedAndCancelable(t *testing.T) {
+	t.Setenv("TOS_AI_RESOURCE_PROBE_HELPER", "1")
+	command := func(ctx context.Context, mode string) (probe.Report, error) {
+		return runResourceProbeCommand(
+			ctx, os.Args[0], "-test.run=TestResourceProbeHelperProcess", "--", mode,
+		)
+	}
+	report, err := command(context.Background(), "valid")
+	if err != nil || report.Host.MemoryBytes != 16<<30 ||
+		report.NVIDIA.Status != "unavailable" {
+		t.Fatalf("valid subprocess report=%#v err=%v", report, err)
+	}
+	for _, mode := range []string{"malformed", "unknown", "oversized", "failure"} {
+		if _, err := command(context.Background(), mode); err == nil {
+			t.Fatalf("resource subprocess mode %q failed open", mode)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := command(ctx, "hang"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("hung subprocess error=%v", err)
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("hung resource subprocess was not killed promptly")
+	}
+
+	bounded := &boundedProbeOutput{maximum: 8}
+	if _, err := bounded.Write([]byte("0123456789abcdef")); err != nil ||
+		bounded.buffer.Len() != 8 || !bounded.exceeded {
+		t.Fatalf("bounded output=%q exceeded=%v err=%v", bounded.buffer.Bytes(), bounded.exceeded, err)
+	}
+	if err := runInternalResourceProbe([]string{"unexpected"}, io.Discard); err == nil {
+		t.Fatal("internal resource probe accepted trailing arguments")
+	}
+}
+
+func TestResourceProbeHelperProcess(t *testing.T) {
+	if os.Getenv("TOS_AI_RESOURCE_PROBE_HELPER") != "1" {
+		return
+	}
+	mode := os.Args[len(os.Args)-1]
+	switch mode {
+	case "valid":
+		now := time.Now().UTC()
+		_ = json.NewEncoder(os.Stdout).Encode(probe.Report{
+			Host: probe.Host{
+				OS: "linux", Architecture: "amd64", LogicalCPUs: 8,
+				MemoryBytes: 16 << 30, CollectedAt: now,
+				Evidence: probe.EvidenceLocallyObserved,
+			},
+			NVIDIA: probe.NVIDIAReport{
+				Status: "unavailable", Devices: []probe.NVIDIADevice{},
+				CollectedAt: now, Evidence: probe.EvidenceLocallyObserved,
+			},
+		})
+		os.Exit(0)
+	case "malformed":
+		_, _ = io.WriteString(os.Stdout, `{"host":{}}`)
+		os.Exit(0)
+	case "unknown":
+		_, _ = io.WriteString(os.Stdout, `{"unknown":true}`)
+		os.Exit(0)
+	case "oversized":
+		_, _ = io.WriteString(
+			os.Stdout, strings.Repeat("x", maxResourceProbeOutput+1),
+		)
+		os.Exit(0)
+	case "failure":
+		os.Exit(7)
+	case "hang":
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	default:
+		os.Exit(9)
 	}
 }

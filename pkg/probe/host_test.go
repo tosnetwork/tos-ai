@@ -16,6 +16,56 @@ func TestCollectHost(t *testing.T) {
 	}
 }
 
+func TestValidateReportRejectsMalformedSubprocessObservations(t *testing.T) {
+	report, err := Collect(&fakeNVIDIA{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateReport(report); err != nil {
+		t.Fatalf("valid no-device report rejected: %v", err)
+	}
+	invalid := []Report{
+		func() Report { value := report; value.Host.OS = ""; return value }(),
+		func() Report { value := report; value.Host.LogicalCPUs = MaxLogicalCPUs + 1; return value }(),
+		func() Report { value := report; value.Host.Evidence = EvidenceDeclared; return value }(),
+		func() Report { value := report; value.NVIDIA.Status = "available"; return value }(),
+		func() Report { value := report; value.NVIDIA.Status = "unknown"; return value }(),
+		func() Report {
+			value := report
+			value.NVIDIA.Devices = make([]NVIDIADevice, DefaultMaxGPUDevices+1)
+			return value
+		}(),
+	}
+	for index, value := range invalid {
+		if err := ValidateReport(value); err == nil {
+			t.Fatalf("malformed report %d accepted: %#v", index, value)
+		}
+	}
+
+	gpuReport, err := Collect(&fakeNVIDIA{
+		count: 1,
+		devices: []fakeGPU{{
+			name: "NVIDIA test", total: 8 << 30, used: 1 << 30,
+			major: 8, minor: 9, temperature: 50,
+			power: 100_000, limit: 250_000,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateReport(gpuReport); err != nil {
+		t.Fatalf("valid GPU report rejected: %v", err)
+	}
+	gpuReport.NVIDIA.Devices[0].Index = 2
+	if err := ValidateReport(gpuReport); err != nil {
+		t.Fatalf("bounded partial GPU report rejected: %v", err)
+	}
+	gpuReport.NVIDIA.Devices[0].Index = DefaultMaxGPUDevices
+	if err := ValidateReport(gpuReport); err == nil {
+		t.Fatal("out-of-range GPU observation accepted")
+	}
+}
+
 type fakeNVIDIA struct {
 	initErr  error
 	count    int

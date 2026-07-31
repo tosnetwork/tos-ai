@@ -13,9 +13,11 @@ import (
 	"connectrpc.com/connect"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func newTestService(t *testing.T) *Service {
@@ -644,5 +646,316 @@ func TestReplayAndQuoteMapsRemainBounded(t *testing.T) {
 	service.quotes.mu.Unlock()
 	if invocations > 4 || quotes > 4 || requests > 4 {
 		t.Fatalf("bounded stores grew: invocations=%d quotes=%d requests=%d", invocations, quotes, requests)
+	}
+}
+
+type mutableResourceHealth struct {
+	mu            sync.Mutex
+	health        probe.ResourceHealth
+	panicOnHealth bool
+	shutdowns     atomic.Int32
+}
+
+func (h *mutableResourceHealth) Health() probe.ResourceHealth {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.panicOnHealth {
+		panic("resource backend failure")
+	}
+	return h.health
+}
+
+func (h *mutableResourceHealth) Shutdown(context.Context) error {
+	h.shutdowns.Add(1)
+	return nil
+}
+
+func (h *mutableResourceHealth) set(value probe.ResourceHealth) {
+	h.mu.Lock()
+	h.health = value
+	h.mu.Unlock()
+}
+
+func TestDynamicResourceHealthGatesNewWorkAndRecovers(t *testing.T) {
+	resources := &mutableResourceHealth{health: probe.ResourceHealth{
+		Ready: true, Status: "ready", GPU: "no-devices",
+	}}
+	taskScheduler, admissionController := newTestDependencies(t, 4)
+	config := testServiceConfig()
+	config.ResourceHealth = resources
+	service, err := NewService(
+		config, taskScheduler, admissionController,
+		[]airuntime.Adapter{mock.New(0)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			shutdownContext, cancel := context.WithTimeout(
+				context.Background(), time.Second,
+			)
+			defer cancel()
+			if err := service.Shutdown(shutdownContext); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Cleanup(shutdown)
+	service.RefreshRuntimes(context.Background())
+
+	deadline := time.Now().Add(time.Minute).UnixMilli()
+	quoteRequest := &edgev1.QuoteRequest{
+		RequestId: "resource-existing", ServiceId: "tos.ai.mock",
+		Operation: "generate", Model: "deterministic-echo", InputBytes: 5,
+		MaxOutputBytes: 16, DeadlineUnixMillis: deadline,
+		Priority: edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+	}
+	quote, err := service.Quote(
+		context.Background(), connect.NewRequest(quoteRequest),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources.set(probe.ResourceHealth{
+		Ready: false, Status: "degraded", GPU: "unavailable",
+	})
+	readiness := service.Readiness()
+	if readiness.Status != "degraded" || readiness.Admission != "blocked" ||
+		readiness.Resources != "degraded" || readiness.GPU != "unavailable" {
+		t.Fatalf("degraded readiness=%#v", readiness)
+	}
+	health, err := service.Health(
+		context.Background(), connect.NewRequest(&edgev1.HealthRequest{}),
+	)
+	if err != nil || !strings.Contains(health.Msg.Status, "resources=degraded") {
+		t.Fatalf("degraded health=%v err=%v", health, err)
+	}
+	capabilities, err := service.GetCapabilities(
+		context.Background(), connect.NewRequest(&edgev1.GetCapabilitiesRequest{}),
+	)
+	if err != nil || len(capabilities.Msg.Capabilities) != 0 ||
+		!strings.HasPrefix(capabilities.Msg.CapacityRevision, "tier1-0-") {
+		t.Fatalf("degraded capabilities=%v err=%v", capabilities, err)
+	}
+	replayedQuote, err := service.Quote(
+		context.Background(), connect.NewRequest(quoteRequest),
+	)
+	if err != nil || replayedQuote.Msg.QuoteId != quote.Msg.QuoteId {
+		t.Fatalf("idempotent quote replay=%v err=%v", replayedQuote, err)
+	}
+	newQuote := proto.Clone(quoteRequest).(*edgev1.QuoteRequest)
+	newQuote.RequestId = "resource-new-quote"
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(newQuote),
+	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("new quote while degraded error=%v", err)
+	}
+	invocation := &edgev1.InvokeRequest{
+		RequestId: quoteRequest.RequestId, QuoteId: quote.Msg.QuoteId,
+		ServiceId: quoteRequest.ServiceId, Operation: quoteRequest.Operation,
+		Model: quoteRequest.Model, Payload: []byte("hello"), MaxOutputBytes: 16,
+		DeadlineUnixMillis: deadline, Priority: quoteRequest.Priority,
+	}
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(invocation),
+	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("new invocation while degraded error=%v", err)
+	}
+	assertNoReservations(t, service)
+
+	resources.set(probe.ResourceHealth{
+		Ready: true, Status: "ready", GPU: "no-devices",
+	})
+	response, err := service.Invoke(
+		context.Background(), connect.NewRequest(invocation),
+	)
+	if err != nil || string(response.Msg.Output) != "hello" {
+		t.Fatalf("recovered invocation=%v err=%v", response, err)
+	}
+	resources.set(probe.ResourceHealth{
+		Ready: false, Status: "degraded", GPU: "unavailable",
+	})
+	replay, err := service.Invoke(
+		context.Background(), connect.NewRequest(invocation),
+	)
+	if err != nil || string(replay.Msg.Output) != "hello" {
+		t.Fatalf("completed replay while degraded=%v err=%v", replay, err)
+	}
+	assertNoReservations(t, service)
+	shutdown()
+	if resources.shutdowns.Load() != 1 {
+		t.Fatalf("resource provider shutdowns=%d", resources.shutdowns.Load())
+	}
+}
+
+func TestDynamicResourceDegradationDoesNotPreemptRunningWork(t *testing.T) {
+	resources := &mutableResourceHealth{health: probe.ResourceHealth{
+		Ready: true, Status: "ready", GPU: "no-devices",
+	}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	service := newConfiguredFaultService(
+		t,
+		func(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
+			close(started)
+			select {
+			case <-release:
+				return successfulFaultExecution(ctx, request)
+			case <-ctx.Done():
+				return airuntime.Response{}, ctx.Err()
+			}
+		},
+		func(config *Config) { config.ResourceHealth = resources },
+	)
+	request := quotedInvocation(
+		t, service, "resource-inflight", time.Now().Add(time.Minute),
+	)
+	type invocationResult struct {
+		response *connect.Response[edgev1.InvokeResponse]
+		err      error
+	}
+	resultChannel := make(chan invocationResult, 1)
+	go func() {
+		response, err := service.Invoke(
+			context.Background(), connect.NewRequest(request),
+		)
+		resultChannel <- invocationResult{response: response, err: err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("invocation did not start")
+	}
+	resources.set(probe.ResourceHealth{
+		Ready: false, Status: "degraded", GPU: "unavailable",
+	})
+	if readiness := service.Readiness(); readiness.Admission != "blocked" ||
+		readiness.Running != 1 {
+		t.Fatalf("degraded in-flight readiness=%#v", readiness)
+	}
+	newQuote := &edgev1.QuoteRequest{
+		RequestId: "resource-after-loss", ServiceId: request.ServiceId,
+		Operation: request.Operation, Model: request.Model, InputBytes: 1,
+		MaxOutputBytes: 1, DeadlineUnixMillis: time.Now().Add(time.Minute).UnixMilli(),
+		Priority: request.Priority,
+	}
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(newQuote),
+	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("new quote during in-flight degradation error=%v", err)
+	}
+	select {
+	case result := <-resultChannel:
+		t.Fatalf("in-flight invocation was preempted: %#v", result)
+	default:
+	}
+	close(release)
+	result := <-resultChannel
+	if result.err != nil || string(result.response.Msg.Output) != "hello" {
+		t.Fatalf("in-flight completion=%v err=%v", result.response, result.err)
+	}
+	assertNoReservations(t, service)
+}
+
+func TestResourceHealthIsRecheckedAfterRuntimePreflight(t *testing.T) {
+	resources := &mutableResourceHealth{health: probe.ResourceHealth{
+		Ready: true, Status: "ready", GPU: "no-devices",
+	}}
+	var executions atomic.Int32
+	service := newConfiguredFaultService(
+		t,
+		func(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
+			executions.Add(1)
+			return successfulFaultExecution(ctx, request)
+		},
+		func(config *Config) { config.ResourceHealth = resources },
+	)
+	adapter, slot := faultRuntime(t, service)
+	degradeDuringPreflight := func(context.Context) (airuntime.Preflight, error) {
+		resources.set(probe.ResourceHealth{
+			Ready: false, Status: "degraded", GPU: "unavailable",
+		})
+		return matchingPreflight(adapter.capability), nil
+	}
+	adapter.preflight = degradeDuringPreflight
+	slot.mu.Lock()
+	slot.checked = false
+	slot.mu.Unlock()
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "resource-quote-race", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo", InputBytes: 5,
+			MaxOutputBytes:     16,
+			DeadlineUnixMillis: time.Now().Add(time.Minute).UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		}),
+	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("quote after resource loss error=%v", err)
+	}
+
+	resources.set(probe.ResourceHealth{
+		Ready: true, Status: "ready", GPU: "no-devices",
+	})
+	adapter.preflight = func(context.Context) (airuntime.Preflight, error) {
+		return matchingPreflight(adapter.capability), nil
+	}
+	slot.mu.Lock()
+	slot.checked = false
+	slot.mu.Unlock()
+	request := quotedInvocation(
+		t, service, "resource-invoke-race", time.Now().Add(time.Minute),
+	)
+	adapter.preflight = degradeDuringPreflight
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(request),
+	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("invoke after resource loss error=%v", err)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("adapter executed %d times after resource loss", executions.Load())
+	}
+	assertNoReservations(t, service)
+}
+
+func TestResourceHealthProviderFailsClosed(t *testing.T) {
+	resources := &mutableResourceHealth{health: probe.ResourceHealth{
+		Ready: true, Status: "degraded", GPU: "unknown",
+	}}
+	taskScheduler, admissionController := newTestDependencies(t, 2)
+	config := testServiceConfig()
+	config.ResourceHealth = resources
+	if _, err := NewService(
+		config, taskScheduler, admissionController,
+		[]airuntime.Adapter{mock.New(0)},
+	); err == nil {
+		t.Fatal("contradictory initial resource health was accepted")
+	}
+	resources.set(probe.ResourceHealth{
+		Ready: true, Status: "ready", GPU: "unknown",
+	})
+	taskScheduler, admissionController = newTestDependencies(t, 2)
+	service, err := NewService(
+		config, taskScheduler, admissionController,
+		[]airuntime.Adapter{mock.New(0)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources.set(probe.ResourceHealth{
+		Ready: true, Status: "degraded", GPU: "unknown",
+	})
+	if service.Readiness().Admission != "blocked" {
+		t.Fatalf("invalid provider readiness=%#v", service.Readiness())
+	}
+	resources.mu.Lock()
+	resources.panicOnHealth = true
+	resources.mu.Unlock()
+	if service.Readiness().Admission != "blocked" {
+		t.Fatalf("panicking provider readiness=%#v", service.Readiness())
+	}
+	if err := service.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
