@@ -17,13 +17,19 @@ import (
 
 	"github.com/tosnetwork/tos-ai/pkg/adapters/internal/httpclient"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/ollamabinding"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
 
 type Config struct {
-	BaseURL                string
-	Model                  string
-	ModelDigest            string
+	BaseURL     string
+	Model       string
+	ModelDigest string
+	// RuntimeModel and SourceDigest are set only by administrator activation
+	// wiring. They bind a stable logical capability to a private,
+	// digest-scoped Ollama model created from the approved GGUF blob.
+	RuntimeModel           string
+	SourceDigest           string
 	MaxInputBytes          uint64
 	MaxOutputBytes         uint64
 	MaxRequestBytes        uint64
@@ -45,8 +51,11 @@ const (
 type Adapter struct {
 	endpoint          string
 	preflightEndpoint string
+	showEndpoint      string
 	httpClient        *http.Client
 	capability        airuntime.Capability
+	runtimeModel      string
+	sourceDigest      string
 	maxRequest        uint64
 	maxResponse       uint64
 }
@@ -61,6 +70,16 @@ func New(config Config) (*Adapter, error) {
 		config.Admission.RAMBytes == 0 || config.Admission.ContextTokens == 0 ||
 		config.Admission.BatchSize == 0 || config.Admission.ExecutionTime <= 0 {
 		return nil, errors.New("invalid Ollama adapter configuration")
+	}
+	runtimeModel := config.Model
+	if config.RuntimeModel != "" || config.SourceDigest != "" {
+		if config.SourceDigest != config.ModelDigest ||
+			!ollamabinding.ValidRuntimeModel(
+				config.RuntimeModel, config.SourceDigest,
+			) {
+			return nil, errors.New("invalid activated Ollama model binding")
+		}
+		runtimeModel = config.RuntimeModel
 	}
 	config.Admission.OutputBytes = config.MaxOutputBytes
 	capability := airuntime.Capability{
@@ -93,10 +112,13 @@ func New(config Config) (*Adapter, error) {
 	return &Adapter{
 		endpoint:          httpclient.Endpoint(baseURL, "/api/generate"),
 		preflightEndpoint: httpclient.Endpoint(baseURL, "/api/tags"),
+		showEndpoint:      httpclient.Endpoint(baseURL, "/api/show"),
 		httpClient:        client,
 		maxRequest:        config.MaxRequestBytes,
 		maxResponse:       config.MaxResponseBytes,
 		capability:        capability,
+		runtimeModel:      runtimeModel,
+		sourceDigest:      config.SourceDigest,
 	}, nil
 }
 
@@ -110,6 +132,9 @@ func (a *Adapter) Close() error {
 }
 
 func (a *Adapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
+	if a.sourceDigest != "" {
+		return a.preflightSource(ctx)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.preflightEndpoint, nil)
 	if err != nil {
 		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorInternal, nil)
@@ -148,7 +173,7 @@ func (a *Adapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
 	}
 	var result *airuntime.Preflight
 	for _, candidate := range inventory.Models {
-		if candidate.Name != a.capability.Model && candidate.Model != a.capability.Model {
+		if candidate.Name != a.runtimeModel && candidate.Model != a.runtimeModel {
 			continue
 		}
 		if result != nil || !validDigestHex(candidate.Digest) {
@@ -170,12 +195,80 @@ func (a *Adapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
 	return *result, nil
 }
 
+func (a *Adapter) preflightSource(
+	ctx context.Context,
+) (airuntime.Preflight, error) {
+	body, err := json.Marshal(struct {
+		Model   string `json:"model"`
+		Verbose bool   `json:"verbose"`
+	}{Model: a.runtimeModel})
+	if err != nil || uint64(len(body)) > a.maxRequest {
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorInternal, nil,
+		)
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, a.showEndpoint, bytes.NewReader(body),
+	)
+	if err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorInternal, nil,
+		)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := a.httpClient.Do(request)
+	if err != nil {
+		return airuntime.Preflight{}, classifyTransportError(ctx, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorUnavailable, nil,
+		)
+	}
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorRemote, nil,
+		)
+	}
+	limit := min(a.maxResponse, uint64(airuntime.MaxPreflightResponseBytesHard))
+	data, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+	if err != nil {
+		return airuntime.Preflight{}, classifyTransportError(ctx, err)
+	}
+	if uint64(len(data)) > limit {
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorLimit, nil,
+		)
+	}
+	if err := ollamabinding.VerifyShowResponse(
+		data, a.sourceDigest,
+	); err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorProtocol, nil,
+		)
+	}
+	result := airuntime.Preflight{
+		Model:          a.capability.Model,
+		ModelDigest:    a.capability.ModelDigest,
+		DigestEvidence: airuntime.BindingLocallyObserved,
+	}
+	if err := airuntime.ValidatePreflight(a.capability, result); err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(
+			airuntime.ErrorProtocol, nil,
+		)
+	}
+	return result, nil
+}
+
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
 	if err := airuntime.ValidateRequest(a.capability, request); err != nil {
 		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorInvalid, err)
 	}
 	body, err := json.Marshal(map[string]interface{}{
-		"model":  a.capability.Model,
+		"model":  a.runtimeModel,
 		"prompt": string(request.Payload),
 		"stream": false,
 	})

@@ -40,6 +40,7 @@ type modelSignerConfig struct {
 type ModelTrust struct {
 	Manager             *modelmanager.Manager
 	VerificationTimeout time.Duration
+	CacheDir            string
 }
 
 // LoadModelTrust opens a signed model cache using only the bounded,
@@ -106,6 +107,7 @@ func LoadModelTrust(path string) (ModelTrust, error) {
 	return ModelTrust{
 		Manager:             manager,
 		VerificationTimeout: time.Duration(config.VerifyTimeoutMillis) * time.Millisecond,
+		CacheDir:            filepath.Clean(config.CacheDir),
 	}, nil
 }
 

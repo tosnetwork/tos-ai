@@ -39,17 +39,20 @@ func TestLoadOpenAIConfigAndCredential(t *testing.T) {
 		}]
 	}`, server.URL, credential, strings.Repeat("a", 64))
 	path := writePrivate(t, "runtime.json", config, 0o600)
-	adapters, err := Load(path)
+	configuration, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(adapters) != 1 || adapters[0].Capability().Runtime != "openai-compatible" {
-		t.Fatalf("unexpected adapters: %#v", adapters)
+	if len(configuration.Adapters) != 1 ||
+		configuration.Adapters[0].Capability().Runtime != "openai-compatible" {
+		t.Fatalf("unexpected adapters: %#v", configuration.Adapters)
 	}
-	response, err := adapters[0].Execute(context.Background(), airuntime.Request{
-		RequestID: "configured-request", Operation: "generate", Model: "approved-model",
-		Payload: []byte("hello"), MaxOutputBytes: 64,
-	})
+	response, err := configuration.Adapters[0].Execute(
+		context.Background(), airuntime.Request{
+			RequestID: "configured-request", Operation: "generate", Model: "approved-model",
+			Payload: []byte("hello"), MaxOutputBytes: 64,
+		},
+	)
 	if err != nil || string(response.Output) != "configured" {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
@@ -65,16 +68,98 @@ func TestLoadOllamaUsesBoundedDefaults(t *testing.T) {
 			"modelDigest": "sha256:%s"
 		}]
 	}`, strings.Repeat("b", 64))
-	adapters, err := Load(writePrivate(t, "runtime.json", config, 0o600))
+	configuration, err := Load(
+		writePrivate(t, "runtime.json", config, 0o600),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	capability := adapters[0].Capability()
+	capability := configuration.Adapters[0].Capability()
 	if capability.MaxInputBytes != defaultMaxInputBytes ||
 		capability.MaxOutputBytes != defaultMaxOutputBytes ||
 		capability.Admission.RAMBytes != defaultRAMBytes ||
 		capability.Admission.ExecutionTime.Milliseconds() != defaultTimeoutMillis {
 		t.Fatalf("defaults were not applied: %#v", capability)
+	}
+}
+
+func TestLoadBuildsBoundedOllamaActivation(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "activation")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	config := fmt.Sprintf(`{
+		"version":1,
+		"activation":{
+			"stateDir":%q,
+			"operationTimeoutMillis":1000,
+			"cleanupTimeoutMillis":500
+		},
+		"adapters":[{
+			"type":"ollama",
+			"baseUrl":"http://127.0.0.1:11434",
+			"model":"approved-model",
+			"modelDigest":%q,
+			"activation":{"slotId":"primary","maxModelBytes":1048576}
+		}]
+	}`, stateDir, digest)
+	configuration, err := Load(
+		writePrivate(t, "activation.json", config, 0o600),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer configuration.CloseBackends()
+	if len(configuration.Adapters) != 1 ||
+		configuration.Activation == nil ||
+		len(configuration.Activation.Controller.Slots) != 1 ||
+		len(configuration.Activation.Desired) != 1 {
+		t.Fatalf("activation configuration=%#v", configuration)
+	}
+	slot := configuration.Activation.Controller.Slots[0].Policy
+	if slot.ID != "primary" || slot.Model != "approved-model" ||
+		slot.Runtime != "ollama" || slot.MaxModelBytes != 1048576 ||
+		configuration.Activation.Desired[0].Digest != digest {
+		t.Fatalf(
+			"slot=%#v desired=%#v",
+			slot, configuration.Activation.Desired,
+		)
+	}
+}
+
+func TestLoadRejectsAmbiguousActivationConfiguration(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	adapter := fmt.Sprintf(`{
+		"type":"ollama","baseUrl":"http://127.0.0.1:11434",
+		"model":"approved","modelDigest":%q,
+		"activation":{"slotId":"primary"}
+	}`, digest)
+	withoutGlobal := `{"version":1,"adapters":[` + adapter + `]}`
+	if _, err := Load(writePrivate(
+		t, "without-global.json", withoutGlobal, 0o600,
+	)); err == nil {
+		t.Fatal("activation slot without global policy accepted")
+	}
+	global := fmt.Sprintf(
+		`{"version":1,"activation":{"stateDir":%q},"adapters":[%s,%s]}`,
+		filepath.Join(t.TempDir(), "state"), adapter, adapter,
+	)
+	if _, err := Load(writePrivate(
+		t, "duplicate-slot.json", global, 0o600,
+	)); err == nil {
+		t.Fatal("duplicate activation slot accepted")
+	}
+	openAI := fmt.Sprintf(`{
+		"type":"openai-compatible","baseUrl":"https://runtime.example",
+		"model":"approved","modelDigest":%q,"runtimeRevision":"v1",
+		"activation":{"slotId":"primary"}
+	}`, digest)
+	unsupported := fmt.Sprintf(
+		`{"version":1,"activation":{"stateDir":%q},"adapters":[%s]}`,
+		filepath.Join(t.TempDir(), "state"), openAI,
+	)
+	if _, err := Load(writePrivate(
+		t, "unsupported.json", unsupported, 0o600,
+	)); err == nil {
+		t.Fatal("OpenAI-compatible activation accepted")
 	}
 }
 
@@ -173,6 +258,50 @@ func TestLoadRejectsWorkerAndAggregateConnectionLimits(t *testing.T) {
 	config = `{"version":1,"adapters":[` + strings.Join(values, ",") + `]}`
 	if _, err := Load(writePrivate(t, "connections.json", config, 0o600)); err == nil {
 		t.Fatal("aggregate connection hard limit accepted")
+	}
+}
+
+func TestLoadCountsActivationConnectionsInAggregateLimit(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "activation")
+	adapters := make([]string, 0, 9)
+	for index := range 8 {
+		adapters = append(adapters, fmt.Sprintf(`{
+			"type":"ollama","baseUrl":"http://127.0.0.1:11434",
+			"model":"model-%d","modelDigest":"sha256:%064x",
+			"maxConnections":30,"activation":{"slotId":"slot-%d"}
+		}`, index, index+1, index))
+	}
+	withinLimit := fmt.Sprintf(
+		`{"version":1,"activation":{"stateDir":%q},"adapters":[%s]}`,
+		stateDir, strings.Join(adapters, ","),
+	)
+	configuration, err := Load(writePrivate(
+		t, "activation-connections.json", withinLimit, 0o600,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, adapter := range configuration.Adapters {
+		if closer, ok := adapter.(airuntime.AdapterCloser); ok {
+			_ = closer.Close()
+		}
+	}
+	if err := configuration.CloseBackends(); err != nil {
+		t.Fatal(err)
+	}
+	adapters = append(adapters, fmt.Sprintf(`{
+		"type":"ollama","baseUrl":"http://127.0.0.1:11434",
+		"model":"extra","modelDigest":"sha256:%064x",
+		"maxConnections":1
+	}`, 9))
+	overLimit := fmt.Sprintf(
+		`{"version":1,"activation":{"stateDir":%q},"adapters":[%s]}`,
+		stateDir, strings.Join(adapters, ","),
+	)
+	if _, err := Load(writePrivate(
+		t, "activation-connections-over.json", overLimit, 0o600,
+	)); err == nil {
+		t.Fatal("activation HTTP connections were omitted from aggregate limit")
 	}
 }
 

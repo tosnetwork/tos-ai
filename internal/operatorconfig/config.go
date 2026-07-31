@@ -17,6 +17,9 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/adapters/ollama"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/openai"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/modelactivation"
+	activationollama "github.com/tosnetwork/tos-ai/pkg/modelactivation/ollama"
+	"github.com/tosnetwork/tos-ai/pkg/ollamabinding"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
 
@@ -31,6 +34,7 @@ const (
 	MaxResponseBytes         = uint64(8 << 20)
 	MaxConnectionsPerAdapter = 32
 	MaxConnectionsTotal      = 256
+	activationConnections    = 2
 	defaultMaxInputBytes     = uint64(1 << 20)
 	defaultMaxOutputBytes    = uint64(1 << 20)
 	defaultMaxRequestBytes   = uint64(8 << 20)
@@ -42,11 +46,21 @@ const (
 	defaultRAMBytes          = uint64(1 << 30)
 	defaultContextTokens     = uint64(8192)
 	defaultBatchSize         = uint32(1)
+	defaultActivationTimeout = int64((5 * time.Minute) / time.Millisecond)
+	defaultCleanupTimeout    = int64((30 * time.Second) / time.Millisecond)
+	defaultMaxModelBytes     = uint64(64 << 30)
 )
 
 type fileConfig struct {
-	Version  int             `json:"version"`
-	Adapters []adapterConfig `json:"adapters"`
+	Version    int               `json:"version"`
+	Activation *activationConfig `json:"activation,omitempty"`
+	Adapters   []adapterConfig   `json:"adapters"`
+}
+
+type activationConfig struct {
+	StateDir               string `json:"stateDir"`
+	OperationTimeoutMillis int64  `json:"operationTimeoutMillis,omitempty"`
+	CleanupTimeoutMillis   int64  `json:"cleanupTimeoutMillis,omitempty"`
 }
 
 type adapterConfig struct {
@@ -66,6 +80,12 @@ type adapterConfig struct {
 	ConnectTimeoutMillis   int64          `json:"connectTimeoutMillis,omitempty"`
 	AllowedPlaintextCIDRs  []string       `json:"allowedPlaintextCidrs,omitempty"`
 	Admission              resourceConfig `json:"admission,omitempty"`
+	Activation             *slotConfig    `json:"activation,omitempty"`
+}
+
+type slotConfig struct {
+	SlotID        string `json:"slotId"`
+	MaxModelBytes uint64 `json:"maxModelBytes,omitempty"`
 }
 
 type resourceConfig struct {
@@ -77,44 +97,136 @@ type resourceConfig struct {
 	ExecutionMillis int64  `json:"executionMillis,omitempty"`
 }
 
+type DesiredActivation struct {
+	SlotID string
+	Digest string
+}
+
+type ActivationConfiguration struct {
+	Controller modelactivation.Config
+	Desired    []DesiredActivation
+	closers    []interface{ Close() error }
+}
+
+type Configuration struct {
+	Adapters   []airuntime.Adapter
+	Activation *ActivationConfiguration
+}
+
+func (c *Configuration) CloseBackends() error {
+	if c == nil || c.Activation == nil {
+		return nil
+	}
+	var closeFailed bool
+	for _, closer := range c.Activation.closers {
+		if err := closer.Close(); err != nil {
+			closeFailed = true
+		}
+	}
+	if closeFailed {
+		return errors.New("close activation backends")
+	}
+	return nil
+}
+
 // Load reads a private regular JSON file and constructs only the runtime
 // adapters explicitly approved in that file.
-func Load(path string) ([]airuntime.Adapter, error) {
+func Load(path string) (Configuration, error) {
 	data, err := readPrivateFile(path, MaxConfigBytes, false)
 	if err != nil {
-		return nil, errors.New("load operator runtime configuration")
+		return Configuration{}, errors.New("load operator runtime configuration")
 	}
 	if err := validateJSON(data); err != nil {
-		return nil, errors.New("invalid operator runtime configuration")
+		return Configuration{}, errors.New("invalid operator runtime configuration")
 	}
 	var config fileConfig
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&config); err != nil {
-		return nil, errors.New("invalid operator runtime configuration")
+		return Configuration{}, errors.New("invalid operator runtime configuration")
 	}
 	if config.Version != Version || len(config.Adapters) == 0 ||
 		len(config.Adapters) > MaxAdapters {
-		return nil, errors.New("operator runtime configuration exceeds hard limits")
+		return Configuration{},
+			errors.New("operator runtime configuration exceeds hard limits")
+	}
+	if err := applyActivationDefaults(config.Activation); err != nil {
+		return Configuration{}, err
 	}
 	adapters := make([]airuntime.Adapter, 0, len(config.Adapters))
+	slots := make([]modelactivation.Slot, 0, len(config.Adapters))
+	desired := make([]DesiredActivation, 0, len(config.Adapters))
+	closers := make([]interface{ Close() error }, 0, len(config.Adapters))
+	seenSlots := make(map[string]struct{}, len(config.Adapters))
+	seenDigests := make(map[string]struct{}, len(config.Adapters))
 	totalConnections := 0
 	for index, value := range config.Adapters {
 		applyDefaults(&value)
-		if value.MaxConnections > MaxConnectionsPerAdapter ||
-			totalConnections > MaxConnectionsTotal-value.MaxConnections {
-			closeAdapters(adapters)
-			return nil, errors.New("operator runtime configuration exceeds connection limits")
+		connections := value.MaxConnections
+		if value.Activation != nil {
+			connections += activationConnections
 		}
-		adapter, err := buildAdapter(value)
+		if value.MaxConnections > MaxConnectionsPerAdapter ||
+			connections <= 0 ||
+			totalConnections > MaxConnectionsTotal-connections {
+			closeAdapters(adapters)
+			closeBackendClosers(closers)
+			return Configuration{},
+				errors.New("operator runtime configuration exceeds connection limits")
+		}
+		adapter, activated, err := buildAdapter(value, config.Activation)
 		if err != nil {
 			closeAdapters(adapters)
-			return nil, fmt.Errorf("runtime adapter %d is invalid", index)
+			closeBackendClosers(closers)
+			return Configuration{},
+				fmt.Errorf("runtime adapter %d is invalid", index)
 		}
-		totalConnections += value.MaxConnections
+		totalConnections += connections
 		adapters = append(adapters, adapter)
+		if activated == nil {
+			continue
+		}
+		if _, duplicate := seenSlots[activated.desired.SlotID]; duplicate {
+			closeAdapters(adapters)
+			_ = activated.closer.Close()
+			closeBackendClosers(closers)
+			return Configuration{}, errors.New("duplicate activation slot")
+		}
+		if _, duplicate := seenDigests[activated.desired.Digest]; duplicate {
+			closeAdapters(adapters)
+			_ = activated.closer.Close()
+			closeBackendClosers(closers)
+			return Configuration{}, errors.New("duplicate activation digest")
+		}
+		seenSlots[activated.desired.SlotID] = struct{}{}
+		seenDigests[activated.desired.Digest] = struct{}{}
+		slots = append(slots, activated.slot)
+		desired = append(desired, activated.desired)
+		closers = append(closers, activated.closer)
 	}
-	return adapters, nil
+	if config.Activation != nil && len(slots) == 0 {
+		closeAdapters(adapters)
+		return Configuration{},
+			errors.New("activation configuration has no slots")
+	}
+	result := Configuration{Adapters: adapters}
+	if len(slots) > 0 {
+		result.Activation = &ActivationConfiguration{
+			Controller: modelactivation.Config{
+				StateDir: config.Activation.StateDir,
+				OperationTimeout: time.Duration(
+					config.Activation.OperationTimeoutMillis,
+				) * time.Millisecond,
+				CleanupTimeout: time.Duration(
+					config.Activation.CleanupTimeoutMillis,
+				) * time.Millisecond,
+				Slots: slots,
+			},
+			Desired: desired,
+			closers: closers,
+		}
+	}
+	return result, nil
 }
 
 func closeAdapters(adapters []airuntime.Adapter) {
@@ -125,11 +237,26 @@ func closeAdapters(adapters []airuntime.Adapter) {
 	}
 }
 
-func buildAdapter(config adapterConfig) (airuntime.Adapter, error) {
+func closeBackendClosers(closers []interface{ Close() error }) {
+	for _, closer := range closers {
+		_ = closer.Close()
+	}
+}
+
+type activatedAdapter struct {
+	slot    modelactivation.Slot
+	desired DesiredActivation
+	closer  interface{ Close() error }
+}
+
+func buildAdapter(
+	config adapterConfig,
+	activation *activationConfig,
+) (airuntime.Adapter, *activatedAdapter, error) {
 	applyDefaults(&config)
 	if config.MaxInputBytes > MaxInputBytes || config.MaxOutputBytes > MaxOutputBytes ||
 		config.MaxRequestBytes > MaxRequestBytes || config.MaxResponseBytes > MaxResponseBytes {
-		return nil, errors.New("runtime body bound exceeds worker limit")
+		return nil, nil, errors.New("runtime body bound exceeds worker limit")
 	}
 	if config.TimeoutMillis <= 0 ||
 		config.TimeoutMillis > int64(time.Hour/time.Millisecond) ||
@@ -138,7 +265,7 @@ func buildAdapter(config adapterConfig) (airuntime.Adapter, error) {
 		config.Admission.ExecutionMillis <= 0 ||
 		config.Admission.ExecutionMillis > int64(time.Hour/time.Millisecond) ||
 		config.TimeoutMillis > config.Admission.ExecutionMillis {
-		return nil, errors.New("invalid duration")
+		return nil, nil, errors.New("invalid duration")
 	}
 	timeout := time.Duration(config.TimeoutMillis) * time.Millisecond
 	connectTimeout := time.Duration(config.ConnectTimeoutMillis) * time.Millisecond
@@ -152,10 +279,37 @@ func buildAdapter(config adapterConfig) (airuntime.Adapter, error) {
 	switch config.Type {
 	case "ollama":
 		if config.APIKeyFile != "" || config.RuntimeRevision != "" {
-			return nil, errors.New("unsupported Ollama option")
+			return nil, nil, errors.New("unsupported Ollama option")
 		}
-		return ollama.New(ollama.Config{
+		runtimeModel := ""
+		sourceDigest := ""
+		if config.Activation != nil {
+			if activation == nil {
+				return nil, nil, errors.New(
+					"activation slot requires global activation configuration",
+				)
+			}
+			if config.Activation.MaxModelBytes == 0 {
+				config.Activation.MaxModelBytes = defaultMaxModelBytes
+			}
+			if !ollamabinding.ValidSlotID(config.Activation.SlotID) ||
+				config.Activation.MaxModelBytes == 0 ||
+				config.Activation.MaxModelBytes >
+					modelactivation.MaxModelBytesHard {
+				return nil, nil, errors.New("invalid Ollama activation slot")
+			}
+			var err error
+			runtimeModel, err = ollamabinding.RuntimeModel(
+				config.Activation.SlotID, config.ModelDigest,
+			)
+			if err != nil {
+				return nil, nil, errors.New("invalid activated model digest")
+			}
+			sourceDigest = config.ModelDigest
+		}
+		adapter, err := ollama.New(ollama.Config{
 			BaseURL: config.BaseURL, Model: config.Model, ModelDigest: config.ModelDigest,
+			RuntimeModel: runtimeModel, SourceDigest: sourceDigest,
 			MaxInputBytes: config.MaxInputBytes, MaxOutputBytes: config.MaxOutputBytes,
 			MaxRequestBytes: config.MaxRequestBytes, MaxResponseBytes: config.MaxResponseBytes,
 			MaxConnections:         config.MaxConnections,
@@ -163,16 +317,58 @@ func buildAdapter(config adapterConfig) (airuntime.Adapter, error) {
 			Timeout:                timeout, ConnectTimeout: connectTimeout,
 			AllowedPlaintextCIDRs: config.AllowedPlaintextCIDRs, Admission: resources,
 		})
+		if err != nil || config.Activation == nil {
+			return adapter, nil, err
+		}
+		backend, err := activationollama.New(activationollama.Config{
+			BaseURL: config.BaseURL, SlotID: config.Activation.SlotID,
+			Model: config.Model,
+			Timeout: time.Duration(
+				activation.OperationTimeoutMillis,
+			) * time.Millisecond,
+			ConnectTimeout: connectTimeout,
+			CleanupTimeout: time.Duration(
+				activation.CleanupTimeoutMillis,
+			) * time.Millisecond,
+			MaxConnections:         activationConnections,
+			MaxResponseHeaderBytes: config.MaxResponseHeaderBytes,
+			MaxResponseBytes:       activationollama.MaxResponseBytesHard,
+			AllowedPlaintextCIDRs:  config.AllowedPlaintextCIDRs,
+		})
+		if err != nil {
+			_ = adapter.Close()
+			return nil, nil, err
+		}
+		return adapter, &activatedAdapter{
+			slot: modelactivation.Slot{
+				Policy: modelactivation.SlotPolicy{
+					ID: config.Activation.SlotID, Model: config.Model,
+					Runtime:       "ollama",
+					MaxModelBytes: config.Activation.MaxModelBytes,
+				},
+				Backend: backend,
+			},
+			desired: DesiredActivation{
+				SlotID: config.Activation.SlotID,
+				Digest: config.ModelDigest,
+			},
+			closer: backend,
+		}, nil
 	case "openai-compatible":
+		if config.Activation != nil {
+			return nil, nil, errors.New(
+				"OpenAI-compatible activation is unavailable",
+			)
+		}
 		var apiKey string
 		if config.APIKeyFile != "" {
 			value, err := readPrivateFile(config.APIKeyFile, openai.MaxCredentialBytes, true)
 			if err != nil {
-				return nil, errors.New("load runtime credential")
+				return nil, nil, errors.New("load runtime credential")
 			}
 			apiKey = string(value)
 		}
-		return openai.New(openai.Config{
+		adapter, err := openai.New(openai.Config{
 			BaseURL: config.BaseURL, APIKey: apiKey, Model: config.Model,
 			ModelDigest: config.ModelDigest, RuntimeRevision: config.RuntimeRevision,
 			MaxInputBytes: config.MaxInputBytes, MaxOutputBytes: config.MaxOutputBytes,
@@ -182,9 +378,32 @@ func buildAdapter(config adapterConfig) (airuntime.Adapter, error) {
 			Timeout:                timeout, ConnectTimeout: connectTimeout,
 			AllowedPlaintextCIDRs: config.AllowedPlaintextCIDRs, Admission: resources,
 		})
+		return adapter, nil, err
 	default:
-		return nil, errors.New("unsupported runtime adapter")
+		return nil, nil, errors.New("unsupported runtime adapter")
 	}
+}
+
+func applyActivationDefaults(config *activationConfig) error {
+	if config == nil {
+		return nil
+	}
+	if config.OperationTimeoutMillis == 0 {
+		config.OperationTimeoutMillis = defaultActivationTimeout
+	}
+	if config.CleanupTimeoutMillis == 0 {
+		config.CleanupTimeoutMillis = defaultCleanupTimeout
+	}
+	if !filepath.IsAbs(config.StateDir) ||
+		config.OperationTimeoutMillis <= 0 ||
+		config.OperationTimeoutMillis >
+			int64(modelactivation.MaxOperationTimeout/time.Millisecond) ||
+		config.CleanupTimeoutMillis <= 0 ||
+		config.CleanupTimeoutMillis >
+			int64(modelactivation.MaxCleanupTimeoutHard/time.Millisecond) {
+		return errors.New("invalid activation configuration")
+	}
+	return nil
 }
 
 func applyDefaults(config *adapterConfig) {

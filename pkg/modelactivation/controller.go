@@ -122,12 +122,15 @@ type Binding struct {
 // Backend is the narrow contract for a future audited Ollama, LocalAI, vLLM,
 // llama.cpp, or vendor runtime loader.
 //
-// Load must not replace the currently active slot binding. It must return only
-// after creating a separately unloadable candidate and must clean all partial
-// state before returning an error. Every method must honor cancellation and
-// deadlines. Backend implementations are administrator configured and never
-// receive task payloads, owner wallet keys, host paths, or arbitrary URLs.
-// A backend shared by multiple configured slots must be concurrency-safe.
+// Load must not replace the currently active slot binding. It must create a
+// separately unloadable candidate and attempt to clean partial state before
+// returning an error. If cleanup cannot be confirmed after a create attempt,
+// it must return the exact valid candidate Binding together with the error;
+// the controller then retries cleanup and retains the lease if that retry also
+// fails. Every method must honor cancellation and deadlines. Backend
+// implementations are administrator configured and never receive task
+// payloads, owner wallet keys, host paths, or arbitrary URLs. A backend shared
+// by multiple configured slots must be concurrency-safe.
 type Backend interface {
 	Load(context.Context, LoadRequest) (Binding, error)
 	Health(context.Context, Binding) error
@@ -650,6 +653,14 @@ func (c *Controller) Activate(
 			newError(ErrorInternal, nil)
 	}
 	if backendErr != nil {
+		if validateBinding(slot.policy, digest, candidate.binding) == nil {
+			if cleanupErr := c.cleanupCandidate(slot, candidate); cleanupErr != nil {
+				return c.finishFailure(
+						slot, old, candidate, ErrorCleanup,
+					),
+					newError(ErrorCleanup, nil)
+			}
+		}
 		_ = lease.Close()
 		kind := contextErrorKind(ctx, backendErr, ErrorBackend)
 		return c.finishFailure(slot, old, nil, kind), newError(kind, nil)

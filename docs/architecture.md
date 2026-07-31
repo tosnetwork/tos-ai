@@ -117,8 +117,8 @@ artifact fails worker startup. A cache artifact changed after startup prevents
 advertisement and Invoke from reaching local admission. Shutdown closes both
 the runtime adapter and approval lease once.
 
-`pkg/modelactivation` adds the in-process coordination contract for a future
-audited runtime loader. It acquires an already-open, path-free artifact lease,
+`pkg/modelactivation` adds the in-process coordination contract for audited
+runtime loaders. It acquires an already-open, path-free artifact lease,
 which keeps the content-addressed cache entry in use and non-evictable. Before
 the backend sees the artifact, the controller recomputes its SHA-256 through a
 1 MiB buffer under a hard operation timeout. Backends receive only a bounded
@@ -158,10 +158,40 @@ unbounded or third transient binding. One retained candidate lease per slot
 keeps retry state bounded and non-evictable. A normal shutdown unloads runtime
 bindings but retains desired intent so a later process can restore them.
 
-This is a fake-tested validation and lifecycle foundation only. No Ollama,
-LocalAI, vLLM, llama.cpp, or vendor activation backend is enabled, and the
-worker does not yet instantiate the controller. Backend-specific staging,
-production state-directory configuration, and worker wiring remain planned.
+`pkg/modelactivation/ollama` implements the first concrete backend for a fixed
+administrator-owned Ollama endpoint. It accepts only a controller-provided
+open GGUF artifact and exact SHA-256 digest. It checks or uploads the
+content-addressed blob, creates a private `tos-ai/<slot>:<digest>` model from
+one fixed `approved-model.gguf` file entry, then verifies `/api/show` reports
+GGUF and resolves its first `FROM` instruction to the exact approved blob.
+Health rechecks the model and blob and performs an empty bounded preload.
+Unload requests memory eviction and deletes the private model. No pull API,
+Internet URL, task-selected path, arbitrary Modelfile, or owner credential is
+accepted.
+
+The backend serializes operations through one cancellation-aware fixed gate,
+has no watcher or background goroutine, and bounds connections, headers,
+response bytes, JSON depth/fields/items, runtime inventory, recovery
+candidates, and cleanup time. All errors crossing the package boundary are
+stable and omit endpoints and paths. An uncertain create failure returns the
+candidate binding so the controller can retry cleanup; a repeated cleanup
+failure retains one lease and blocks the slot.
+
+`tos-ai-worker` enables this path only when a private runtime configuration
+contains both a global activation state policy and an Ollama slot and a
+separate signed model-trust configuration is supplied. Model-cache and
+activation-state directories may not contain one another. Startup performs
+`Recover`, activates every fixed desired digest, wraps inference adapters with
+the signed-cache approval guard, and only then creates the Unix listener.
+Shutdown drains service work before synchronously unloading activation slots
+and closing backend transports. Desired intent remains on disk, so a restart
+can recreate a cleanly removed private runtime model without downloading it.
+
+Activation for LocalAI, vLLM, llama.cpp, and vendor runtimes remains
+unimplemented. There is no live lifecycle RPC or arbitrary runtime/model
+creation interface. The Ollama endpoint and each activation slot namespace
+are a single-worker operator boundary; there is no distributed lock across
+workers sharing one runtime.
 
 ## Runtime adapters
 
@@ -182,12 +212,16 @@ and allow HTTP only for loopback or an explicitly configured private/local
 CIDR. Returned errors are categorized without endpoint, filesystem, or
 credential details.
 
-Ollama preflight reads `/api/tags`, accepts at most 1 MiB and 256 entries, and
-requires one exact model-name and SHA-256 digest match. Its digest evidence is
-`locally-observed`. OpenAI-compatible preflight reads `/v1/models` with the
-same bounds and requires one exact model ID. Because that API provides no
-portable content digest, its administrator-configured digest remains
-`declared`; the worker does not upgrade that claim to observed or attested.
+A separately managed Ollama model preflight reads `/api/tags`, accepts at most
+1 MiB and 256 entries, and requires one exact model-name and SHA-256 digest
+match. An activated slot uses its private digest-scoped runtime model and
+validates `/api/show` against the exact source blob instead. Its public
+capability continues to expose the stable administrator model name, not the
+private handle. Both modes report `locally-observed` digest evidence.
+OpenAI-compatible preflight reads `/v1/models` with the same bounds and
+requires one exact model ID. Because that API provides no portable content
+digest, its administrator-configured digest remains `declared`; the worker
+does not upgrade that claim to observed or attested.
 
 Each configured adapter has one fixed-size preflight slot. Concurrent checks
 coalesce without spawning a watcher, waiters have an explicit cap, success
@@ -217,11 +251,9 @@ stable unavailable categories and do not expose cache paths or signer data.
 
 The configured model digest remains an administrator assertion for generic
 OpenAI-compatible runtimes even when the same digest is approved in the local
-signed cache. Ollama supplies a runtime digest for an exact local observation,
-so preflight can match that observation to the approved digest. Neither
-interface provides hardware attestation or proves how runtime memory was
-populated. Automatic activation of verified model-manager artifacts is still
-planned.
+signed cache. Ollama activation binds one private model to the exact approved
+source blob, but neither interface provides hardware attestation or proves
+how runtime memory is executed.
 
 ## Execution isolation
 
@@ -249,12 +281,15 @@ Implemented:
 - signed bounded model-manager and update-verification foundations
 - optional signed-cache model approval guards in worker preflight
 - path-free model leases, bounded runtime-activation coordination, and
-  crash-safe active/known-good intent with explicit fake-backend recovery
+  crash-safe active/known-good intent with explicit recovery
+- opt-in signed-cache GGUF activation for fixed Ollama endpoints, including
+  startup recovery and synchronous shutdown cleanup
 - container isolation contract and validation layer with `DenyAll`
 
 Planned, not claimed by this release:
 
-- audited activation backends and worker wiring for configured runtimes
+- activation backends for LocalAI, vLLM, llama.cpp, and vendor runtimes
+- live administrator lifecycle controls for fixed activation slots
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core

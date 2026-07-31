@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,6 +76,117 @@ func TestPreflightVerifiesObservedModelDigest(t *testing.T) {
 	if err != nil || result.ModelDigest != adapter.capability.ModelDigest ||
 		result.DigestEvidence != airuntime.BindingLocallyObserved {
 		t.Fatalf("preflight=%#v err=%v", result, err)
+	}
+}
+
+func TestActivatedPreflightVerifiesApprovedSourceAndUsesPrivateModel(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	runtimeModel := "tos-ai/primary:" + strings.Repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/api/show":
+			if request.Method != http.MethodPost {
+				t.Fatalf("show method=%s", request.Method)
+			}
+			_, _ = writer.Write([]byte(fmt.Sprintf(
+				`{"modelfile":"FROM /models/blobs/sha256-%s",`+
+					`"details":{"format":"gguf"}}`,
+				strings.TrimPrefix(digest, "sha256:"),
+			)))
+		case "/api/generate":
+			data, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), runtimeModel) {
+				t.Fatalf("private runtime model missing from request: %s", data)
+			}
+			_, _ = writer.Write([]byte(
+				`{"response":"activated","done":true}`,
+			))
+		default:
+			t.Fatalf("unexpected path=%s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	value := config(server.URL)
+	value.RuntimeModel = runtimeModel
+	value.SourceDigest = digest
+	adapter, err := New(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Preflight(context.Background())
+	if err != nil || result.Model != "qwen" ||
+		result.ModelDigest != digest ||
+		result.DigestEvidence != airuntime.BindingLocallyObserved {
+		t.Fatalf("activated preflight=%#v err=%v", result, err)
+	}
+	response, err := adapter.Execute(
+		context.Background(),
+		airuntime.Request{
+			RequestID: "activated", Operation: "generate", Model: "qwen",
+			Payload: []byte("hello"), MaxOutputBytes: 32,
+		},
+	)
+	if err != nil || string(response.Output) != "activated" {
+		t.Fatalf("activated response=%#v err=%v", response, err)
+	}
+}
+
+func TestActivatedPreflightRejectsWrongOrOversizedSource(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	tests := []struct {
+		name string
+		body string
+		kind airuntime.ErrorKind
+	}{
+		{
+			name: "wrong digest",
+			body: `{"modelfile":"FROM sha256-` + strings.Repeat("b", 64) +
+				`","details":{"format":"gguf"}}`,
+			kind: airuntime.ErrorProtocol,
+		},
+		{
+			name: "duplicate",
+			body: `{"modelfile":"FROM sha256-` + strings.Repeat("a", 64) +
+				`","modelfile":"FROM sha256-` + strings.Repeat("a", 64) +
+				`","details":{"format":"gguf"}}`,
+			kind: airuntime.ErrorProtocol,
+		},
+		{
+			name: "oversized",
+			body: strings.Repeat(
+				"x", int(airuntime.MaxPreflightResponseBytesHard)+1,
+			),
+			kind: airuntime.ErrorLimit,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(
+				writer http.ResponseWriter,
+				_ *http.Request,
+			) {
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			value := config(server.URL)
+			value.RuntimeModel = "tos-ai/primary:" + strings.Repeat("a", 64)
+			value.SourceDigest = digest
+			adapter, err := New(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := adapter.Preflight(
+				context.Background(),
+			); airuntime.ErrorKindOf(err) != test.kind {
+				t.Fatalf("activated preflight error=%v", err)
+			}
+		})
 	}
 }
 

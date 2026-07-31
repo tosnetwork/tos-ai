@@ -392,6 +392,37 @@ func TestCleanupFailureStaysBoundedAndCanRetry(t *testing.T) {
 	}
 }
 
+func TestLoadPartialBindingCleanupFailureRetainsLease(t *testing.T) {
+	f := newActivationFixture(t)
+	digest := f.importModel(t, "candidate.gguf", []byte("partial"))
+	f.backend.loadFn = func(
+		_ context.Context,
+		request LoadRequest,
+	) (Binding, error) {
+		return matchingBinding(request), errors.New("load response failed")
+	}
+	cleanupFails := true
+	f.backend.unloadFn = func(context.Context, Binding) error {
+		if cleanupFails {
+			return errors.New("cleanup failed")
+		}
+		return nil
+	}
+	status, err := f.controller.Activate(
+		context.Background(), "primary", digest,
+	)
+	if ErrorKindOf(err) != ErrorCleanup || !status.CleanupPending ||
+		f.manager.Status(digest).InUse != 1 {
+		t.Fatalf("partial load status=%#v err=%v", status, err)
+	}
+	cleanupFails = false
+	status, err = f.controller.RetryCleanup(context.Background(), "primary")
+	if err != nil || status.CleanupPending ||
+		f.manager.Status(digest).InUse != 0 {
+		t.Fatalf("partial cleanup status=%#v err=%v", status, err)
+	}
+}
+
 func TestCancellationTimeoutAndPanicAreStable(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		f := newActivationFixture(t)

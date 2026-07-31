@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/modelactivation"
 	"github.com/tosnetwork/tos-ai/pkg/modelapproval"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
@@ -68,7 +71,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	adapters, err := configuredAdapters(
+	runtimes, err := configuredRuntimes(
 		runtimeConfigPath, modelTrustConfigPath, mockDelay,
 	)
 	if err != nil {
@@ -86,10 +89,14 @@ func run() error {
 		MaxPreflightWaiters: preflightWaiters(maxConnections),
 		PriceNanoTOS:        0,
 		GPUStatus:           report.NVIDIA.Status,
-	}, taskScheduler, admissionController, adapters)
+	}, taskScheduler, admissionController, runtimes.adapters)
 	if err != nil {
-		closeRuntimeAdapters(adapters)
-		return err
+		closeRuntimeAdapters(runtimes.adapters)
+		shutdownContext, cancel := context.WithTimeout(
+			context.Background(), runtimes.activationCleanupTimeout(),
+		)
+		defer cancel()
+		return errors.Join(err, runtimes.closeActivation(shutdownContext))
 	}
 	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 10*time.Second)
 	readiness := service.RefreshRuntimes(preflightContext)
@@ -115,21 +122,26 @@ func run() error {
 	}
 	listener, err := unixserver.ListenLimited(socketPath, maxConnections)
 	if err != nil {
-		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = service.Shutdown(shutdownContext)
-		return err
+		cancel()
+		activationContext, cancelActivation := context.WithTimeout(
+			context.Background(), runtimes.activationCleanupTimeout(),
+		)
+		activationErr := runtimes.closeActivation(activationContext)
+		cancelActivation()
+		return errors.Join(err, activationErr)
 	}
 	defer listener.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	errors := make(chan error, 1)
-	go func() { errors <- server.Serve(listener) }()
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- server.Serve(listener) }()
 	log.Printf("tos-ai-worker private socket: %s", socketPath)
 	var serveErr error
 	select {
-	case err := <-errors:
+	case err := <-serverErrors:
 		if err != nil && err != http.ErrServerClosed {
 			serveErr = err
 		}
@@ -137,23 +149,28 @@ func run() error {
 	}
 	service.BeginDrain()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	shutdownErr := server.Shutdown(shutdownContext)
 	serviceErr := service.Shutdown(shutdownContext)
-	if serveErr != nil {
-		return serveErr
-	}
-	if shutdownErr != nil {
-		return shutdownErr
-	}
-	return serviceErr
+	cancel()
+	activationContext, cancelActivation := context.WithTimeout(
+		context.Background(), runtimes.activationCleanupTimeout(),
+	)
+	activationErr := runtimes.closeActivation(activationContext)
+	cancelActivation()
+	return errors.Join(serveErr, shutdownErr, serviceErr, activationErr)
 }
 
-func configuredAdapters(
+type runtimeResources struct {
+	adapters      []airuntime.Adapter
+	activation    *modelactivation.Controller
+	configuration *operatorconfig.Configuration
+}
+
+func configuredRuntimes(
 	configPath string,
 	modelTrustPath string,
 	mockDelay time.Duration,
-) ([]airuntime.Adapter, error) {
+) (*runtimeResources, error) {
 	if mockDelay < 0 || mockDelay > time.Minute {
 		return nil, fmt.Errorf("mock delay exceeds hard limits")
 	}
@@ -161,34 +178,172 @@ func configuredAdapters(
 		if modelTrustPath != "" {
 			return nil, fmt.Errorf("model trust requires a runtime configuration")
 		}
-		return []airuntime.Adapter{mock.New(mockDelay)}, nil
+		return &runtimeResources{
+			adapters: []airuntime.Adapter{mock.New(mockDelay)},
+		}, nil
 	}
 	if mockDelay != 0 {
 		return nil, fmt.Errorf("mock delay cannot be used with a runtime configuration")
 	}
-	adapters, err := operatorconfig.Load(configPath)
+	configuration, err := operatorconfig.Load(configPath)
 	if err != nil {
 		return nil, err
 	}
 	if modelTrustPath == "" {
-		return adapters, nil
+		if configuration.Activation != nil {
+			closeRuntimeAdapters(configuration.Adapters)
+			_ = configuration.CloseBackends()
+			return nil, fmt.Errorf("model activation requires signed model trust")
+		}
+		return &runtimeResources{
+			adapters: configuration.Adapters, configuration: &configuration,
+		}, nil
 	}
 	trust, err := operatorconfig.LoadModelTrust(modelTrustPath)
 	if err != nil {
-		closeRuntimeAdapters(adapters)
+		closeRuntimeAdapters(configuration.Adapters)
+		_ = configuration.CloseBackends()
 		return nil, err
+	}
+	resources := &runtimeResources{
+		adapters: configuration.Adapters, configuration: &configuration,
+	}
+	if configuration.Activation != nil {
+		if directoriesOverlap(
+			trust.CacheDir, configuration.Activation.Controller.StateDir,
+		) {
+			closeRuntimeAdapters(configuration.Adapters)
+			_ = configuration.CloseBackends()
+			return nil, fmt.Errorf(
+				"model cache and activation state must be separate",
+			)
+		}
+		controller, err := modelactivation.New(
+			trust.Manager, configuration.Activation.Controller,
+		)
+		if err != nil {
+			closeRuntimeAdapters(configuration.Adapters)
+			_ = configuration.CloseBackends()
+			return nil, fmt.Errorf("configure model activation")
+		}
+		resources.activation = controller
+		activationContext, cancelActivation := context.WithTimeout(
+			context.Background(),
+			activationStartupTimeout(configuration.Activation),
+		)
+		err = controller.Recover(activationContext)
+		if err == nil {
+			for _, desired := range configuration.Activation.Desired {
+				if activationContext.Err() != nil {
+					err = activationContext.Err()
+					break
+				}
+				if _, activateErr := controller.Activate(
+					activationContext, desired.SlotID, desired.Digest,
+				); activateErr != nil {
+					err = activateErr
+					break
+				}
+			}
+		}
+		cancelActivation()
+		if err != nil {
+			closeRuntimeAdapters(configuration.Adapters)
+			cleanupContext, cancelCleanup := context.WithTimeout(
+				context.Background(), resources.activationCleanupTimeout(),
+			)
+			_ = resources.closeActivation(cleanupContext)
+			cancelCleanup()
+			return nil, fmt.Errorf("activate configured runtime models")
+		}
 	}
 	verifyContext, cancelVerify := context.WithTimeout(
 		context.Background(), trust.VerificationTimeout,
 	)
 	defer cancelVerify()
 	guarded, err := modelapproval.WrapAll(
-		verifyContext, trust.Manager, adapters, trust.VerificationTimeout,
+		verifyContext, trust.Manager, configuration.Adapters,
+		trust.VerificationTimeout,
 	)
 	if err != nil {
+		cleanupContext, cancelCleanup := context.WithTimeout(
+			context.Background(), resources.activationCleanupTimeout(),
+		)
+		_ = resources.closeActivation(cleanupContext)
+		cancelCleanup()
 		return nil, fmt.Errorf("approve configured runtime models")
 	}
-	return guarded, nil
+	resources.adapters = guarded
+	return resources, nil
+}
+
+func (r *runtimeResources) closeActivation(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	var activationErr error
+	if r.activation != nil {
+		activationErr = r.activation.Close(ctx)
+	}
+	var backendErr error
+	if r.configuration != nil {
+		backendErr = r.configuration.CloseBackends()
+	}
+	return errors.Join(activationErr, backendErr)
+}
+
+func (r *runtimeResources) activationCleanupTimeout() time.Duration {
+	const hardLimit = 30 * time.Minute
+	if r == nil || r.configuration == nil ||
+		r.configuration.Activation == nil {
+		return time.Second
+	}
+	activation := r.configuration.Activation
+	operations := len(activation.Desired)
+	perOperation := activation.Controller.CleanupTimeout
+	if operations <= 0 || perOperation <= 0 ||
+		perOperation > hardLimit/time.Duration(operations) {
+		return hardLimit
+	}
+	result := perOperation * time.Duration(operations)
+	if result <= 0 || result > hardLimit {
+		return hardLimit
+	}
+	return result
+}
+
+func activationStartupTimeout(
+	activation *operatorconfig.ActivationConfiguration,
+) time.Duration {
+	const hardLimit = 30 * time.Minute
+	if activation == nil {
+		return time.Second
+	}
+	operations := len(activation.Desired)*6 + 1
+	perOperation := activation.Controller.OperationTimeout
+	if operations <= 0 || perOperation <= 0 ||
+		perOperation > hardLimit/time.Duration(operations) {
+		return hardLimit
+	}
+	result := perOperation * time.Duration(operations)
+	if result > hardLimit {
+		return hardLimit
+	}
+	return result
+}
+
+func directoriesOverlap(left string, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	return pathContains(left, right) || pathContains(right, left)
+}
+
+func pathContains(parent string, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && (relative == "." ||
+		(relative != ".." && !strings.HasPrefix(
+			relative, ".."+string(filepath.Separator),
+		)))
 }
 
 func closeRuntimeAdapters(adapters []airuntime.Adapter) {

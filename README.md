@@ -27,10 +27,14 @@ The Go 1.24 module currently contains:
   active, draining, failed, and absent states, bounded LRU storage, protected
   active/pinned/in-use entries, atomic artifact/metadata activation,
   restart-time integrity recovery, and crash-residue cleanup;
-- path-free model artifact leases plus a bounded, fake-tested runtime
-  activation coordinator contract with activation-time SHA-256 verification,
-  health gating, known-good preservation, rollback, retryable cleanup, and
-  optional crash-safe activation intent with explicit startup recovery;
+- path-free model artifact leases plus a bounded runtime activation
+  coordinator with activation-time SHA-256 verification, health gating,
+  known-good preservation, rollback, retryable cleanup, and optional
+  crash-safe activation intent with explicit startup recovery;
+- an opt-in Ollama GGUF activation backend that uploads only an already-open
+  signed-cache artifact, creates a digest-scoped private runtime model,
+  verifies its exact source blob, preloads it before readiness, and
+  synchronously unloads and deletes it during shutdown;
 - optional worker model-approval guards that bind configured runtime digests
   to recovered, signed local cache artifacts, retain bounded leases, and
   rehash them before every runtime preflight;
@@ -114,10 +118,29 @@ download RPC, and the default mock mode rejects `-model-trust-config`. See
 the example public key is a structural placeholder and must be replaced with
 the operator's approved Ed25519 public key.
 
+An Ollama adapter may additionally opt into controlled startup activation.
+This requires both the global `activation` policy and an adapter-local fixed
+slot, plus `-model-trust-config`. Startup synchronously recovers the bounded
+private intent, rehashes the signed-cache GGUF, uploads that open artifact to
+Ollama's content-addressed blob endpoint when absent, creates a private model
+named from the slot and SHA-256 digest, verifies `/api/show` resolves to that
+exact blob, and preloads it before the worker listens. It never calls a model
+pull API, accepts a URL or host path, or exposes the private runtime model name
+to task payloads. Shutdown drains inference, unloads and deletes the private
+runtime model, releases all artifact leases, and leaves only the desired
+slot/digest intent for bounded restart recovery. The activation state
+directory must be private, absolute, and separate from the model cache. See
+[docs/ollama-activation-config.example.json](docs/ollama-activation-config.example.json).
+Each activation slot namespace and its Ollama endpoint are a single-worker
+operator boundary; concurrently managed workers must use isolated runtimes or
+distinct slot IDs.
+
 The worker preflights configured runtimes at startup, refreshes stale bindings
 for capabilities and Quote, and performs an authoritative recheck for every
-new Invoke owner. Ollama model names and SHA-256 digests are matched against
-its bounded `/api/tags` inventory and are reported as `locally-observed`.
+new Invoke owner. A separately managed Ollama model name and SHA-256 digest
+are matched against its bounded `/api/tags` inventory. An activated Ollama
+slot instead verifies that `/api/show` identifies the exact approved GGUF
+source blob. Both are reported as `locally-observed`.
 OpenAI-compatible `/v1/models` can prove only that the configured model ID is
 present; its configured content digest remains `declared`. A failed or stale
 runtime is omitted from capabilities and cannot reach admission or execution.
@@ -176,22 +199,22 @@ TTL; it creates no periodic watcher.
 - A signed local cache approval proves only that an administrator-approved
   artifact is available to this worker. Generic OpenAI-compatible runtime
   model IDs remain `declared`; the guard does not claim remote content
-  attestation or automatic model activation.
+  attestation.
+- Ollama activation is restricted to administrator-configured GGUF artifacts
+  already present in the signed cache. It does not authorize Internet
+  downloads, task-selected models, arbitrary Modelfiles, or arbitrary runtime
+  creation.
 
 ## Not implemented
 
-This repository does not yet provide or enable an audited activation backend
-for Ollama, LocalAI, vLLM, or llama.cpp. `pkg/modelactivation` defines the
-bounded coordination, rollback, persistent-intent, and recovery contracts and
-is tested with a fake backend, but it is not wired into `tos-ai-worker`.
-Enabling its optional private state directory requires an explicit successful
-`Recover` before lifecycle operations; that recovery rehashes the desired
-artifact, health-checks or reloads it, and removes at most one crash-residue
-candidate per fixed slot. An operator must still ensure that each configured
-model name is loaded and bound to the declared digest in the separately
-managed runtime. Ollama exposes a runtime digest that is checked exactly;
-generic OpenAI-compatible model-list APIs expose an ID but do not attest its
-configured content digest.
+Controlled activation is currently implemented only for an
+administrator-configured Ollama endpoint and a signed-cache GGUF artifact.
+There is no activation backend for LocalAI, vLLM, llama.cpp, or vendor
+runtimes, no live activation-management RPC, no arbitrary Modelfile support,
+and no Internet model pull/download. Separately managed Ollama models remain
+supported through bounded inventory preflight. Generic OpenAI-compatible
+model-list APIs expose an ID but do not attest their configured content
+digest.
 
 This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet
