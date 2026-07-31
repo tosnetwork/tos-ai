@@ -67,6 +67,8 @@ func TestOperationalMetricsAreBoundedAndLowCardinality(t *testing.T) {
 		"tos_ai_worker_task_store_tasks 0\n",
 		"tos_ai_worker_task_store_capacity 64\n",
 		"tos_ai_worker_task_store_available 64\n",
+		"tos_ai_worker_startup_interrupted_tasks_failed_total 0\n",
+		"tos_ai_worker_startup_expired_tasks_removed_total 0\n",
 		`tos_ai_worker_runtimes{state="ready"} 1` + "\n",
 		`tos_ai_worker_admission_resource_capacity{resource="ram_bytes"} 1073741824` + "\n",
 		`tos_ai_worker_rpc_requests_total{method="health",code="ok"} 64` + "\n",

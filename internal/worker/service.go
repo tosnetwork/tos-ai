@@ -67,28 +67,29 @@ type Config struct {
 }
 
 type Service struct {
-	config         Config
-	scheduler      *scheduler.Scheduler
-	adapters       map[string]airuntime.Adapter
-	runtimeSlots   map[string]*runtimeSlot
-	capabilities   []airuntime.Capability
-	quotes         *quoteStore
-	invocations    *invocationStore
-	admission      *admission.Controller
-	resourceHealth probe.ResourceHealthProvider
-	taskStore      *localrpc.WorkerTaskStore
-	lifecycleMu    sync.Mutex
-	draining       atomic.Bool
-	runtimeCtx     context.Context
-	runtimeStop    context.CancelFunc
-	runtimeWG      sync.WaitGroup
-	resultWG       sync.WaitGroup
-	stopOnce       sync.Once
-	resultWaitOnce sync.Once
-	runtimeDone    chan struct{}
-	resultDone     chan struct{}
-	closeOnce      sync.Once
-	closeErr       error
+	config          Config
+	scheduler       *scheduler.Scheduler
+	adapters        map[string]airuntime.Adapter
+	runtimeSlots    map[string]*runtimeSlot
+	capabilities    []airuntime.Capability
+	quotes          *quoteStore
+	invocations     *invocationStore
+	admission       *admission.Controller
+	resourceHealth  probe.ResourceHealthProvider
+	taskStore       *localrpc.WorkerTaskStore
+	startupRecovery startupTaskRecovery
+	lifecycleMu     sync.Mutex
+	draining        atomic.Bool
+	runtimeCtx      context.Context
+	runtimeStop     context.CancelFunc
+	runtimeWG       sync.WaitGroup
+	resultWG        sync.WaitGroup
+	stopOnce        sync.Once
+	resultWaitOnce  sync.Once
+	runtimeDone     chan struct{}
+	resultDone      chan struct{}
+	closeOnce       sync.Once
+	closeErr        error
 }
 
 func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionController *admission.Controller, adapters []airuntime.Adapter) (*Service, error) {
@@ -185,6 +186,13 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		return adapterKey(left.ServiceID, left.Operation, left.Model) <
 			adapterKey(right.ServiceID, right.Operation, right.Model)
 	})
+	startupRecovery, err := prepareTaskStoreForStartup(
+		config.TaskStore, config.Now().UTC(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile Worker task store at startup: %w", err)
+	}
+	service.startupRecovery = startupRecovery
 	if err := taskScheduler.Start(); err != nil {
 		return nil, err
 	}

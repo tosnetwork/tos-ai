@@ -52,8 +52,12 @@ Invoke
 The task database is mode 0600 under a mode-0700 non-symlink directory. Its
 count, request/result bytes, retention, expiry cleanup, and transition work are
 bounded. It stores no raw failure diagnostics. An exact retained success is
-replayed without executing the adapter; accepted/running state left by a
-process crash remains uncertain and is never automatically resubmitted.
+replayed without executing the adapter. Before the private listener opens,
+startup removes expired tasks and scans retained state through bounded pages
+that contain only active identities. Since synchronous adapters have no
+durable executor handle, crash-left accepted/running tasks fail closed as
+`RUNTIME_FAILED`; they are never automatically resubmitted. A future durable
+supervisor may recover them only by proving ownership of the exact task ID.
 Cancellation must repeat the request ID, task ID, and request digest.
 
 The reservation release is idempotent and runs from both the work lifecycle
@@ -438,7 +442,8 @@ query or body, returns `no-store`, and is capped at 16 KiB.
 
 Readiness and admission gauges are derived from one admission snapshot, so a
 single response does not combine pre- and post-reservation task counts. RPC
-counters are intentionally process-local and reset on restart. This endpoint
+counters, including startup expired-removal and interrupted-failure counts,
+are intentionally process-local and reset on restart. This endpoint
 is private operational telemetry, not authenticated public monitoring, a
 durable audit log, a billing record, or the planned offline journal. A
 collector that needs remote access must run outside the worker and preserve
@@ -482,6 +487,9 @@ Implemented:
 - task-store capacity readiness, `storage.task_slots` capability/Quote
   commitments, full-store routing suppression, and fixed private capacity
   metrics
+- bounded startup cleanup and payload-free pagination that resolves
+  interrupted synchronous tasks to a retained zero-charge failure without
+  resubmission
 - graceful cancellation and shutdown resource cleanup
 - Linux host, cgroup v1/v2 effective-resource, and NVIDIA NVML probes with
   fake backends

@@ -151,12 +151,12 @@ func (m *OperationalMetrics) Handler(service *Service) http.Handler {
 			http.Error(writer, "metrics request rejected", http.StatusMethodNotAllowed)
 			return
 		}
-		readiness, admissionSnapshot, ok := safeMetricsSnapshot(service)
+		readiness, admissionSnapshot, recovery, ok := safeMetricsSnapshot(service)
 		if m == nil || !ok {
 			http.Error(writer, "metrics unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		encoded := m.render(readiness, admissionSnapshot)
+		encoded := m.render(readiness, admissionSnapshot, recovery)
 		if len(encoded) == 0 || len(encoded) > MaxMetricsResponseBytes {
 			http.Error(writer, "metrics unavailable", http.StatusServiceUnavailable)
 			return
@@ -172,16 +172,23 @@ func (m *OperationalMetrics) Handler(service *Service) http.Handler {
 
 func safeMetricsSnapshot(
 	service *Service,
-) (readiness Readiness, snapshot admission.Snapshot, valid bool) {
+) (
+	readiness Readiness,
+	snapshot admission.Snapshot,
+	recovery startupTaskRecovery,
+	valid bool,
+) {
 	defer func() {
 		if recover() != nil {
-			readiness, snapshot, valid = Readiness{}, admission.Snapshot{}, false
+			readiness, snapshot, recovery, valid =
+				Readiness{}, admission.Snapshot{}, startupTaskRecovery{}, false
 		}
 	}()
 	if service == nil {
-		return Readiness{}, admission.Snapshot{}, false
+		return Readiness{}, admission.Snapshot{}, startupTaskRecovery{}, false
 	}
 	snapshot = service.admission.Snapshot()
+	recovery = service.startupRecovery
 	readiness = service.readiness(
 		snapshot,
 		service.currentTaskStoreCapacity(),
@@ -195,7 +202,7 @@ func safeMetricsSnapshot(
 		metricResourcesFit(snapshot.OwnerReserved, snapshot.Capacity) &&
 		readiness.TaskSlots <= readiness.TaskCapacity &&
 		readiness.TaskCapacity > 0
-	return readiness, snapshot, valid
+	return readiness, snapshot, recovery, valid
 }
 
 func metricResourcesFit(value, limit admission.Resources) bool {
@@ -211,6 +218,7 @@ func metricResourcesFit(value, limit admission.Resources) bool {
 func (m *OperationalMetrics) render(
 	readiness Readiness,
 	snapshot admission.Snapshot,
+	recovery startupTaskRecovery,
 ) []byte {
 	encoded := make([]byte, 0, 12<<10)
 	encoded = appendMetricHeader(
@@ -270,6 +278,24 @@ func (m *OperationalMetrics) render(
 		encoded,
 		"tos_ai_worker_task_store_available",
 		readiness.TaskCapacity-readiness.TaskSlots,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_startup_interrupted_tasks_failed_total", "counter",
+		"Interrupted active tasks failed closed during this process startup.",
+	)
+	encoded = appendMetric(
+		encoded,
+		"tos_ai_worker_startup_interrupted_tasks_failed_total",
+		recovery.Interrupted,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_startup_expired_tasks_removed_total", "counter",
+		"Expired durable tasks removed during this process startup.",
+	)
+	encoded = appendMetric(
+		encoded,
+		"tos_ai_worker_startup_expired_tasks_removed_total",
+		recovery.ExpiredRemoved,
 	)
 	encoded = appendMetricHeader(
 		encoded, "tos_ai_worker_runtimes", "gauge",

@@ -2,8 +2,9 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `ce9653400793`, which contains the
-WorkerService fields required by the terminal runtime. Protobuf definitions
+`tos-ai` pins `tos-protocol` revision `eda7e61915cf`, which contains the
+WorkerService contract, durable capacity snapshot, and bounded
+`ScanActiveTasks` interface required by this runtime. Protobuf definitions
 remain owned by `tos-protocol`; this repository does not copy or fork them.
 
 ## Implemented coverage
@@ -27,6 +28,10 @@ remain owned by `tos-protocol`; this repository does not copy or fork them.
   retention deadline before it atomically claims the durable task store.
 - `GetTask` returns exact retained active or terminal state across worker
   restart.
+- Before opening its private listener, the synchronous worker performs
+  bounded expired cleanup and payload-free active-task pagination. Retained
+  interrupted tasks become `FAILED/RUNTIME_FAILED` and are never resubmitted;
+  a durable executor supervisor is required before any future resume policy.
 - Cancel verifies and echoes request ID, task ID, and request digest. The
   request-ID-only legacy form is rejected.
 - The diagnostic CLI can create the new Invoke identity and issue `get-task`

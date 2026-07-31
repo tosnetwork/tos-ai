@@ -38,7 +38,8 @@ The Go 1.24 module currently contains:
 - idempotent Quote handling plus a mode-0600 bounded bbolt Worker task store
   that durably binds task ID, request digest, retention, lifecycle, and final
   result; exact Invoke replay cannot execute twice, `GetTask` survives a
-  worker restart, and reservation cleanup covers success, failure,
+  worker restart, interrupted synchronous executions fail closed before the
+  listener reopens, and reservation cleanup covers success, failure,
   cancellation, deadline, disconnect, adapter failure, panic, and shutdown;
 - a signed, SHA-256-addressed model-manager library with verifying, ready,
   active, draining, failed, and absent states, bounded LRU storage, protected
@@ -170,6 +171,15 @@ priority, and cleanup work retain independent protocol hard limits. The store
 contains invocation payloads and successful outputs until retention expiry,
 so production deployments should use owner-controlled encrypted storage and
 exclude it from backups that outlive task retention.
+
+Startup first removes expired records through bounded cleanup pages, then
+scans every retained task through bounded payload-free pages. Because the
+current adapters expose no durable runtime job handle, each interrupted
+`ACCEPTED/RUNNING` identity becomes `FAILED/RUNTIME_FAILED` before the private
+listener is created. It is never resubmitted and remains available through
+exact `GetTask` until retention expiry. Private fixed metrics report only the
+number of expired records removed and interrupted identities failed; they do
+not expose task identities, cursors, payloads, paths, or runtime errors.
 
 The current policy schema is version 3. Versions 1 and 2 remain accepted for
 upgrade compatibility with fixed safe monitor defaults of a ten-second
@@ -327,8 +337,8 @@ thresholds from one through ten.
   Invoke repeats local admission before adapter execution.
 - Every Invoke is claimed durably before executor admission. `GetTask` is
   read-only, cancellation is bound to request ID, task ID, and request digest,
-  and an accepted/running task stranded by process failure remains uncertain;
-  it is never silently resubmitted.
+  and an accepted/running task stranded by process failure is failed closed
+  before the listener reopens; it is never silently resubmitted.
 - Durable task capacity is advertised as `storage.task_slots`, included in
   every capability and Quote commitment, and exposed through fixed private
   metrics. A full or unavailable store removes routable capabilities and
