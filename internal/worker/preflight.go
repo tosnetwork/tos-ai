@@ -15,6 +15,8 @@ type preflightConfig struct {
 	failureTTL time.Duration
 	maxWaiters int
 	now        func() time.Time
+	lifecycle  context.Context
+	checks     *sync.WaitGroup
 }
 
 type runtimeSlot struct {
@@ -31,6 +33,7 @@ type runtimeSlot struct {
 	ready     bool
 	result    airuntime.Preflight
 	errorKind airuntime.ErrorKind
+	stopped   bool
 }
 
 type runtimeSlotSnapshot struct {
@@ -68,6 +71,10 @@ func (s *runtimeSlot) ensure(ctx context.Context, force bool) (airuntime.Preflig
 	}
 	now := s.config.now()
 	s.mu.Lock()
+	if s.stopped || s.config.lifecycle != nil && s.config.lifecycle.Err() != nil {
+		s.mu.Unlock()
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorUnavailable, nil)
+	}
 	if !force && s.cacheFreshLocked(now) {
 		result, err := s.cachedResultLocked()
 		s.mu.Unlock()
@@ -95,6 +102,9 @@ func (s *runtimeSlot) ensure(ctx context.Context, force bool) (airuntime.Preflig
 	s.checking = true
 	s.done = make(chan struct{})
 	done := s.done
+	if s.config.checks != nil {
+		s.config.checks.Add(1)
+	}
 	s.mu.Unlock()
 
 	go s.runCheck(ctx, done)
@@ -110,6 +120,9 @@ func (s *runtimeSlot) ensure(ctx context.Context, force bool) (airuntime.Preflig
 }
 
 func (s *runtimeSlot) runCheck(parent context.Context, done chan struct{}) {
+	if s.config.checks != nil {
+		defer s.config.checks.Done()
+	}
 	timeout := s.config.timeout
 	if deadline, ok := parent.Deadline(); ok {
 		remaining := time.Until(deadline)
@@ -121,7 +134,11 @@ func (s *runtimeSlot) runCheck(parent context.Context, done chan struct{}) {
 			timeout = remaining
 		}
 	}
-	probeContext, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	lifecycle := s.config.lifecycle
+	if lifecycle == nil {
+		lifecycle = context.Background()
+	}
+	probeContext, cancel := context.WithTimeout(lifecycle, timeout)
 	result, err := safePreflight(s.adapter, s.capability, probeContext)
 	cancel()
 	kind := airuntime.ErrorKind("")
@@ -129,6 +146,22 @@ func (s *runtimeSlot) runCheck(parent context.Context, done chan struct{}) {
 		kind = airuntime.ErrorKindOf(err)
 	}
 	s.finishCheck(done, result, kind)
+}
+
+func (s *runtimeSlot) configureLifecycle(
+	ctx context.Context,
+	checks *sync.WaitGroup,
+) {
+	s.mu.Lock()
+	s.config.lifecycle = ctx
+	s.config.checks = checks
+	s.mu.Unlock()
+}
+
+func (s *runtimeSlot) stop() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
 }
 
 func (s *runtimeSlot) finishCheck(
@@ -204,6 +237,9 @@ func safePreflight(
 			return airuntime.Preflight{}, err
 		}
 		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorInternal, nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return airuntime.Preflight{}, preflightContextError(err)
 	}
 	if err := airuntime.ValidatePreflight(capability, result); err != nil {
 		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)

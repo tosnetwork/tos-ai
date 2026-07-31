@@ -20,12 +20,34 @@ import (
 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
-	taskScheduler, err := scheduler.New(scheduler.Config{Workers: 1, MaxQueue: 4})
+	taskScheduler, admissionController := newTestDependencies(t, 4)
+	service, err := NewService(testServiceConfig(), taskScheduler, admissionController, []airuntime.Adapter{mock.New(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		shutdownContext, cancel := context.WithTimeout(
+			context.Background(), time.Second,
+		)
+		defer cancel()
+		_ = service.Shutdown(shutdownContext)
+	})
+	return service
+}
+
+func newTestDependencies(
+	t *testing.T,
+	maxQueue int,
+) (*scheduler.Scheduler, *admission.Controller) {
+	t.Helper()
+	taskScheduler, err := scheduler.New(scheduler.Config{
+		Workers: 1, MaxQueue: maxQueue,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	admissionController, err := admission.New(admission.Config{
-		MaxConcurrent: 1, MaxQueue: 4,
+		MaxConcurrent: 1, MaxQueue: maxQueue,
 		Capacity: admission.Resources{
 			RAMBytes: 1 << 30, VRAMBytes: 1 << 30, KVCacheBytes: 1 << 30,
 			ContextTokens: 1 << 20, BatchSize: 64, OutputBytes: 1 << 30,
@@ -41,24 +63,72 @@ func newTestService(t *testing.T) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(Config{
+	return taskScheduler, admissionController
+}
+
+func TestNewServiceRejectsUnsafeRuntimeMonitorConfiguration(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Config)
+	}{
+		{"refresh too frequent", func(config *Config) {
+			config.PreflightRefresh = MinPreflightRefresh - time.Nanosecond
+		}},
+		{"refresh too slow", func(config *Config) {
+			config.PreflightRefresh = MaxPreflightRefreshHard + time.Nanosecond
+		}},
+		{"no refresh workers", func(config *Config) {
+			config.PreflightWorkers = 0
+		}},
+		{"too many refresh workers", func(config *Config) {
+			config.PreflightWorkers = MaxPreflightWorkersHard + 1
+		}},
+		{"freshness gap", func(config *Config) {
+			config.PreflightRefresh = config.PreflightTTL
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := testServiceConfig()
+			test.configure(&config)
+			taskScheduler, admissionController := newTestDependencies(t, 2)
+			if _, err := NewService(
+				config, taskScheduler, admissionController,
+				[]airuntime.Adapter{mock.New(0)},
+			); err == nil {
+				t.Fatal("unsafe runtime monitor configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestPreflightScanLimitAccountsForEveryBoundedBatch(t *testing.T) {
+	if got := preflightScanLimit(5, 2, time.Second); got != 3*time.Second {
+		t.Fatalf("five adapters with two workers scan limit=%v", got)
+	}
+	if got := preflightScanLimit(
+		MaxAdaptersHard, 4, 5*time.Second,
+	); got != 80*time.Second {
+		t.Fatalf("maximum adapter scan limit=%v", got)
+	}
+}
+
+func testServiceConfig() Config {
+	return Config{
 		Version:             "test",
 		QuoteTTL:            time.Minute,
 		MaxQuotes:           4,
 		MaxInvocations:      4,
 		MaxDeadline:         time.Hour,
 		PreflightTimeout:    time.Second,
-		PreflightTTL:        time.Minute,
+		PreflightTTL:        MaxPreflightTTLHard,
 		PreflightFailureTTL: time.Second,
 		MaxPreflightWaiters: 4,
+		PreflightRefresh:    4 * time.Minute,
+		PreflightWorkers:    2,
 		Now:                 time.Now,
 		GPUStatus:           "unavailable",
-	}, taskScheduler, admissionController, []airuntime.Adapter{mock.New(0)})
-	if err != nil {
-		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = taskScheduler.Shutdown(context.Background()) })
-	return service
 }
 
 func TestQuoteInvokeAndReplay(t *testing.T) {
@@ -192,35 +262,34 @@ func (a *faultAdapter) Close() error {
 }
 
 func newFaultService(t *testing.T, execute func(context.Context, airuntime.Request) (airuntime.Response, error)) *Service {
+	return newConfiguredFaultService(t, execute, nil)
+}
+
+func newConfiguredFaultService(
+	t *testing.T,
+	execute func(context.Context, airuntime.Request) (airuntime.Response, error),
+	configure func(*Config),
+	configureAdapters ...func(*faultAdapter),
+) *Service {
 	t.Helper()
 	capability := mock.New(0).Capability()
 	adapter := &faultAdapter{capability: capability, execute: execute}
-	taskScheduler, err := scheduler.New(scheduler.Config{Workers: 1, MaxQueue: 2})
-	if err != nil {
-		t.Fatal(err)
+	for _, configureAdapter := range configureAdapters {
+		if configureAdapter != nil {
+			configureAdapter(adapter)
+		}
 	}
-	admissionController, err := admission.New(admission.Config{
-		MaxConcurrent: 1, MaxQueue: 2,
-		Capacity: admission.Resources{
-			RAMBytes: 1 << 30, VRAMBytes: 1 << 30, KVCacheBytes: 1 << 30,
-			ContextTokens: 1 << 20, BatchSize: 64, OutputBytes: 1 << 30,
-			ExecutionTime: time.Hour,
-		},
-		PerRequestMax: admission.Resources{
-			RAMBytes: 1 << 30, VRAMBytes: 1 << 30, KVCacheBytes: 1 << 30,
-			ContextTokens: 1 << 20, BatchSize: 64, OutputBytes: 1 << 30,
-			ExecutionTime: time.Hour,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
+	taskScheduler, admissionController := newTestDependencies(t, 2)
+	config := testServiceConfig()
+	config.MaxQuotes = 8
+	config.MaxInvocations = 8
+	if configure != nil {
+		configure(&config)
 	}
-	service, err := NewService(Config{
-		Version: "test", QuoteTTL: time.Minute, MaxQuotes: 8, MaxInvocations: 8,
-		MaxDeadline: time.Hour, GPUStatus: "unavailable",
-		PreflightTimeout: time.Second, PreflightTTL: time.Minute,
-		PreflightFailureTTL: time.Second, MaxPreflightWaiters: 4,
-	}, taskScheduler, admissionController, []airuntime.Adapter{adapter})
+	service, err := NewService(
+		config, taskScheduler, admissionController,
+		[]airuntime.Adapter{adapter},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

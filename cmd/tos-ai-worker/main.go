@@ -41,6 +41,8 @@ func run() error {
 	var workers int
 	var maxQueue int
 	var maxConnections int
+	var preflightRefresh time.Duration
+	var preflightWorkers int
 	var devMock bool
 	var mockDelay time.Duration
 	var runtimeConfigPath string
@@ -49,6 +51,14 @@ func run() error {
 	flag.IntVar(&workers, "workers", 1, "concurrent runtime workers")
 	flag.IntVar(&maxQueue, "max-queue", 64, "maximum queued work items")
 	flag.IntVar(&maxConnections, "max-connections", 128, "maximum private socket connections")
+	flag.DurationVar(
+		&preflightRefresh, "runtime-health-interval", 5*time.Second,
+		"bounded runtime health refresh interval",
+	)
+	flag.IntVar(
+		&preflightWorkers, "runtime-health-workers", 4,
+		"bounded concurrent runtime health checks",
+	)
 	flag.BoolVar(&devMock, "dev-mock", false, "explicitly enable the development-only mock runtime")
 	flag.DurationVar(&mockDelay, "mock-delay", 0, "development mock execution delay")
 	flag.StringVar(&runtimeConfigPath, "runtime-config", "", "private administrator runtime configuration")
@@ -87,9 +97,11 @@ func run() error {
 		MaxInvocations:      4096,
 		MaxDeadline:         15 * time.Minute,
 		PreflightTimeout:    5 * time.Second,
-		PreflightTTL:        15 * time.Second,
+		PreflightTTL:        2 * time.Minute,
 		PreflightFailureTTL: 2 * time.Second,
 		MaxPreflightWaiters: preflightWaiters(maxConnections),
+		PreflightRefresh:    preflightRefresh,
+		PreflightWorkers:    preflightWorkers,
 		PriceNanoTOS:        0,
 		GPUStatus:           report.NVIDIA.Status,
 	}, taskScheduler, admissionController, runtimes.adapters)
@@ -126,14 +138,17 @@ func run() error {
 	listener, err := unixserver.ListenLimited(socketPath, maxConnections)
 	if err != nil {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = service.Shutdown(shutdownContext)
+		serviceErr := service.Shutdown(shutdownContext)
 		cancel()
+		if errors.Is(serviceErr, worker.ErrShutdownIncomplete) {
+			return errors.Join(err, serviceErr)
+		}
 		activationContext, cancelActivation := context.WithTimeout(
 			context.Background(), runtimes.activationCleanupTimeout(),
 		)
 		activationErr := runtimes.closeRuntimeState(activationContext)
 		cancelActivation()
-		return errors.Join(err, activationErr)
+		return errors.Join(err, serviceErr, activationErr)
 	}
 	defer listener.Close()
 
@@ -151,16 +166,30 @@ func run() error {
 	case <-ctx.Done():
 	}
 	service.BeginDrain()
-	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	shutdownErr := server.Shutdown(shutdownContext)
-	serviceErr := service.Shutdown(shutdownContext)
-	cancel()
+	serverContext, cancelServer := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownErr := server.Shutdown(serverContext)
+	cancelServer()
+	var forceCloseErr error
+	if shutdownErr != nil {
+		forceCloseErr = server.Close()
+		if errors.Is(forceCloseErr, http.ErrServerClosed) {
+			forceCloseErr = nil
+		}
+	}
+	serviceContext, cancelService := context.WithTimeout(context.Background(), 10*time.Second)
+	serviceErr := service.Shutdown(serviceContext)
+	cancelService()
+	if errors.Is(serviceErr, worker.ErrShutdownIncomplete) {
+		return errors.Join(serveErr, shutdownErr, forceCloseErr, serviceErr)
+	}
 	activationContext, cancelActivation := context.WithTimeout(
 		context.Background(), runtimes.activationCleanupTimeout(),
 	)
 	activationErr := runtimes.closeRuntimeState(activationContext)
 	cancelActivation()
-	return errors.Join(serveErr, shutdownErr, serviceErr, activationErr)
+	return errors.Join(
+		serveErr, shutdownErr, forceCloseErr, serviceErr, activationErr,
+	)
 }
 
 type runtimeResources struct {

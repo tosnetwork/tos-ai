@@ -32,7 +32,12 @@ const (
 	MaxPreflightTimeoutHard = 30 * time.Second
 	MaxPreflightTTLHard     = 5 * time.Minute
 	MaxFailureTTLHard       = 30 * time.Second
+	MinPreflightRefresh     = 250 * time.Millisecond
+	MaxPreflightRefreshHard = 5 * time.Minute
+	MaxPreflightWorkersHard = 16
 )
+
+var ErrShutdownIncomplete = errors.New("worker shutdown is incomplete")
 
 type Config struct {
 	Version             string
@@ -44,6 +49,8 @@ type Config struct {
 	PreflightTTL        time.Duration
 	PreflightFailureTTL time.Duration
 	MaxPreflightWaiters int
+	PreflightRefresh    time.Duration
+	PreflightWorkers    int
 	PriceNanoTOS        uint64
 	Now                 func() time.Time
 	GPUStatus           string
@@ -59,6 +66,11 @@ type Service struct {
 	invocations  *invocationStore
 	admission    *admission.Controller
 	draining     atomic.Bool
+	runtimeCtx   context.Context
+	runtimeStop  context.CancelFunc
+	runtimeWG    sync.WaitGroup
+	stopOnce     sync.Once
+	runtimeDone  chan struct{}
 	closeOnce    sync.Once
 	closeErr     error
 }
@@ -78,7 +90,16 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		config.PreflightFailureTTL <= 0 || config.PreflightFailureTTL > MaxFailureTTLHard ||
 		config.PreflightFailureTTL > config.PreflightTTL ||
 		config.MaxPreflightWaiters <= 0 ||
-		config.MaxPreflightWaiters > MaxPreflightWaitersHard {
+		config.MaxPreflightWaiters > MaxPreflightWaitersHard ||
+		config.PreflightRefresh < MinPreflightRefresh ||
+		config.PreflightRefresh > MaxPreflightRefreshHard ||
+		config.PreflightWorkers <= 0 ||
+		config.PreflightWorkers > MaxPreflightWorkersHard {
+		return nil, errors.New("invalid worker configuration")
+	}
+	if config.PreflightRefresh+preflightScanLimit(
+		len(adapters), config.PreflightWorkers, config.PreflightTimeout,
+	) > config.PreflightTTL {
 		return nil, errors.New("invalid worker configuration")
 	}
 	if config.Now == nil {
@@ -92,6 +113,7 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		quotes:       newQuoteStore(config.MaxQuotes),
 		invocations:  newInvocationStore(config.MaxInvocations),
 		admission:    admissionController,
+		runtimeDone:  make(chan struct{}),
 	}
 	preflight := preflightConfig{
 		timeout: config.PreflightTimeout, successTTL: config.PreflightTTL,
@@ -138,7 +160,22 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 	if err := taskScheduler.Start(); err != nil {
 		return nil, err
 	}
+	service.runtimeCtx, service.runtimeStop = context.WithCancel(context.Background())
+	for _, slot := range service.runtimeSlots {
+		slot.configureLifecycle(service.runtimeCtx, &service.runtimeWG)
+	}
+	service.runtimeWG.Add(1)
+	go service.monitorRuntimes()
 	return service, nil
+}
+
+func preflightScanLimit(
+	adapters int,
+	workers int,
+	timeout time.Duration,
+) time.Duration {
+	batches := (adapters + workers - 1) / workers
+	return time.Duration(batches) * timeout
 }
 
 func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequest]) (*connect.Response[edgev1.HealthResponse], error) {
@@ -211,16 +248,19 @@ func (s *Service) Readiness() Readiness {
 	}
 }
 
-// RefreshRuntimes performs an explicitly bounded refresh without creating a
-// periodic watcher. Failures update readiness but do not prevent the private
-// worker from starting, so an operator can diagnose and repair a local
-// runtime through the Unix socket.
+// RefreshRuntimes performs an explicitly bounded refresh. Failures update
+// readiness but do not prevent the private worker from starting, so an
+// operator can diagnose and repair a local runtime through the Unix socket.
 func (s *Service) RefreshRuntimes(ctx context.Context) Readiness {
 	s.refreshRuntimes(ctx, true)
 	return s.Readiness()
 }
 
 func (s *Service) refreshRuntimes(ctx context.Context, force bool) {
+	if force && s.config.PreflightWorkers > 1 {
+		s.refreshRuntimesConcurrent(ctx)
+		return
+	}
 	for _, capability := range s.capabilities {
 		if ctx.Err() != nil {
 			return
@@ -228,6 +268,60 @@ func (s *Service) refreshRuntimes(ctx context.Context, force bool) {
 		key := adapterKey(capability.ServiceID, capability.Operation, capability.Model)
 		if slot := s.runtimeSlots[key]; slot != nil {
 			_, _ = slot.ensure(ctx, force)
+		}
+	}
+}
+
+func (s *Service) refreshRuntimesConcurrent(ctx context.Context) {
+	workers := s.config.PreflightWorkers
+	if workers > len(s.capabilities) {
+		workers = len(s.capabilities)
+	}
+	if workers <= 0 {
+		return
+	}
+	jobs := make(chan *runtimeSlot)
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for range workers {
+		go func() {
+			defer wait.Done()
+			for slot := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				_, _ = slot.ensure(ctx, true)
+			}
+		}()
+	}
+	for _, capability := range s.capabilities {
+		key := adapterKey(capability.ServiceID, capability.Operation, capability.Model)
+		slot := s.runtimeSlots[key]
+		if slot == nil {
+			continue
+		}
+		select {
+		case jobs <- slot:
+		case <-ctx.Done():
+			close(jobs)
+			wait.Wait()
+			return
+		}
+	}
+	close(jobs)
+	wait.Wait()
+}
+
+func (s *Service) monitorRuntimes() {
+	defer s.runtimeWG.Done()
+	ticker := time.NewTicker(s.config.PreflightRefresh)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.runtimeCtx.Done():
+			return
+		case <-ticker.C:
+			s.refreshRuntimes(s.runtimeCtx, true)
 		}
 	}
 }
@@ -720,8 +814,13 @@ func (s *Service) BeginDrain() {
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.BeginDrain()
+	s.beginRuntimeStop()
 	schedulerErr := s.scheduler.Shutdown(ctx)
+	runtimeErr := s.waitRuntimeStop(ctx)
 	s.admission.Shutdown()
+	if schedulerErr != nil || runtimeErr != nil {
+		return errors.Join(ErrShutdownIncomplete, schedulerErr, runtimeErr)
+	}
 	s.closeOnce.Do(func() {
 		for _, adapter := range s.adapters {
 			if closer, ok := adapter.(airuntime.AdapterCloser); ok {
@@ -731,5 +830,29 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 	})
-	return errors.Join(schedulerErr, s.closeErr)
+	return s.closeErr
+}
+
+func (s *Service) beginRuntimeStop() {
+	s.stopOnce.Do(func() {
+		for _, slot := range s.runtimeSlots {
+			slot.stop()
+		}
+		if s.runtimeStop != nil {
+			s.runtimeStop()
+		}
+		go func() {
+			s.runtimeWG.Wait()
+			close(s.runtimeDone)
+		}()
+	})
+}
+
+func (s *Service) waitRuntimeStop(ctx context.Context) error {
+	select {
+	case <-s.runtimeDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

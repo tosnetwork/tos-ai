@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 )
@@ -41,6 +43,202 @@ func TestRuntimeReadinessStartsUnknownAndRefreshes(t *testing.T) {
 	if stale := service.Readiness(); stale.Status != "degraded" ||
 		stale.RuntimeReady != 0 || stale.BindingEvidence != "unknown" {
 		t.Fatalf("stale readiness = %#v", stale)
+	}
+}
+
+func TestRuntimeMonitorDetectsFailureAndRecoveryWithoutRPC(t *testing.T) {
+	var available atomic.Bool
+	var calls atomic.Int32
+	service := newConfiguredFaultService(
+		t, successfulFaultExecution,
+		func(config *Config) {
+			config.PreflightTimeout = 100 * time.Millisecond
+			config.PreflightTTL = time.Second
+			config.PreflightFailureTTL = 100 * time.Millisecond
+			config.PreflightRefresh = MinPreflightRefresh
+			config.PreflightWorkers = 1
+		},
+		func(adapter *faultAdapter) {
+			adapter.preflight = func(context.Context) (airuntime.Preflight, error) {
+				calls.Add(1)
+				if !available.Load() {
+					return airuntime.Preflight{}, airuntime.NewError(
+						airuntime.ErrorUnavailable, nil,
+					)
+				}
+				return matchingPreflight(adapter.capability), nil
+			}
+		},
+	)
+
+	waitForRuntimeState(t, 2*time.Second, func() bool {
+		return calls.Load() > 0 && service.Readiness().Status == "degraded"
+	})
+	available.Store(true)
+	waitForRuntimeState(t, 2*time.Second, func() bool {
+		return service.Readiness().Status == "ready"
+	})
+	available.Store(false)
+	waitForRuntimeState(t, 2*time.Second, func() bool {
+		return service.Readiness().Status == "degraded"
+	})
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := service.Shutdown(shutdownContext); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	stoppedAt := calls.Load()
+	time.Sleep(MinPreflightRefresh + 100*time.Millisecond)
+	if calls.Load() != stoppedAt {
+		t.Fatalf("runtime monitor continued after shutdown: before=%d after=%d",
+			stoppedAt, calls.Load())
+	}
+}
+
+func TestForcedRuntimeRefreshConcurrencyIsBounded(t *testing.T) {
+	const adapterCount = 5
+	started := make(chan struct{}, adapterCount)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var calls atomic.Int32
+	adapters := make([]airuntime.Adapter, 0, adapterCount)
+	for index := range adapterCount {
+		capability := mock.New(0).Capability()
+		capability.Model = fmt.Sprintf("bounded-model-%d", index)
+		capability.ModelDigest = fmt.Sprintf("sha256:%064x", index+1)
+		adapter := &faultAdapter{
+			capability: capability, execute: successfulFaultExecution,
+		}
+		adapter.preflight = func(ctx context.Context) (airuntime.Preflight, error) {
+			calls.Add(1)
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				observed := maximum.Load()
+				if current <= observed || maximum.CompareAndSwap(observed, current) {
+					break
+				}
+			}
+			started <- struct{}{}
+			select {
+			case <-release:
+				return matchingPreflight(capability), nil
+			case <-ctx.Done():
+				return airuntime.Preflight{}, ctx.Err()
+			}
+		}
+		adapters = append(adapters, adapter)
+	}
+	taskScheduler, admissionController := newTestDependencies(t, adapterCount)
+	config := testServiceConfig()
+	config.PreflightWorkers = 2
+	service, err := NewService(
+		config, taskScheduler, admissionController, adapters,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		closeIfOpen(release)
+		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = service.Shutdown(shutdownContext)
+	})
+	refreshDone := make(chan struct{})
+	go func() {
+		service.RefreshRuntimes(context.Background())
+		close(refreshDone)
+	}()
+	for range config.PreflightWorkers {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("bounded refresh workers did not start")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("forced refresh exceeded configured concurrency")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("forced refresh did not complete")
+	}
+	if calls.Load() != adapterCount || maximum.Load() > int32(config.PreflightWorkers) {
+		t.Fatalf("refresh calls=%d maximum concurrency=%d",
+			calls.Load(), maximum.Load())
+	}
+}
+
+func TestShutdownDoesNotCloseAdapterBeforePreflightStops(t *testing.T) {
+	service := newFaultService(t, successfulFaultExecution)
+	adapter, slot := faultRuntime(t, service)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	adapter.preflight = func(context.Context) (airuntime.Preflight, error) {
+		close(started)
+		<-release
+		return matchingPreflight(adapter.capability), nil
+	}
+	refreshDone := make(chan struct{})
+	go func() {
+		service.RefreshRuntimes(context.Background())
+		close(refreshDone)
+	}()
+	<-started
+	shutdownContext, cancel := context.WithTimeout(
+		context.Background(), 20*time.Millisecond,
+	)
+	err := service.Shutdown(shutdownContext)
+	cancel()
+	if !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("shutdown error=%v", err)
+	}
+	if adapter.closeCount.Load() != 0 {
+		t.Fatal("adapter was closed while preflight was still running")
+	}
+	close(release)
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("late preflight did not finish")
+	}
+	shutdownContext, cancel = context.WithTimeout(context.Background(), time.Second)
+	if err := service.Shutdown(shutdownContext); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	if adapter.closeCount.Load() != 1 {
+		t.Fatalf("adapter close count=%d", adapter.closeCount.Load())
+	}
+	if slot.snapshot().ready {
+		t.Fatal("late success after lifecycle cancellation restored readiness")
+	}
+}
+
+func waitForRuntimeState(t *testing.T, limit time.Duration, ready func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for !ready() {
+		if time.Now().After(deadline) {
+			t.Fatal("runtime state did not converge before deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func closeIfOpen(channel chan struct{}) {
+	select {
+	case <-channel:
+	default:
+		close(channel)
 	}
 }
 

@@ -236,14 +236,27 @@ digest, its administrator-configured digest remains `declared`; the worker
 does not upgrade that claim to observed or attested.
 
 Each configured adapter has one fixed-size preflight slot. Concurrent checks
-coalesce without spawning a watcher, waiters have an explicit cap, success
-and failure have separate short TTLs, and adapter panics or errors are reduced
-to stable categories. Startup performs a bounded refresh but remains
+coalesce, waiters have an explicit cap, success and failure have separate
+short TTLs, and adapter panics or errors are reduced to stable categories.
+One process-owned monitor refreshes the fixed slots periodically using a
+bounded worker pool; it does not create a watcher for each adapter, request,
+retry, or failure. Startup performs the same bounded full refresh but remains
 diagnosable when a local runtime is down. Stale or failed slots are excluded
 from capabilities, rejected before Quote admission checks, and rechecked
 authoritatively for every new owner inside the idempotent Invoke lifecycle
 before reservation. Completed or in-flight request-ID replays retain their
 original result and do not create duplicate checks or executions.
+
+The monitor interval is bounded to 250 milliseconds through five minutes and
+the full-refresh pool to 16 workers across at most 64 adapter slots. Startup
+rejects a refresh interval plus the worst-case timeout for every adapter batch
+that exceeds the readiness success TTL.
+Every check is tied to a service-owned cancellation context and tracked until
+completion. Shutdown prevents new checks before canceling that context, then
+waits for both scheduler work and preflight activity before closing adapter
+pools. If the caller's shutdown deadline expires, the service returns an
+explicit incomplete-shutdown error and leaves adapters open; model activation
+cleanup is skipped rather than racing a still-running adapter operation.
 
 `tos-ai-worker -runtime-config` loads a bounded JSON document from a private,
 current-user-owned, non-symlink regular file. Unknown fields, duplicate keys,
@@ -304,7 +317,7 @@ Implemented:
 - Linux host and NVIDIA NVML probes with fake backends
 - deterministic, Ollama, and OpenAI-compatible adapters
 - bounded runtime preflight, readiness filtering, and evidence-preserving
-  model binding
+  model binding, with active bounded health refresh and lifecycle cancellation
 - private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
 - fail-fast exclusive local ownership for model caches and persistent

@@ -43,8 +43,9 @@ The Go 1.24 module currently contains:
   rehash them before every runtime preflight;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
-  with fixed-size singleflight state, expiring success/failure caches, and
-  stable redacted failures;
+  with a single process monitor, bounded refresh concurrency, fixed-size
+  singleflight state, expiring success/failure caches, and stable redacted
+  failures;
 - strict administrator-owned JSON runtime configuration with bounded defaults,
   duplicate/unknown-field rejection, and private credential-file loading;
 - bounded HTTP transports with administrator-selected endpoints, HTTPS for
@@ -144,17 +145,20 @@ Each activation slot namespace and its Ollama endpoint are a single-worker
 operator boundary; concurrently managed workers must use isolated runtimes or
 distinct slot IDs.
 
-The worker preflights configured runtimes at startup, refreshes stale bindings
-for capabilities and Quote, and performs an authoritative recheck for every
-new Invoke owner. A separately managed Ollama model name and SHA-256 digest
-are matched against its bounded `/api/tags` inventory. An activated Ollama
-slot instead verifies that `/api/show` identifies the exact approved GGUF
-source blob. Both are reported as `locally-observed`.
+The worker preflights configured runtimes at startup, refreshes them through
+one process-owned periodic monitor, refreshes stale bindings for capabilities
+and Quote, and performs an authoritative recheck for every new Invoke owner.
+A separately managed Ollama model name and SHA-256 digest are matched against
+its bounded `/api/tags` inventory. An activated Ollama slot instead verifies
+that `/api/show` identifies the exact approved GGUF source blob. Both are
+reported as `locally-observed`.
 OpenAI-compatible `/v1/models` can prove only that the configured model ID is
 present; its configured content digest remains `declared`. A failed or stale
 runtime is omitted from capabilities and cannot reach admission or execution.
 Preflight responses are capped at 1 MiB and 256 models, and per-adapter
-concurrent waiters are capped at 256.
+concurrent waiters are capped at 256. Periodic full refresh uses at most 16
+workers across at most 64 fixed adapter slots; it does not create an
+unbounded watcher per request or retry.
 
 The runtime configuration must be a regular, non-symlink file owned by the
 worker user with no group or other permissions. It is capped at 1 MiB and 64
@@ -180,8 +184,12 @@ limits reject more than 128 workers, 4096 queued tasks, 4096 socket
 connections, a one-hour admission deadline, or oversized resource
 configuration. The owner reserve is removed from external/background
 capacity before it is advertised or admitted. Runtime preflight uses a
-five-second check timeout, a 15-second success TTL, and a two-second failure
-TTL; it creates no periodic watcher.
+five-second check timeout, a two-minute success TTL, and a two-second failure
+TTL. The default health monitor refreshes every five seconds with four
+workers. Configuration rejects intervals below 250 milliseconds or above
+five minutes, more than 16 workers, or any timeout/interval combination that
+could leave a freshness gap before the success TTL after accounting for every
+configured adapter batch.
 
 ## Security boundaries
 
@@ -200,8 +208,11 @@ TTL; it creates no periodic watcher.
   internal endpoints, paths, or credentials.
 - Cached runtime readiness expires; stale adapters are not advertised or
   admitted until a bounded preflight succeeds again.
-- Runtime adapter connection pools are closed exactly once during graceful
-  shutdown.
+- Runtime health checks are tied to the worker lifecycle. Shutdown stops new
+  checks, cancels the monitor, drains scheduler work, and waits for in-flight
+  checks before closing adapter pools exactly once. A timed-out drain is
+  reported as incomplete and does not close an adapter still in use or run
+  model cleanup concurrently with it.
 - The private socket name has an adjacent current-user mode-0600 advisory lock.
   A second worker cannot unlink or replace a live socket. A pre-lock legacy
   socket is removed only when a bounded local connection probe proves it is
