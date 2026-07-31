@@ -13,21 +13,23 @@ import (
 )
 
 const (
-	TerminalPolicyVersion        = 1
+	TerminalPolicyVersion        = 2
+	terminalPolicyLegacyVersion  = 1
 	MaxTerminalPolicyConfigBytes = int64(64 << 10)
 )
 
 type terminalPolicyFile struct {
-	Version           int                     `json:"version"`
-	Workers           int                     `json:"workers"`
-	MaxQueue          int                     `json:"maxQueue"`
-	MaxConnections    int                     `json:"maxConnections"`
-	QuoteTTLMillis    int64                   `json:"quoteTtlMillis"`
-	MaxQuotes         int                     `json:"maxQuotes"`
-	MaxInvocations    int                     `json:"maxInvocations"`
-	MaxDeadlineMillis int64                   `json:"maxDeadlineMillis"`
-	Preflight         terminalPreflightPolicy `json:"preflight"`
-	Admission         terminalAdmissionPolicy `json:"admission"`
+	Version              int                     `json:"version"`
+	Workers              int                     `json:"workers"`
+	OwnerReservedWorkers *int                    `json:"ownerReservedWorkers"`
+	MaxQueue             int                     `json:"maxQueue"`
+	MaxConnections       int                     `json:"maxConnections"`
+	QuoteTTLMillis       int64                   `json:"quoteTtlMillis"`
+	MaxQuotes            int                     `json:"maxQuotes"`
+	MaxInvocations       int                     `json:"maxInvocations"`
+	MaxDeadlineMillis    int64                   `json:"maxDeadlineMillis"`
+	Preflight            terminalPreflightPolicy `json:"preflight"`
+	Admission            terminalAdmissionPolicy `json:"admission"`
 }
 
 type terminalPreflightPolicy struct {
@@ -57,19 +59,20 @@ type terminalResourcePolicy struct {
 // TerminalPolicy is the immutable, administrator-owned local scheduling and
 // resource authority loaded before the worker allocates runtime capacity.
 type TerminalPolicy struct {
-	Workers          int
-	MaxQueue         int
-	MaxConnections   int
-	QuoteTTL         time.Duration
-	MaxQuotes        int
-	MaxInvocations   int
-	MaxDeadline      time.Duration
-	PreflightTimeout time.Duration
-	PreflightTTL     time.Duration
-	FailureTTL       time.Duration
-	RefreshInterval  time.Duration
-	PreflightWorkers int
-	Admission        admission.Config
+	Workers              int
+	OwnerReservedWorkers int
+	MaxQueue             int
+	MaxConnections       int
+	QuoteTTL             time.Duration
+	MaxQuotes            int
+	MaxInvocations       int
+	MaxDeadline          time.Duration
+	PreflightTimeout     time.Duration
+	PreflightTTL         time.Duration
+	FailureTTL           time.Duration
+	RefreshInterval      time.Duration
+	PreflightWorkers     int
+	Admission            admission.Config
 }
 
 // LoadTerminalPolicy reads a strict private JSON file. It validates absolute
@@ -89,7 +92,8 @@ func LoadTerminalPolicy(path string) (TerminalPolicy, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return TerminalPolicy{}, errors.New("invalid terminal policy configuration")
 	}
-	if !validTerminalPolicyScalars(config) {
+	ownerReservedWorkers, ok := terminalOwnerReservedWorkers(config)
+	if !ok || !validTerminalPolicyScalars(config, ownerReservedWorkers) {
 		return TerminalPolicy{}, errors.New("terminal policy exceeds hard limits")
 	}
 	capacity, ok := terminalResources(config.Admission.Capacity, true)
@@ -120,10 +124,12 @@ func LoadTerminalPolicy(path string) (TerminalPolicy, error) {
 		return TerminalPolicy{}, errors.New("invalid terminal admission policy")
 	}
 	return TerminalPolicy{
-		Workers: config.Workers, MaxQueue: config.MaxQueue,
-		MaxConnections: config.MaxConnections,
-		QuoteTTL:       time.Duration(config.QuoteTTLMillis) * time.Millisecond,
-		MaxQuotes:      config.MaxQuotes, MaxInvocations: config.MaxInvocations,
+		Workers:              config.Workers,
+		OwnerReservedWorkers: ownerReservedWorkers,
+		MaxQueue:             config.MaxQueue,
+		MaxConnections:       config.MaxConnections,
+		QuoteTTL:             time.Duration(config.QuoteTTLMillis) * time.Millisecond,
+		MaxQuotes:            config.MaxQuotes, MaxInvocations: config.MaxInvocations,
 		MaxDeadline: time.Duration(config.MaxDeadlineMillis) * time.Millisecond,
 		PreflightTimeout: time.Duration(
 			config.Preflight.TimeoutMillis,
@@ -142,10 +148,27 @@ func LoadTerminalPolicy(path string) (TerminalPolicy, error) {
 	}, nil
 }
 
-func validTerminalPolicyScalars(config terminalPolicyFile) bool {
+func terminalOwnerReservedWorkers(config terminalPolicyFile) (int, bool) {
+	switch config.Version {
+	case terminalPolicyLegacyVersion:
+		return 0, config.OwnerReservedWorkers == nil
+	case TerminalPolicyVersion:
+		if config.OwnerReservedWorkers == nil {
+			return 0, false
+		}
+		return *config.OwnerReservedWorkers, true
+	default:
+		return 0, false
+	}
+}
+
+func validTerminalPolicyScalars(
+	config terminalPolicyFile,
+	ownerReservedWorkers int,
+) bool {
 	preflight := config.Preflight
-	return config.Version == TerminalPolicyVersion &&
-		config.Workers > 0 && config.Workers <= scheduler.MaxWorkersHard &&
+	return config.Workers > 0 && config.Workers <= scheduler.MaxWorkersHard &&
+		ownerReservedWorkers >= 0 && ownerReservedWorkers < config.Workers &&
 		config.MaxQueue > 0 && config.MaxQueue <= scheduler.MaxQueueHard &&
 		config.MaxConnections > 0 &&
 		config.MaxConnections <= unixserver.MaxConnectionsHard &&

@@ -419,6 +419,144 @@ func TestReservationReleasedAfterTimeoutCancelAndDisconnect(t *testing.T) {
 	assertNoReservations(t, disconnectService)
 }
 
+func TestOwnerWorkerRemainsAvailableThroughInvokeFlow(t *testing.T) {
+	capability := mock.New(0).Capability()
+	started := make(chan string, 3)
+	externalRelease := make(chan struct{})
+	localRelease := make(chan struct{})
+	adapter := &faultAdapter{capability: capability}
+	adapter.execute = func(
+		ctx context.Context,
+		request airuntime.Request,
+	) (airuntime.Response, error) {
+		started <- request.RequestID
+		release := externalRelease
+		if strings.HasPrefix(request.RequestID, "owner-local") {
+			release = localRelease
+		}
+		select {
+		case <-release:
+			return airuntime.Response{
+				Output: append([]byte(nil), request.Payload...),
+				Usage: airuntime.Usage{
+					InputBytes:  uint64(len(request.Payload)),
+					OutputBytes: uint64(len(request.Payload)),
+				},
+				ModelRevision:   capability.ModelDigest,
+				RuntimeRevision: capability.RuntimeRevision,
+			}, nil
+		case <-ctx.Done():
+			return airuntime.Response{}, ctx.Err()
+		}
+	}
+	taskScheduler, err := scheduler.New(scheduler.Config{
+		Workers: 2, MaxQueue: 4, OwnerReservedWorkers: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionController, err := admission.New(admission.Config{
+		MaxConcurrent: 2, MaxQueue: 4,
+		Capacity: admission.Resources{
+			RAMBytes: 1 << 30, VRAMBytes: 1 << 30, KVCacheBytes: 1 << 30,
+			ContextTokens: 1 << 20, BatchSize: 64, OutputBytes: 1 << 30,
+			ExecutionTime: time.Hour,
+		},
+		PerRequestMax: admission.Resources{
+			RAMBytes: 1 << 30, VRAMBytes: 1 << 30, KVCacheBytes: 1 << 30,
+			ContextTokens: 1 << 20, BatchSize: 64, OutputBytes: 1 << 30,
+			ExecutionTime: time.Hour,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := testServiceConfig()
+	config.MaxQuotes = 8
+	config.MaxInvocations = 8
+	service, err := NewService(
+		config, taskScheduler, admissionController, []airuntime.Adapter{adapter},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = service.Shutdown(shutdownContext)
+	})
+	invocation := func(id string, priority edgev1.Priority) *edgev1.InvokeRequest {
+		t.Helper()
+		deadline := time.Now().Add(time.Minute)
+		quote, quoteErr := service.Quote(
+			context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+				RequestId: id, ServiceId: capability.ServiceID,
+				Operation: capability.Operation, Model: capability.Model,
+				InputBytes: 5, MaxOutputBytes: 16,
+				DeadlineUnixMillis: deadline.UnixMilli(), Priority: priority,
+			}),
+		)
+		if quoteErr != nil {
+			t.Fatal(quoteErr)
+		}
+		return &edgev1.InvokeRequest{
+			RequestId: id, QuoteId: quote.Msg.QuoteId,
+			ServiceId: capability.ServiceID, Operation: capability.Operation,
+			Model: capability.Model, Payload: []byte("hello"),
+			MaxOutputBytes: 16, DeadlineUnixMillis: deadline.UnixMilli(),
+			Priority: priority,
+		}
+	}
+	externalOne := invocation(
+		"owner-external-one", edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+	)
+	externalTwo := invocation(
+		"owner-external-two", edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+	)
+	results := make(chan error, 3)
+	invoke := func(request *edgev1.InvokeRequest) {
+		_, invokeErr := service.Invoke(
+			context.Background(), connect.NewRequest(request),
+		)
+		results <- invokeErr
+	}
+	go invoke(externalOne)
+	go invoke(externalTwo)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("external invocation did not start")
+	}
+	select {
+	case id := <-started:
+		t.Fatalf("external invocation %q consumed the owner worker", id)
+	case <-time.After(50 * time.Millisecond):
+	}
+	local := invocation(
+		"owner-local-task", edgev1.Priority_PRIORITY_LOCAL_ASYNC,
+	)
+	go invoke(local)
+	select {
+	case id := <-started:
+		if id != local.RequestId {
+			t.Fatalf("unexpected invocation started: %q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("local invocation was starved by external saturation")
+	}
+	close(localRelease)
+	if err := <-results; err != nil {
+		t.Fatalf("local invocation error=%v", err)
+	}
+	close(externalRelease)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("external invocation error=%v", err)
+		}
+	}
+	assertNoReservations(t, service)
+}
+
 func TestShutdownDrainsAndReleasesReservation(t *testing.T) {
 	started := make(chan struct{})
 	service := newFaultService(t, func(ctx context.Context, _ airuntime.Request) (airuntime.Response, error) {

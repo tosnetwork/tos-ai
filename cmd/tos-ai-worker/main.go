@@ -102,6 +102,7 @@ func run() error {
 	}
 	taskScheduler, err := scheduler.New(scheduler.Config{
 		Workers: policy.Workers, MaxQueue: policy.MaxQueue,
+		OwnerReservedWorkers: policy.OwnerReservedWorkers,
 	})
 	if err != nil {
 		return err
@@ -465,8 +466,9 @@ func configuredTerminalPolicy(
 		}
 		return operatorconfig.TerminalPolicy{
 			Workers: flags.workers, MaxQueue: flags.maxQueue,
-			MaxConnections: flags.maxConnections,
-			QuoteTTL:       30 * time.Second, MaxQuotes: 4096,
+			OwnerReservedWorkers: 0,
+			MaxConnections:       flags.maxConnections,
+			QuoteTTL:             30 * time.Second, MaxQuotes: 4096,
 			MaxInvocations: 4096, MaxDeadline: 15 * time.Minute,
 			PreflightTimeout: 5 * time.Second,
 			PreflightTTL:     2 * time.Minute,

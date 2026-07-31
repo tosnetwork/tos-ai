@@ -43,6 +43,9 @@ type Result struct {
 type Config struct {
 	Workers  int
 	MaxQueue int
+	// OwnerReservedWorkers never execute external or background work.
+	// They may be zero but must remain below Workers.
+	OwnerReservedWorkers int
 }
 
 type queuedItem struct {
@@ -69,8 +72,10 @@ type Scheduler struct {
 
 func New(config Config) (*Scheduler, error) {
 	if config.Workers <= 0 || config.Workers > MaxWorkersHard ||
-		config.MaxQueue <= 0 || config.MaxQueue > MaxQueueHard {
-		return nil, errors.New("workers and MaxQueue must be positive")
+		config.MaxQueue <= 0 || config.MaxQueue > MaxQueueHard ||
+		config.OwnerReservedWorkers < 0 ||
+		config.OwnerReservedWorkers >= config.Workers {
+		return nil, errors.New("invalid scheduler configuration")
 	}
 	scheduler := &Scheduler{
 		config:  config,
@@ -93,9 +98,10 @@ func (s *Scheduler) Start() error {
 		return nil
 	}
 	s.started = true
-	for range s.config.Workers {
+	generalWorkers := s.config.Workers - s.config.OwnerReservedWorkers
+	for index := 0; index < s.config.Workers; index++ {
 		s.workers.Add(1)
-		go s.worker()
+		go s.worker(index >= generalWorkers)
 	}
 	return nil
 }
@@ -136,7 +142,11 @@ func (s *Scheduler) Submit(item Item) (<-chan Result, error) {
 	}
 	heap.Push(&s.queue, queued)
 	s.pending[item.ID] = queued
-	s.cond.Signal()
+	if s.config.OwnerReservedWorkers > 0 {
+		s.cond.Broadcast()
+	} else {
+		s.cond.Signal()
+	}
 	return queued.result, nil
 }
 
@@ -189,11 +199,11 @@ func (s *Scheduler) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *Scheduler) worker() {
+func (s *Scheduler) worker(ownerOnly bool) {
 	defer s.workers.Done()
 	for {
 		s.mu.Lock()
-		for len(s.queue) == 0 && !s.stopped {
+		for !s.stopped && !s.hasEligibleWorkLocked(ownerOnly) {
 			s.cond.Wait()
 		}
 		if s.stopped {
@@ -215,6 +225,17 @@ func (s *Scheduler) worker() {
 		queued.result <- Result{Response: response, Err: err}
 		close(queued.result)
 	}
+}
+
+func (s *Scheduler) hasEligibleWorkLocked(ownerOnly bool) bool {
+	if len(s.queue) == 0 {
+		return false
+	}
+	return !ownerOnly || isOwnerPriority(s.queue[0].item.Priority)
+}
+
+func isOwnerPriority(priority airuntime.Priority) bool {
+	return priority <= airuntime.PriorityLocalAsync
 }
 
 func safeWork(ctx context.Context, work Work) (response airuntime.Response, err error) {

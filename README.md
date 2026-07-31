@@ -21,6 +21,9 @@ The Go 1.24 module currently contains:
 - a bounded local `AdmissionController` for concurrency, queue slots, RAM,
   VRAM, KV cache, context, batch, output, execution time, owner reserve, and
   the three accepted inference priorities;
+- scheduler-level owner worker reservation, so external/background saturation
+  cannot consume every execution slot while local asynchronous work may still
+  use the full pool when capacity is idle;
 - idempotent Quote/Invoke handling and reservation cleanup after success,
   failure, cancellation, deadline, disconnect, adapter failure, panic, and
   shutdown;
@@ -120,16 +123,27 @@ go run ./cmd/tos-ai-worker \
 Production mode requires `-terminal-policy-config`. This private, strict JSON
 file is the single authority for worker and queue counts, connection and
 replay bounds, deadlines, preflight cadence, aggregate admission capacity,
-owner-reserved capacity, and per-request maxima. It is capped at 64 KiB and
-uses the same regular-file, ownership, mode, duplicate-key, nesting, and
-unknown-field checks as other operator configuration. Startup rejects RAM
+owner-reserved worker slots and resources, and per-request maxima. It is
+capped at 64 KiB and uses the same regular-file, ownership, mode,
+duplicate-key, nesting, and unknown-field checks as other operator
+configuration. In version 2, `ownerReservedWorkers` must be explicit,
+non-negative, and less than `workers`; setting it to zero is supported for
+single-worker or best-effort installations but provides no execution-slot
+isolation. External and background work runs only on general workers, while
+local asynchronous work can use both general and owner-reserved workers.
+Startup rejects RAM
 capacity above 75 percent of locally observed host RAM or VRAM capacity above
 the currently observed free VRAM, before creating the listener. A nonzero
-owner reserve is mandatory for RAM, context, batch, and output, and for VRAM
-when VRAM capacity is enabled. The policy is immutable for the process
-lifetime; changing it requires a restart. See
+resource owner reserve is mandatory for RAM, context, batch, and output, and
+for VRAM when VRAM capacity is enabled. The policy is immutable for the
+process lifetime; changing it requires a restart. See
 [docs/terminal-policy-config.example.json](docs/terminal-policy-config.example.json)
 and size it for the actual host and configured adapters.
+
+The current policy schema is version 2. Version 1 remains accepted for
+upgrade compatibility and maps to zero reserved workers; it cannot carry the
+version-2 field. Operators should migrate deliberately to version 2 to obtain
+execution-slot isolation.
 
 The `-workers`, `-max-queue`, `-max-connections`,
 `-runtime-health-interval`, and `-runtime-health-workers` flags are retained
@@ -203,15 +217,17 @@ bounds. Invalid or ambiguous configuration fails worker startup.
 
 Development mock defaults are one concurrent task, 64 queued tasks, 128
 private socket connections, 1 MiB output per request, a 15-minute execution
-deadline, and capacity derived conservatively from locally observed RAM/VRAM.
-Production values come only from the terminal policy. Hard limits reject more
-than 128 workers, 4096 queued tasks, 4096 socket connections, a one-hour
-admission deadline, or oversized resource configuration. The owner reserve is
-removed from external/background capacity before it is advertised or
-admitted. The development health defaults are a five-second check timeout, a
-two-minute success TTL, a two-second failure TTL, and a five-second refresh
-with four workers. Policy validation rejects refresh intervals below 250
-milliseconds or above five minutes, more than 16 health workers, or any
+deadline, zero reserved workers, and capacity derived conservatively from
+locally observed RAM/VRAM. Production values come only from the terminal
+policy. Hard limits reject more than 128 workers, a worker reserve equal to or
+larger than the total pool, 4096 queued tasks, 4096 socket connections, a
+one-hour admission deadline, or oversized resource configuration. The owner
+resource reserve is removed from external/background capacity before it is
+advertised or admitted, and reserved workers never execute external or
+background work. The development health defaults are a five-second check
+timeout, a two-minute success TTL, a two-second failure TTL, and a five-second
+refresh with four workers. Policy validation rejects refresh intervals below
+250 milliseconds or above five minutes, more than 16 health workers, or any
 timeout/interval combination that could leave a freshness gap before the
 success TTL after accounting for every configured adapter batch.
 
@@ -225,6 +241,11 @@ success TTL after accounting for every configured adapter batch.
 - External inference accepts only `EXTERNAL_SERVICE`; approved local callers
   may use `LOCAL_ASYNC`, and maintenance may use `BACKGROUND`. Network work
   cannot claim emergency, control, or real-time priority.
+- Owner-reserved workers protect only correctly classified `LOCAL_ASYNC`
+  work. The private socket is a trusted local boundary: Edge Core must never
+  map an external request to this class, and deployments should isolate the
+  worker and Edge Core under a dedicated Unix identity. The worker still
+  loads no wallet or owner private key.
 - Go scheduling is not a hard real-time or physical-safety loop.
 - Quote is an expiring capability observation, not a permanent reservation.
   Invoke repeats local admission before adapter execution.

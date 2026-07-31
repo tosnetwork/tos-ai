@@ -56,6 +56,14 @@ The accepted inference priority order is:
 2. external service
 3. background
 
+The scheduler can divide its fixed worker pool into general and
+owner-reserved workers. General workers retain normal priority ordering and
+may execute all accepted classes. Reserved workers execute only owner-side
+priorities through `LOCAL_ASYNC`; they never execute `EXTERNAL_SERVICE` or
+`BACKGROUND`. Consequently sustained external work cannot occupy every
+execution slot, while an all-local workload can still use the whole pool.
+The queue, worker count, and goroutine count remain fixed at startup.
+
 The protocol enum also contains emergency, control, and real-time perception,
 but the current public inference adapters reject them. Those priorities belong
 only behind future site-local authorization and an independent safety
@@ -81,18 +89,30 @@ Production startup requires one private `-terminal-policy-config` document.
 It is the immutable process authority for scheduler workers and queue slots,
 Unix-socket connection count, quote and invocation replay bounds, maximum
 deadline, runtime-preflight cache and refresh work, aggregate admission
-capacity, owner reserve, and per-request limits. Task payloads and runtime
-endpoints cannot modify these values. The development-only mock mode may omit
-the document and use conservative probe-derived defaults; its legacy resource
-flags cannot be combined with an explicit policy.
+capacity, owner resource reserve, owner-reserved workers, and per-request
+limits. Task payloads and runtime endpoints cannot modify these values. The
+development-only mock mode may omit the document and use conservative
+probe-derived defaults with no reserved worker; its legacy resource flags
+cannot be combined with an explicit policy.
 
-The strict JSON document is capped at 64 KiB and accepts only version 1. The
-loader rejects duplicate or unknown fields, excessive nesting, multiple JSON
-values, symlinks, non-regular files, wrong ownership, or group/other file
-permissions. Central package hard limits cap every scheduler, connection,
-replay, deadline, preflight, and admission field. Owner reserve must be
-meaningful for RAM, context, batch, and output, and for VRAM whenever GPU
-capacity is configured.
+The strict JSON document is capped at 64 KiB. Version 2 requires
+`ownerReservedWorkers`; the upgrade-compatible version-1 schema cannot carry
+that field and maps to zero reserved workers. The loader rejects duplicate or
+unknown fields, excessive nesting, multiple JSON values, symlinks,
+non-regular files, wrong ownership, or group/other file permissions. Central
+package hard limits cap every scheduler, connection, replay, deadline,
+preflight, and admission field. Owner reserve must be meaningful for RAM,
+context, batch, and output, and for VRAM whenever GPU capacity is configured.
+The worker reserve may be zero and must remain below the total worker count so
+external work always has a bounded execution path.
+
+Worker reservation assumes the caller has already been classified at the
+trusted local Edge Core boundary. The inference protocol carries a priority
+class but no worker-side wallet authority, and `tos-ai-worker` deliberately
+does not load an owner key. Operators must restrict the mode-0600 socket to a
+dedicated Unix identity and Edge Core must not assign `LOCAL_ASYNC` to remote
+consumer work. This reservation is availability isolation, not caller
+authentication or hard real-time preemption.
 
 After NVML and host probing but before allocating runtime state or creating a
 listener, startup also limits configured RAM to 75 percent of observed host
@@ -346,7 +366,8 @@ Implemented:
 - exclusively owned private bounded Unix-socket worker and diagnostic CLI
 - fail-closed runtime selection with an explicit development mock mode
 - readiness/draining health summary without secret data
-- bounded replay, scheduler, local admission, and owner reserve
+- bounded replay, scheduler, local admission, resource owner reserve, and
+  owner-reserved execution workers
 - graceful cancellation and shutdown resource cleanup
 - Linux host and NVIDIA NVML probes with fake backends
 - deterministic, Ollama, and OpenAI-compatible adapters

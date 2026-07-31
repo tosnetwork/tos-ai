@@ -475,7 +475,8 @@ func TestConfiguredTerminalPolicyValidatesObservedCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if policy.Admission.Capacity.RAMBytes != 8<<30 ||
-		policy.Admission.Capacity.VRAMBytes != 4<<30 {
+		policy.Admission.Capacity.VRAMBytes != 4<<30 ||
+		policy.OwnerReservedWorkers != 1 {
 		t.Fatalf("loaded admission=%#v", policy.Admission)
 	}
 
@@ -537,8 +538,9 @@ func TestConfiguredTerminalPolicyRejectsDevelopmentFlagMixing(t *testing.T) {
 func workerTerminalPolicyJSON(ramBytes, vramBytes uint64) string {
 	ownerVRAM := vramBytes / 4
 	return fmt.Sprintf(`{
-  "version":1,
+  "version":2,
   "workers":2,
+  "ownerReservedWorkers":1,
   "maxQueue":8,
   "maxConnections":32,
   "quoteTtlMillis":30000,

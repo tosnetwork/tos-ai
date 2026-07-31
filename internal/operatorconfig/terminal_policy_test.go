@@ -15,7 +15,8 @@ func TestLoadTerminalPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.Workers != 2 || policy.MaxQueue != 8 ||
+	if policy.Workers != 2 || policy.OwnerReservedWorkers != 1 ||
+		policy.MaxQueue != 8 ||
 		policy.MaxConnections != 32 || policy.QuoteTTL != 30*time.Second ||
 		policy.MaxQuotes != 128 || policy.MaxInvocations != 64 ||
 		policy.MaxDeadline != 15*time.Minute ||
@@ -35,14 +36,50 @@ func TestLoadTerminalPolicy(t *testing.T) {
 	}
 }
 
+func TestLoadTerminalPolicyAllowsExplicitZeroReservedWorker(t *testing.T) {
+	value := strings.Replace(validTerminalPolicyJSON(), `"workers":2`, `"workers":1`, 1)
+	value = strings.Replace(
+		value, `"ownerReservedWorkers":1`, `"ownerReservedWorkers":0`, 1,
+	)
+	policy, err := LoadTerminalPolicy(writePrivate(
+		t, "single-worker-policy.json", value, 0o600,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Workers != 1 || policy.OwnerReservedWorkers != 0 {
+		t.Fatalf("single-worker policy=%#v", policy)
+	}
+}
+
+func TestLoadTerminalPolicyMigratesVersionOneWithoutReservedWorker(t *testing.T) {
+	value := strings.Replace(validTerminalPolicyJSON(), `"version":2`, `"version":1`, 1)
+	value = strings.Replace(value, `  "ownerReservedWorkers":1,
+`, "", 1)
+	policy, err := LoadTerminalPolicy(writePrivate(
+		t, "version-one-policy.json", value, 0o600,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.OwnerReservedWorkers != 0 {
+		t.Fatalf("legacy owner worker reserve=%d", policy.OwnerReservedWorkers)
+	}
+}
+
 func TestLoadTerminalPolicyRejectsInvalidAndAmbiguousValues(t *testing.T) {
 	valid := validTerminalPolicyJSON()
 	tests := []struct {
 		name string
 		data string
 	}{
-		{"version", strings.Replace(valid, `"version":1`, `"version":2`, 1)},
+		{"version", strings.Replace(valid, `"version":2`, `"version":3`, 1)},
+		{"new field on legacy version", strings.Replace(valid, `"version":2`, `"version":1`, 1)},
 		{"workers", strings.Replace(valid, `"workers":2`, `"workers":0`, 1)},
+		{"missing owner workers", strings.Replace(valid, `  "ownerReservedWorkers":1,
+`, "", 1)},
+		{"negative owner workers", strings.Replace(valid, `"ownerReservedWorkers":1`, `"ownerReservedWorkers":-1`, 1)},
+		{"all owner workers", strings.Replace(valid, `"ownerReservedWorkers":1`, `"ownerReservedWorkers":2`, 1)},
 		{"queue", strings.Replace(valid, `"maxQueue":8`, `"maxQueue":4097`, 1)},
 		{"connections", strings.Replace(valid, `"maxConnections":32`, `"maxConnections":4097`, 1)},
 		{"quote ttl", strings.Replace(valid, `"quoteTtlMillis":30000`, `"quoteTtlMillis":300001`, 1)},
@@ -57,8 +94,8 @@ func TestLoadTerminalPolicyRejectsInvalidAndAmbiguousValues(t *testing.T) {
 		{"owner overflow", strings.Replace(valid, `"ramBytes":2147483648`, `"ramBytes":17179869184`, 1)},
 		{"request overflow", strings.Replace(valid, `"ramBytes":4294967296`, `"ramBytes":17179869184`, 1)},
 		{"execution", strings.Replace(valid, `"executionMillis":300000`, `"executionMillis":-1`, 1)},
-		{"unknown", strings.Replace(valid, `"version":1`, `"version":1,"endpoint":"bad"`, 1)},
-		{"duplicate", strings.Replace(valid, `"version":1`, `"version":1,"version":1`, 1)},
+		{"unknown", strings.Replace(valid, `"version":2`, `"version":2,"endpoint":"bad"`, 1)},
+		{"duplicate", strings.Replace(valid, `"version":2`, `"version":2,"version":2`, 1)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -98,8 +135,9 @@ func TestLoadTerminalPolicyRejectsInsecureAndOversizedFiles(t *testing.T) {
 
 func validTerminalPolicyJSON() string {
 	return `{
-  "version":1,
+  "version":2,
   "workers":2,
+  "ownerReservedWorkers":1,
   "maxQueue":8,
   "maxConnections":32,
   "quoteTtlMillis":30000,

@@ -1,6 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "workers": 2,
+  "ownerReservedWorkers": 1,
   "maxQueue": 8,
   "maxConnections": 32,
   "quoteTtlMillis": 30000,
