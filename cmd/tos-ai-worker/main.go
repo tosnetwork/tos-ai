@@ -22,6 +22,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	"github.com/tosnetwork/tos-ai/pkg/modelactivation"
 	"github.com/tosnetwork/tos-ai/pkg/modelapproval"
+	"github.com/tosnetwork/tos-ai/pkg/modelmanager"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
@@ -96,7 +97,7 @@ func run() error {
 			context.Background(), runtimes.activationCleanupTimeout(),
 		)
 		defer cancel()
-		return errors.Join(err, runtimes.closeActivation(shutdownContext))
+		return errors.Join(err, runtimes.closeRuntimeState(shutdownContext))
 	}
 	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 10*time.Second)
 	readiness := service.RefreshRuntimes(preflightContext)
@@ -128,7 +129,7 @@ func run() error {
 		activationContext, cancelActivation := context.WithTimeout(
 			context.Background(), runtimes.activationCleanupTimeout(),
 		)
-		activationErr := runtimes.closeActivation(activationContext)
+		activationErr := runtimes.closeRuntimeState(activationContext)
 		cancelActivation()
 		return errors.Join(err, activationErr)
 	}
@@ -155,7 +156,7 @@ func run() error {
 	activationContext, cancelActivation := context.WithTimeout(
 		context.Background(), runtimes.activationCleanupTimeout(),
 	)
-	activationErr := runtimes.closeActivation(activationContext)
+	activationErr := runtimes.closeRuntimeState(activationContext)
 	cancelActivation()
 	return errors.Join(serveErr, shutdownErr, serviceErr, activationErr)
 }
@@ -164,6 +165,7 @@ type runtimeResources struct {
 	adapters      []airuntime.Adapter
 	activation    *modelactivation.Controller
 	configuration *operatorconfig.Configuration
+	modelManager  *modelmanager.Manager
 }
 
 func configuredRuntimes(
@@ -207,6 +209,7 @@ func configuredRuntimes(
 	}
 	resources := &runtimeResources{
 		adapters: configuration.Adapters, configuration: &configuration,
+		modelManager: trust.Manager,
 	}
 	if configuration.Activation != nil {
 		if directoriesOverlap(
@@ -214,6 +217,7 @@ func configuredRuntimes(
 		) {
 			closeRuntimeAdapters(configuration.Adapters)
 			_ = configuration.CloseBackends()
+			_ = trust.Manager.Close()
 			return nil, fmt.Errorf(
 				"model cache and activation state must be separate",
 			)
@@ -224,6 +228,7 @@ func configuredRuntimes(
 		if err != nil {
 			closeRuntimeAdapters(configuration.Adapters)
 			_ = configuration.CloseBackends()
+			_ = trust.Manager.Close()
 			return nil, fmt.Errorf("configure model activation")
 		}
 		resources.activation = controller
@@ -252,7 +257,7 @@ func configuredRuntimes(
 			cleanupContext, cancelCleanup := context.WithTimeout(
 				context.Background(), resources.activationCleanupTimeout(),
 			)
-			_ = resources.closeActivation(cleanupContext)
+			_ = resources.closeRuntimeState(cleanupContext)
 			cancelCleanup()
 			return nil, fmt.Errorf("activate configured runtime models")
 		}
@@ -269,7 +274,7 @@ func configuredRuntimes(
 		cleanupContext, cancelCleanup := context.WithTimeout(
 			context.Background(), resources.activationCleanupTimeout(),
 		)
-		_ = resources.closeActivation(cleanupContext)
+		_ = resources.closeRuntimeState(cleanupContext)
 		cancelCleanup()
 		return nil, fmt.Errorf("approve configured runtime models")
 	}
@@ -277,7 +282,7 @@ func configuredRuntimes(
 	return resources, nil
 }
 
-func (r *runtimeResources) closeActivation(ctx context.Context) error {
+func (r *runtimeResources) closeRuntimeState(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
@@ -289,7 +294,11 @@ func (r *runtimeResources) closeActivation(ctx context.Context) error {
 	if r.configuration != nil {
 		backendErr = r.configuration.CloseBackends()
 	}
-	return errors.Join(activationErr, backendErr)
+	var managerErr error
+	if r.modelManager != nil {
+		managerErr = r.modelManager.Close()
+	}
+	return errors.Join(activationErr, backendErr, managerErr)
 }
 
 func (r *runtimeResources) activationCleanupTimeout() time.Duration {

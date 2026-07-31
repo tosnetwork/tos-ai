@@ -26,11 +26,13 @@ The Go 1.24 module currently contains:
 - a signed, SHA-256-addressed model-manager library with verifying, ready,
   active, draining, failed, and absent states, bounded LRU storage, protected
   active/pinned/in-use entries, atomic artifact/metadata activation,
-  restart-time integrity recovery, and crash-residue cleanup;
+  restart-time integrity recovery, crash-residue cleanup, and exclusive
+  process ownership of each private cache;
 - path-free model artifact leases plus a bounded runtime activation
   coordinator with activation-time SHA-256 verification, health gating,
   known-good preservation, rollback, retryable cleanup, and optional
-  crash-safe activation intent with explicit startup recovery;
+  crash-safe activation intent with explicit startup recovery and exclusive
+  process ownership of each persistent state directory;
 - an opt-in Ollama GGUF activation backend that uploads only an already-open
   signed-cache artifact, creates a digest-scoped private runtime model,
   verifies its exact source blob, preloads it before readiness, and
@@ -112,8 +114,10 @@ base64 Ed25519 public keys. It never contains a private signing key. Every
 configured adapter digest must already be present as an approved
 `pkg/modelmanager` cache entry or startup fails. The worker retains one
 path-free lease per adapter and rehashes the full artifact before each runtime
-preflight; graceful shutdown releases all leases. There is no model upload or
-download RPC, and the default mock mode rejects `-model-trust-config`. See
+preflight; graceful shutdown releases all leases and then the cache ownership
+lock. A second process using the same cache fails startup immediately. There
+is no model upload or download RPC, and the default mock mode rejects
+`-model-trust-config`. See
 [docs/model-trust-config.example.json](docs/model-trust-config.example.json);
 the example public key is a structural placeholder and must be replaced with
 the operator's approved Ed25519 public key.
@@ -129,7 +133,8 @@ pull API, accepts a URL or host path, or exposes the private runtime model name
 to task payloads. Shutdown drains inference, unloads and deletes the private
 runtime model, releases all artifact leases, and leaves only the desired
 slot/digest intent for bounded restart recovery. The activation state
-directory must be private, absolute, and separate from the model cache. See
+directory must be private, absolute, and separate from the model cache. One
+controller holds it exclusively; a concurrent controller fails closed. See
 [docs/ollama-activation-config.example.json](docs/ollama-activation-config.example.json).
 Each activation slot namespace and its Ollama endpoint are a single-worker
 operator boundary; concurrently managed workers must use isolated runtimes or
@@ -193,6 +198,13 @@ TTL; it creates no periodic watcher.
   admitted until a bounded preflight succeeds again.
 - Runtime adapter connection pools are closed exactly once during graceful
   shutdown.
+- On Linux, model caches and persistent activation-state directories use
+  non-blocking advisory `flock` ownership on private, current-user, mode-0600
+  regular lock files. Locks survive for the manager/controller lifetime,
+  remain held while cleanup is retryable, and are released by the kernel after
+  a process crash. Deploy these directories on a local filesystem with
+  reliable `flock` semantics; this is not a distributed lock or protection
+  against a hostile process running as the same user.
 - Optional activation state contains only fixed administrator slot IDs and
   SHA-256 digests in a private local file. It is crash-recovery intent, not a
   remote trust assertion or substitute for signed model verification.

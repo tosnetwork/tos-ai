@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -238,6 +239,7 @@ func TestRecoveryDoesNotEvictBeforeRetainedArtifactsVerify(t *testing.T) {
 	if err := os.WriteFile(newestPath, []byte("damage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	simulateManagerCrash(t, f.manager)
 	if _, err := New(recoveryConfig(f, 1, 64, 5, f.now, f.publicKey)); err == nil {
 		t.Fatal("corrupt retained artifact accepted")
 	}
@@ -262,6 +264,7 @@ func TestRecoveryDirectoryScanAndConcurrentReadersAreBounded(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		simulateManagerCrash(t, f.manager)
 		if _, err := New(recoveryConfig(f, 1, 64, 5, f.now, f.publicKey)); err == nil {
 			t.Fatal("unbounded model cache directory accepted")
 		}
@@ -272,6 +275,7 @@ func TestRecoveryDirectoryScanAndConcurrentReadersAreBounded(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(f.root, "unexpected"), []byte{1}, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		simulateManagerCrash(t, f.manager)
 		if _, err := New(recoveryConfig(f, 1, 64, 5, f.now, f.publicKey)); err == nil {
 			t.Fatal("unknown model cache entry accepted")
 		}
@@ -280,22 +284,50 @@ func TestRecoveryDirectoryScanAndConcurrentReadersAreBounded(t *testing.T) {
 	t.Run("concurrent recovery", func(t *testing.T) {
 		f, _, _ := importedFixture(t)
 		const readers = 8
-		errorsChannel := make(chan error, readers)
+		type openResult struct {
+			manager *Manager
+			err     error
+		}
+		results := make(chan openResult, readers)
+		start := make(chan struct{})
+		release := make(chan struct{})
 		var wait sync.WaitGroup
 		for range readers {
 			wait.Add(1)
 			go func() {
 				defer wait.Done()
-				_, err := New(recoveryConfig(f, 4, 64, 5, f.now, f.publicKey))
-				errorsChannel <- err
+				<-start
+				manager, err := New(recoveryConfig(
+					f, 4, 64, 5, f.now, f.publicKey,
+				))
+				results <- openResult{manager: manager, err: err}
+				if manager != nil {
+					<-release
+					_ = manager.Close()
+				}
 			}()
 		}
-		wait.Wait()
-		close(errorsChannel)
-		for err := range errorsChannel {
-			if err != nil {
-				t.Fatalf("concurrent recovery failed: %v", err)
+		close(start)
+		successes := 0
+		conflicts := 0
+		for range readers {
+			result := <-results
+			switch {
+			case result.err == nil && result.manager != nil:
+				successes++
+			case errors.Is(result.err, ErrCacheInUse):
+				conflicts++
+			default:
+				t.Fatalf("concurrent recovery error=%v", result.err)
 			}
+		}
+		close(release)
+		wait.Wait()
+		if successes != 1 || conflicts != readers-1 {
+			t.Fatalf(
+				"concurrent ownership successes=%d conflicts=%d",
+				successes, conflicts,
+			)
 		}
 	})
 }
@@ -308,7 +340,25 @@ func importedFixture(t *testing.T) (modelFixture, update.Manifest, []byte) {
 	if _, err := f.manager.Import(context.Background(), manifest, bytes.NewReader(data)); err != nil {
 		t.Fatal(err)
 	}
+	simulateManagerCrash(t, f.manager)
 	return f, manifest, data
+}
+
+func simulateManagerCrash(t *testing.T, manager *Manager) {
+	t.Helper()
+	manager.closeMu.Lock()
+	defer manager.closeMu.Unlock()
+	manager.mu.Lock()
+	ownership := manager.ownership
+	manager.ownership = nil
+	manager.closed = true
+	manager.mu.Unlock()
+	if ownership == nil {
+		t.Fatal("model manager ownership already released")
+	}
+	if err := ownership.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func recoveryConfig(
@@ -337,6 +387,7 @@ func reopen(
 	publicKey ed25519.PublicKey,
 ) *Manager {
 	t.Helper()
+	simulateManagerCrash(t, f.manager)
 	manager, err := New(recoveryConfig(f, maxModels, maxBytes, revision, now, publicKey))
 	if err != nil {
 		t.Fatal(err)

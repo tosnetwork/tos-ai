@@ -9,12 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+
+	"github.com/tosnetwork/tos-ai/internal/dirlock"
 )
 
 const (
 	activationStateVersion      = 1
 	activationStateFile         = "activation-state.json"
 	activationStateStagePrefix  = ".activation-state-"
+	activationStateLockFile     = ".activation-owner.lock"
 	MaxActivationStateBytesHard = 64 << 10
 	MaxActivationStateFilesHard = 128
 )
@@ -31,9 +35,12 @@ type persistedActiveSlot struct {
 }
 
 type activationStateStore struct {
+	closeMu    sync.Mutex
 	dir        string
 	generation uint64
 	writeState func([]byte) error
+	ownership  *dirlock.Lock
+	closed     bool
 }
 
 func openActivationStateStore(
@@ -50,10 +57,15 @@ func openActivationStateStore(
 		info.Mode()&os.ModeSymlink != 0 {
 		return nil, nil, errors.New("activation state directory is not private")
 	}
-	store := &activationStateStore{dir: dir}
+	ownership, err := dirlock.Acquire(dir, activationStateLockFile)
+	if err != nil {
+		return nil, nil, errors.New("activation state is already managed")
+	}
+	store := &activationStateStore{dir: dir, ownership: ownership}
 	store.writeState = store.writeAtomic
 	state, exists, err := store.read()
 	if err != nil {
+		_ = ownership.Close()
 		return nil, nil, err
 	}
 	if !exists {
@@ -85,6 +97,8 @@ func (s *activationStateStore) read() (persistedActivationState, bool, error) {
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
+		case name == activationStateLockFile:
+			continue
 		case name == activationStateFile:
 			if found {
 				return persistedActivationState{}, false, errors.New("duplicate activation state")
@@ -163,6 +177,14 @@ func (s *activationStateStore) read() (persistedActivationState, bool, error) {
 }
 
 func (s *activationStateStore) save(slots []persistedActiveSlot) error {
+	if s == nil {
+		return errors.New("activation state store is closed")
+	}
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return errors.New("activation state store is closed")
+	}
 	if s.generation == math.MaxUint64 {
 		return errors.New("activation state generation limit")
 	}
@@ -184,6 +206,27 @@ func (s *activationStateStore) save(slots []persistedActiveSlot) error {
 		return err
 	}
 	s.generation = state.Generation
+	return nil
+}
+
+func (s *activationStateStore) close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	ownership := s.ownership
+	s.ownership = nil
+	if ownership == nil {
+		return errors.New("invalid activation state ownership")
+	}
+	if err := ownership.Close(); err != nil {
+		return errors.New("release activation state ownership")
+	}
 	return nil
 }
 

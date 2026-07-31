@@ -101,9 +101,14 @@ was accepted during the signed validity window may restart after expiry.
 Recovery verifies every retained artifact before applying capacity-driven
 evictions. Volatile active, draining, pinned, and in-use state is deliberately
 restored as `ready`; the model manager alone never loads a runtime. The cache
-root is an operator-owned single-manager boundary; concurrent processes must
-not share it because cross-process locking is not implemented. The manager
-does not implement Internet download or accept task-supplied model bytes.
+root is an operator-owned single-manager boundary. On Linux, `New` acquires a
+non-blocking exclusive `flock` on a current-user, mode-0600 regular file in
+the private cache. Concurrent owners fail immediately. `Close` refuses to
+release ownership while an import, active/draining model, pin, or lease
+remains, so startup handover cannot race live cache mutation. A process crash
+releases the kernel lock; the persistent lock file itself is reused during
+bounded recovery. The manager does not implement Internet download or accept
+task-supplied model bytes.
 
 `pkg/modelapproval` optionally connects this cache authority to production
 runtime adapters without activating a model. The worker loads a private,
@@ -141,9 +146,12 @@ operator-owned directory. The file is capped at 64 KiB, the directory scan at
 temporary file, atomic rename, and directory sync. A write error is treated as
 an ambiguous commit: every lifecycle operation is blocked until explicit
 recovery reloads the file. This local generation is crash ordering, not a
-tamper-proof or externally anchored rollback counter. The state directory is
-a single-controller ownership boundary; cross-process locking is not
-implemented.
+tamper-proof or externally anchored rollback counter. On Linux, the state
+directory is an enforced single-controller boundary using the same
+non-blocking private-file `flock` discipline. A normal `Close` releases it
+only after every binding and artifact lease is cleaned up; a cleanup failure
+retains ownership for a bounded retry. A process crash releases the lock so a
+new controller can perform explicit recovery.
 
 Persistent controllers start in `recovering`. Their backend inspection result
 is a fixed-size value containing at most two bindings per slot. Recovery
@@ -184,14 +192,17 @@ activation-state directories may not contain one another. Startup performs
 `Recover`, activates every fixed desired digest, wraps inference adapters with
 the signed-cache approval guard, and only then creates the Unix listener.
 Shutdown drains service work before synchronously unloading activation slots
-and closing backend transports. Desired intent remains on disk, so a restart
-can recreate a cleanly removed private runtime model without downloading it.
+and closing backend transports, then releases activation-state and model-cache
+ownership. Desired intent remains on disk, so a restart can recreate a cleanly
+removed private runtime model without downloading it.
 
 Activation for LocalAI, vLLM, llama.cpp, and vendor runtimes remains
 unimplemented. There is no live lifecycle RPC or arbitrary runtime/model
 creation interface. The Ollama endpoint and each activation slot namespace
 are a single-worker operator boundary; there is no distributed lock across
-workers sharing one runtime.
+workers sharing one runtime. The local cache/state locks require a filesystem
+with reliable Linux `flock` semantics and do not defend against a hostile
+process running as the same Unix user.
 
 ## Runtime adapters
 
@@ -279,6 +290,8 @@ Implemented:
   model binding
 - private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
+- fail-fast exclusive local ownership for model caches and persistent
+  activation state, with cleanup-aware handover
 - optional signed-cache model approval guards in worker preflight
 - path-free model leases, bounded runtime-activation coordination, and
   crash-safe active/known-good intent with explicit recovery

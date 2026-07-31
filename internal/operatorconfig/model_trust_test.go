@@ -73,10 +73,18 @@ func TestLoadModelTrustRecoversSignedApprovedArtifact(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := trust.Manager.Close(); err != nil {
+		t.Fatal(err)
+	}
 	recovered, err := LoadModelTrust(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if err := recovered.Manager.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if model := recovered.Manager.Status(digest); model.State !=
 		modelmanager.StateReady || model.Digest != digest {
 		t.Fatalf("recovered approved model=%#v", model)
@@ -195,6 +203,9 @@ func TestLoadModelTrustRejectsSignerAndRevisionRollback(t *testing.T) {
 	if _, err := trust.Manager.Import(
 		context.Background(), manifest, bytes.NewReader(data),
 	); err != nil {
+		t.Fatal(err)
+	}
+	if err := trust.Manager.Close(); err != nil {
 		t.Fatal(err)
 	}
 	_, otherPrivate, err := ed25519.GenerateKey(rand.Reader)

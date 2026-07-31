@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,6 +299,125 @@ func TestDeactivateTransitionsAreIdempotent(t *testing.T) {
 	if f.manager.Status(manifest.Digest).State != StateReady {
 		t.Fatalf("deactivated model = %#v", f.manager.Status(manifest.Digest))
 	}
+}
+
+func TestManagerOwnershipAndCloseLifecycle(t *testing.T) {
+	f := fixture(t, 2, 64)
+	data := []byte("owned")
+	manifest := f.manifest(t, "owned.gguf", data, 5)
+	if _, err := f.manager.Import(
+		context.Background(), manifest, bytes.NewReader(data),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(f.manager.config); !errors.Is(err, ErrCacheInUse) {
+		t.Fatalf("concurrent cache manager error=%v", err)
+	}
+	if err := f.manager.SetPinned(manifest.Digest, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Close(); !errors.Is(err, ErrInUse) {
+		t.Fatalf("manager closed with pinned model: %v", err)
+	}
+	if err := f.manager.SetPinned(manifest.Digest, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Activate(manifest.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Close(); !errors.Is(err, ErrInUse) {
+		t.Fatalf("manager closed with active model: %v", err)
+	}
+	if err := f.manager.Deactivate(manifest.Digest); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := f.manager.AcquireArtifact(manifest.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Close(); !errors.Is(err, ErrInUse) {
+		t.Fatalf("manager closed with live lease: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Activate(manifest.Digest); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed manager activation error=%v", err)
+	}
+	if _, err := f.manager.AcquireArtifact(
+		manifest.Digest,
+	); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed manager acquisition error=%v", err)
+	}
+	if model := f.manager.Status(manifest.Digest); model.State != StateAbsent {
+		t.Fatalf("closed manager status=%#v", model)
+	}
+	recovered, err := New(f.manager.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model := recovered.Status(manifest.Digest); model.State != StateReady {
+		t.Fatalf("recovered model=%#v", model)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(f.root, managerLockFile))
+	if err != nil || !info.Mode().IsRegular() ||
+		info.Mode().Perm() != 0o600 {
+		t.Fatalf("manager lock info=%v err=%v", info, err)
+	}
+}
+
+func TestManagerCloseRefusesImportInProgress(t *testing.T) {
+	f := fixture(t, 2, 64)
+	data := []byte("blocked-import")
+	manifest := f.manifest(t, "blocked.gguf", data, 5)
+	reader := &gatedModelReader{
+		data: data, started: make(chan struct{}), release: make(chan struct{}),
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := f.manager.Import(context.Background(), manifest, reader)
+		result <- err
+	}()
+	<-reader.started
+	if err := f.manager.Close(); !errors.Is(err, ErrInUse) {
+		t.Fatalf("manager closed during import: %v", err)
+	}
+	close(reader.release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type gatedModelReader struct {
+	data    []byte
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *gatedModelReader) Read(buffer []byte) (int, error) {
+	r.once.Do(func() {
+		close(r.started)
+		<-r.release
+	})
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	count := copy(buffer, r.data)
+	r.data = r.data[count:]
+	return count, nil
 }
 
 func assertNoTemporaryFiles(t *testing.T, root string) {

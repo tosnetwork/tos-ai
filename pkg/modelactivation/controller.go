@@ -249,9 +249,11 @@ func New(manager *modelmanager.Manager, config Config) (*Controller, error) {
 		for _, record := range persisted {
 			slot := controller.slots[record.ID]
 			if slot == nil {
+				_ = store.close()
 				return nil, newError(ErrorPersistence, nil)
 			}
 			if _, exists := seenDigests[record.Digest]; exists {
+				_ = store.close()
 				return nil, newError(ErrorPersistence, nil)
 			}
 			seenDigests[record.Digest] = struct{}{}
@@ -975,6 +977,11 @@ func (c *Controller) Close(ctx context.Context) error {
 			slot.lastError = ""
 		}
 		c.mu.Unlock()
+	}
+	if closeErr == nil && c.stateStore != nil {
+		if err := c.stateStore.close(); err != nil {
+			closeErr = newError(ErrorPersistence, err)
+		}
 	}
 	return closeErr
 }

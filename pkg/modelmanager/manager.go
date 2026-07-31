@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/dirlock"
 	"github.com/tosnetwork/tos-ai/pkg/update"
 )
 
@@ -23,6 +24,7 @@ const (
 	MaxSignersHard          = 64
 	MaxMetadataBytes        = int64(16 << 10)
 	MaxDirectoryEntriesHard = 4096
+	managerLockFile         = ".model-manager.lock"
 )
 
 var (
@@ -33,6 +35,8 @@ var (
 	ErrConflict    = errors.New("model digest metadata conflicts with cached entry")
 	ErrArtifact    = errors.New("model artifact is unavailable")
 	ErrLeaseClosed = errors.New("model artifact lease is closed")
+	ErrCacheInUse  = errors.New("model cache is already managed")
+	ErrClosed      = errors.New("model manager is closed")
 )
 
 type State string
@@ -75,12 +79,16 @@ type entry struct {
 }
 
 type Manager struct {
+	closeMu       sync.Mutex
 	mu            sync.Mutex
 	config        Config
 	entries       map[string]*entry
 	lru           *list.List
 	totalBytes    uint64
 	reservedBytes uint64
+	activeImports int
+	ownership     *dirlock.Lock
+	closed        bool
 }
 
 // ArtifactLease exposes an already-open, verified cache artifact without
@@ -165,21 +173,34 @@ func New(config Config) (*Manager, error) {
 		info.Mode().Perm() != 0o700 {
 		return nil, errors.New("model cache must be a private non-symlink directory")
 	}
+	ownership, err := dirlock.Acquire(config.RootDir, managerLockFile)
+	if err != nil {
+		if errors.Is(err, dirlock.ErrHeld) {
+			return nil, ErrCacheInUse
+		}
+		return nil, errors.New("secure model cache ownership")
+	}
 	manager := &Manager{
-		config:  config,
-		entries: make(map[string]*entry, config.MaxModels),
-		lru:     list.New(),
+		config: config, entries: make(map[string]*entry, config.MaxModels),
+		lru: list.New(), ownership: ownership,
 	}
 	if err := manager.recover(); err != nil {
+		_ = ownership.Close()
 		return nil, err
 	}
 	return manager, nil
 }
 
 func (m *Manager) Import(ctx context.Context, manifest update.Manifest, source io.Reader) (Model, error) {
-	if ctx == nil || source == nil {
+	if m == nil || ctx == nil || source == nil {
 		return Model{}, errors.New("invalid model import")
 	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Model{}, ErrClosed
+	}
+	m.mu.Unlock()
 	publicKey := m.config.Signers[manifest.KeyID]
 	if publicKey == nil {
 		return Model{}, errors.New("model signer is not approved")
@@ -192,6 +213,10 @@ func (m *Manager) Import(ctx context.Context, manifest update.Manifest, source i
 	}
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Model{}, ErrClosed
+	}
 	if existing := m.entries[manifest.Digest]; existing != nil {
 		m.touchLocked(existing)
 		if existing.model.Artifact != manifest.Artifact ||
@@ -229,7 +254,13 @@ func (m *Manager) Import(ctx context.Context, manifest update.Manifest, source i
 	current.element = m.lru.PushBack(current)
 	m.entries[manifest.Digest] = current
 	m.reservedBytes += manifest.SizeBytes
+	m.activeImports++
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.activeImports--
+		m.mu.Unlock()
+	}()
 
 	temp, err := os.CreateTemp(m.config.RootDir, artifactStagePrefix)
 	if err != nil {
@@ -310,8 +341,14 @@ func (m *Manager) failImport(current *entry, _ string, category string, cause er
 }
 
 func (m *Manager) Activate(digest string) error {
+	if m == nil {
+		return ErrClosed
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
 	current := m.entries[digest]
 	if current == nil || (current.model.State != StateReady &&
 		current.model.State != StateDraining && current.model.State != StateActive) {
@@ -323,8 +360,14 @@ func (m *Manager) Activate(digest string) error {
 }
 
 func (m *Manager) Drain(digest string) error {
+	if m == nil {
+		return ErrClosed
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
 	current := m.entries[digest]
 	if current == nil || (current.model.State != StateActive &&
 		current.model.State != StateDraining) {
@@ -339,8 +382,14 @@ func (m *Manager) Drain(digest string) error {
 // Runtime lifecycle code must call this only after the corresponding runtime
 // binding has been unloaded or safely rolled back.
 func (m *Manager) Deactivate(digest string) error {
+	if m == nil {
+		return ErrClosed
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
 	current := m.entries[digest]
 	if current == nil || (current.model.State != StateReady &&
 		current.model.State != StateActive && current.model.State != StateDraining) {
@@ -352,8 +401,14 @@ func (m *Manager) Deactivate(digest string) error {
 }
 
 func (m *Manager) SetPinned(digest string, pinned bool) error {
+	if m == nil {
+		return ErrClosed
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
 	current := m.entries[digest]
 	if current == nil || current.model.State == StateFailed || current.model.State == StateVerifying {
 		return ErrNotReady
@@ -364,7 +419,14 @@ func (m *Manager) SetPinned(digest string, pinned bool) error {
 }
 
 func (m *Manager) Acquire(digest string) (Model, func(), error) {
+	if m == nil {
+		return Model{}, nil, ErrClosed
+	}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Model{}, nil, ErrClosed
+	}
 	current := m.entries[digest]
 	if current == nil || (current.model.State != StateReady && current.model.State != StateActive &&
 		current.model.State != StateDraining) {
@@ -381,7 +443,14 @@ func (m *Manager) Acquire(digest string) (Model, func(), error) {
 // is locked so a runtime backend never consumes an unbounded or substituted
 // path supplied by a task.
 func (m *Manager) AcquireArtifact(digest string) (*ArtifactLease, error) {
+	if m == nil {
+		return nil, ErrClosed
+	}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, ErrClosed
+	}
 	current := m.entries[digest]
 	if current == nil || current.path == "" ||
 		(current.model.State != StateReady && current.model.State != StateActive &&
@@ -432,8 +501,14 @@ func (m *Manager) acquireLocked(current *entry) (Model, func()) {
 }
 
 func (m *Manager) Status(digest string) Model {
+	if m == nil {
+		return Model{Digest: digest, State: StateAbsent}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return Model{Digest: digest, State: StateAbsent}
+	}
 	if current := m.entries[digest]; current != nil {
 		return current.model
 	}
@@ -441,13 +516,60 @@ func (m *Manager) Status(digest string) Model {
 }
 
 func (m *Manager) List() []Model {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
 	result := make([]Model, 0, len(m.entries))
 	for element := m.lru.Front(); element != nil; element = element.Next() {
 		result = append(result, element.Value.(*entry).model)
 	}
 	return result
+}
+
+// Close releases exclusive ownership only when no import, activation, pin, or
+// artifact lease remains. A failed busy close leaves the manager open so the
+// caller can finish cleanup and retry.
+func (m *Manager) Close() error {
+	if m == nil {
+		return nil
+	}
+	m.closeMu.Lock()
+	defer m.closeMu.Unlock()
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	if m.activeImports != 0 {
+		m.mu.Unlock()
+		return ErrInUse
+	}
+	for _, current := range m.entries {
+		if current.model.State == StateVerifying ||
+			current.model.State == StateActive ||
+			current.model.State == StateDraining ||
+			current.model.Pinned || current.model.InUse != 0 {
+			m.mu.Unlock()
+			return ErrInUse
+		}
+	}
+	ownership := m.ownership
+	if ownership == nil {
+		m.mu.Unlock()
+		return ErrClosed
+	}
+	m.closed = true
+	m.ownership = nil
+	m.mu.Unlock()
+	if err := ownership.Close(); err != nil {
+		return errors.New("release model cache ownership")
+	}
+	return nil
 }
 
 func (m *Manager) ensureCapacityLocked(incoming uint64) error {

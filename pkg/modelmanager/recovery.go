@@ -202,6 +202,9 @@ func (m *Manager) scanRecoveryPairs() (map[string]recoveryPair, bool, error) {
 			}
 			name := item.Name()
 			path := filepath.Join(m.config.RootDir, name)
+			if name == managerLockFile {
+				continue
+			}
 			if strings.HasPrefix(name, strings.TrimSuffix(artifactStagePrefix, "*")) ||
 				strings.HasPrefix(name, strings.TrimSuffix(metadataStagePrefix, "*")) {
 				if err := os.Remove(path); err != nil {

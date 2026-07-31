@@ -81,6 +81,9 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
 	runtimePath := writeWorkerPrivate(t, "runtime.json", fmt.Sprintf(`{
 		"version":1,
 		"adapters":[{
@@ -114,7 +117,7 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 		)
 	}
 	closeRuntimeAdapters(runtimes.adapters)
-	if err := runtimes.closeActivation(context.Background()); err != nil {
+	if err := runtimes.closeRuntimeState(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,6 +166,9 @@ func TestConfiguredRuntimesActivatesRecoversAndCleansApprovedOllamaModel(
 	if _, err := manager.Import(
 		context.Background(), manifest, bytes.NewReader(data),
 	); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -221,7 +227,7 @@ func TestConfiguredRuntimesActivatesRecoversAndCleansApprovedOllamaModel(
 	stop := func(resources *runtimeResources) {
 		t.Helper()
 		closeRuntimeAdapters(resources.adapters)
-		if err := resources.closeActivation(context.Background()); err != nil {
+		if err := resources.closeRuntimeState(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -281,6 +287,13 @@ func TestConfiguredRuntimesRequiresTrustAndSeparateActivationState(t *testing.T)
 		runtimePath, trustPath, 0,
 	); err == nil {
 		t.Fatal("overlapping model cache and activation state succeeded")
+	}
+	trust, err := operatorconfig.LoadModelTrust(trustPath)
+	if err != nil {
+		t.Fatalf("failed startup retained model cache ownership: %v", err)
+	}
+	if err := trust.Manager.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

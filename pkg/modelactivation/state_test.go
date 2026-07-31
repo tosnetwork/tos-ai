@@ -74,6 +74,9 @@ func abandonController(c *Controller) {
 		_ = c.manager.Deactivate(loadedDigest(item))
 		_ = item.lease.Close()
 	}
+	if c.stateStore != nil {
+		_ = c.stateStore.close()
+	}
 }
 
 func loadRuntimeResidue(
@@ -230,6 +233,9 @@ func TestRecoveryRemovesUncommittedFirstActivationResidue(t *testing.T) {
 	}
 	digest := f.importModel(t, "candidate.gguf", []byte("uncommitted"))
 	loadRuntimeResidue(t, f, f.backend, primarySlot(f.backend).Policy, digest)
+	if err := controller.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	restarted := newPersistentController(
 		t, f, stateDir, []Slot{primarySlot(f.backend)},
@@ -246,6 +252,85 @@ func TestRecoveryRemovesUncommittedFirstActivationResidue(t *testing.T) {
 	f.backend.mu.Unlock()
 	if current != 0 {
 		t.Fatalf("uncommitted runtime bindings=%d", current)
+	}
+}
+
+func TestPersistentControllerEnforcesSingleOwner(t *testing.T) {
+	f := newActivationFixture(t)
+	stateDir := filepath.Join(t.TempDir(), "activation")
+	controller := newPersistentController(
+		t, f, stateDir, []Slot{primarySlot(f.backend)},
+	)
+	_, err := New(f.manager, Config{
+		OperationTimeout: time.Second, CleanupTimeout: time.Second,
+		StateDir: stateDir, Slots: []Slot{primarySlot(f.backend)},
+	})
+	if ErrorKindOf(err) != ErrorPersistence ||
+		strings.Contains(err.Error(), stateDir) {
+		t.Fatalf("concurrent activation controller error=%v", err)
+	}
+	if err := controller.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newPersistentController(
+		t, f, stateDir, []Slot{primarySlot(f.backend)},
+	)
+	if err := restarted.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(stateDir, activationStateLockFile))
+	if err != nil || !info.Mode().IsRegular() ||
+		info.Mode().Perm() != 0o600 {
+		t.Fatalf("activation ownership info=%v err=%v", info, err)
+	}
+}
+
+func TestPersistentControllerRetainsOwnershipUntilCleanupSucceeds(t *testing.T) {
+	f := newActivationFixture(t)
+	stateDir := filepath.Join(t.TempDir(), "activation")
+	controller := newPersistentController(
+		t, f, stateDir, []Slot{primarySlot(f.backend)},
+	)
+	if err := controller.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	digest := f.importModel(t, "model.gguf", []byte("cleanup-retry"))
+	if _, err := controller.Activate(
+		context.Background(), "primary", digest,
+	); err != nil {
+		t.Fatal(err)
+	}
+	failUnload := true
+	f.backend.unloadFn = func(context.Context, Binding) error {
+		if failUnload {
+			return errors.New("injected unload failure")
+		}
+		return nil
+	}
+	if err := controller.Close(
+		context.Background(),
+	); ErrorKindOf(err) != ErrorCleanup {
+		t.Fatalf("failed close error=%v", err)
+	}
+	if _, err := New(f.manager, Config{
+		OperationTimeout: time.Second, CleanupTimeout: time.Second,
+		StateDir: stateDir, Slots: []Slot{primarySlot(f.backend)},
+	}); ErrorKindOf(err) != ErrorPersistence {
+		t.Fatalf("cleanup failure released state ownership: %v", err)
+	}
+	failUnload = false
+	if err := controller.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newPersistentController(
+		t, f, stateDir, []Slot{primarySlot(f.backend)},
+	)
+	if err := restarted.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if model := f.manager.Status(digest); model.InUse != 0 ||
+		model.State != modelmanager.StateReady {
+		t.Fatalf("cleanup retry model=%#v", model)
 	}
 }
 
@@ -682,7 +767,9 @@ func TestRepeatedPersistentLifecycleRemainsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != activationStateFile {
+	if len(entries) != 2 ||
+		entries[0].Name() != activationStateLockFile ||
+		entries[1].Name() != activationStateFile {
 		t.Fatalf("activation state directory grew: %#v", entries)
 	}
 	if model := f.manager.Status(digest); model.InUse != 0 ||
