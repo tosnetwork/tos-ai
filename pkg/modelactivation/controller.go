@@ -20,43 +20,47 @@ import (
 )
 
 const (
-	MaxSlotsHard          = 64
-	MaxIdentityBytes      = 256
-	MaxHandleBytes        = 256
-	MaxModelBytesHard     = uint64(1 << 40)
-	MaxOperationTimeout   = 10 * time.Minute
-	MaxCleanupTimeoutHard = time.Minute
-	hashBufferBytes       = 1 << 20
+	MaxSlotsHard            = 64
+	MaxIdentityBytes        = 256
+	MaxHandleBytes          = 256
+	MaxModelBytesHard       = uint64(1 << 40)
+	MaxOperationTimeout     = 10 * time.Minute
+	MaxCleanupTimeoutHard   = time.Minute
+	MaxRecoveryBindingsHard = 2
+	hashBufferBytes         = 1 << 20
 )
 
 type State string
 
 const (
-	StateInactive State = "inactive"
-	StateLoading  State = "loading"
-	StateActive   State = "active"
-	StateDraining State = "draining"
-	StateFailed   State = "failed"
-	StateClosed   State = "closed"
+	StateInactive   State = "inactive"
+	StateRecovering State = "recovering"
+	StateLoading    State = "loading"
+	StateActive     State = "active"
+	StateDraining   State = "draining"
+	StateFailed     State = "failed"
+	StateClosed     State = "closed"
 )
 
 type ErrorKind string
 
 const (
-	ErrorInvalid  ErrorKind = "invalid"
-	ErrorNotFound ErrorKind = "not_found"
-	ErrorBusy     ErrorKind = "busy"
-	ErrorConflict ErrorKind = "conflict"
-	ErrorLimit    ErrorKind = "limit"
-	ErrorCanceled ErrorKind = "canceled"
-	ErrorTimeout  ErrorKind = "timeout"
-	ErrorArtifact ErrorKind = "artifact"
-	ErrorBackend  ErrorKind = "backend"
-	ErrorBinding  ErrorKind = "binding"
-	ErrorHealth   ErrorKind = "health"
-	ErrorCleanup  ErrorKind = "cleanup"
-	ErrorClosed   ErrorKind = "closed"
-	ErrorInternal ErrorKind = "internal"
+	ErrorInvalid     ErrorKind = "invalid"
+	ErrorNotFound    ErrorKind = "not_found"
+	ErrorBusy        ErrorKind = "busy"
+	ErrorConflict    ErrorKind = "conflict"
+	ErrorLimit       ErrorKind = "limit"
+	ErrorCanceled    ErrorKind = "canceled"
+	ErrorTimeout     ErrorKind = "timeout"
+	ErrorArtifact    ErrorKind = "artifact"
+	ErrorBackend     ErrorKind = "backend"
+	ErrorBinding     ErrorKind = "binding"
+	ErrorHealth      ErrorKind = "health"
+	ErrorCleanup     ErrorKind = "cleanup"
+	ErrorPersistence ErrorKind = "persistence"
+	ErrorRecovery    ErrorKind = "recovery"
+	ErrorClosed      ErrorKind = "closed"
+	ErrorInternal    ErrorKind = "internal"
 )
 
 type Error struct {
@@ -132,6 +136,21 @@ type Backend interface {
 	Unload(context.Context, Binding) error
 }
 
+type RecoveryBindings struct {
+	Count    int
+	Bindings [MaxRecoveryBindingsHard]Binding
+}
+
+// RecoveryBackend is optional for volatile controllers and mandatory when
+// Config.StateDir is set. Inspect returns all bindings currently owned by one
+// fixed administrator slot through a fixed-size value. Count outside
+// [0, MaxRecoveryBindingsHard] fails closed. It must not discover or return
+// unrelated runtime state.
+type RecoveryBackend interface {
+	Backend
+	Inspect(context.Context, string) (RecoveryBindings, error)
+}
+
 type Slot struct {
 	Policy  SlotPolicy
 	Backend Backend
@@ -140,7 +159,12 @@ type Slot struct {
 type Config struct {
 	OperationTimeout time.Duration
 	CleanupTimeout   time.Duration
-	Slots            []Slot
+	// StateDir enables crash-safe active/known-good intent. It must be an
+	// absolute private directory separate from the model cache. A controller
+	// with persistent state rejects lifecycle operations until Recover
+	// succeeds.
+	StateDir string
+	Slots    []Slot
 }
 
 type Status struct {
@@ -169,6 +193,7 @@ type runtimeSlot struct {
 	active    *loadedModel
 	orphan    *loadedModel
 	pending   string
+	desired   string
 	uncertain bool
 	lastError ErrorKind
 }
@@ -176,9 +201,13 @@ type runtimeSlot struct {
 type Controller struct {
 	mu             sync.Mutex
 	closeMu        sync.Mutex
+	recoveryMu     sync.Mutex
+	stateMu        sync.Mutex
 	manager        *modelmanager.Manager
 	slots          map[string]*runtimeSlot
 	orderedIDs     []string
+	stateStore     *activationStateStore
+	recoveryNeeded bool
 	operationLimit time.Duration
 	cleanupLimit   time.Duration
 	closed         bool
@@ -210,7 +239,371 @@ func New(manager *modelmanager.Manager, config Config) (*Controller, error) {
 		controller.orderedIDs = append(controller.orderedIDs, configured.Policy.ID)
 	}
 	sort.Strings(controller.orderedIDs)
+	if config.StateDir != "" {
+		store, persisted, err := openActivationStateStore(config.StateDir)
+		if err != nil {
+			return nil, newError(ErrorPersistence, err)
+		}
+		seenDigests := make(map[string]struct{}, len(persisted))
+		for _, record := range persisted {
+			slot := controller.slots[record.ID]
+			if slot == nil {
+				return nil, newError(ErrorPersistence, nil)
+			}
+			if _, exists := seenDigests[record.Digest]; exists {
+				return nil, newError(ErrorPersistence, nil)
+			}
+			seenDigests[record.Digest] = struct{}{}
+			slot.desired = record.Digest
+		}
+		controller.stateStore = store
+		controller.recoveryNeeded = true
+		for _, slot := range controller.slots {
+			slot.state = StateRecovering
+		}
+	}
 	return controller, nil
+}
+
+// Recover reconciles the private persisted active/known-good intent with the
+// bounded runtime state reported by RecoveryBackend. It removes at most one
+// unexpected candidate beside the desired binding, revalidates the complete
+// artifact, health-checks an adopted binding, or reloads the desired artifact
+// when the runtime no longer has it. Persistent controllers fail closed until
+// this synchronous operation succeeds.
+func (c *Controller) Recover(ctx context.Context) error {
+	if ctx == nil {
+		return newError(ErrorInvalid, nil)
+	}
+	if c.stateStore == nil {
+		return nil
+	}
+	c.recoveryMu.Lock()
+	defer c.recoveryMu.Unlock()
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return newError(ErrorClosed, nil)
+	}
+	if !c.recoveryNeeded {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	if err := c.reloadPersistedIntent(); err != nil {
+		c.finishRecoveryAttempt(ErrorPersistence)
+		return newError(ErrorPersistence, err)
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return newError(ErrorClosed, nil)
+	}
+	if !c.recoveryNeeded {
+		c.mu.Unlock()
+		return nil
+	}
+	for _, slot := range c.slots {
+		if slot.busy {
+			c.mu.Unlock()
+			return newError(ErrorBusy, nil)
+		}
+	}
+	for _, slot := range c.slots {
+		slot.busy, slot.state, slot.lastError = true, StateRecovering, ""
+	}
+	c.mu.Unlock()
+
+	for _, slotID := range c.orderedIDs {
+		if err := c.recoverSlot(ctx, c.slots[slotID]); err != nil {
+			c.finishRecoveryAttempt(ErrorRecovery)
+			kind := contextErrorKind(ctx, err, ErrorRecovery)
+			return newError(kind, err)
+		}
+	}
+	c.mu.Lock()
+	c.recoveryNeeded = false
+	for _, slot := range c.slots {
+		slot.busy, slot.lastError = false, ""
+		if slot.active != nil {
+			slot.state = StateActive
+		} else {
+			slot.state = StateInactive
+		}
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Controller) reloadPersistedIntent() error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	state, exists, err := c.stateStore.read()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		c.mu.Lock()
+		for _, slot := range c.slots {
+			slot.desired = ""
+		}
+		c.stateStore.generation = 0
+		c.mu.Unlock()
+		return nil
+	}
+	seenDigests := make(map[string]struct{}, len(state.Slots))
+	desired := make(map[string]string, len(state.Slots))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, record := range state.Slots {
+		if c.slots[record.ID] == nil {
+			return errors.New("unknown persisted activation slot")
+		}
+		if _, duplicate := seenDigests[record.Digest]; duplicate {
+			return errors.New("duplicate persisted activation digest")
+		}
+		seenDigests[record.Digest] = struct{}{}
+		desired[record.ID] = record.Digest
+	}
+	for id, slot := range c.slots {
+		slot.desired = desired[id]
+	}
+	c.stateStore.generation = state.Generation
+	return nil
+}
+
+func (c *Controller) recoverSlot(ctx context.Context, slot *runtimeSlot) error {
+	backend, ok := slot.backend.(RecoveryBackend)
+	if !ok {
+		return errors.New("backend recovery is unavailable")
+	}
+	inspectContext, cancelInspect := context.WithTimeout(ctx, c.operationLimit)
+	inspected, inspectErr, panicked := safeInspect(
+		backend, inspectContext, slot.policy.ID,
+	)
+	cancelInspect()
+	if panicked || inspectErr != nil {
+		return errors.New("runtime inspection failed")
+	}
+	if inspected.Count < 0 || inspected.Count > MaxRecoveryBindingsHard {
+		return errors.New("runtime recovery binding limit")
+	}
+	bindings := inspected.Bindings[:inspected.Count]
+	seenDigests := make(map[string]struct{}, MaxRecoveryBindingsHard)
+	seenHandles := make(map[string]struct{}, MaxRecoveryBindingsHard)
+	var desiredBinding *Binding
+	for index := range bindings {
+		binding := bindings[index]
+		if !validDigest(binding.ModelDigest) ||
+			validateBinding(slot.policy, binding.ModelDigest, binding) != nil {
+			return errors.New("invalid recovered binding")
+		}
+		if _, exists := seenDigests[binding.ModelDigest]; exists {
+			return errors.New("duplicate recovered digest")
+		}
+		if _, exists := seenHandles[binding.Handle]; exists {
+			return errors.New("duplicate recovered handle")
+		}
+		seenDigests[binding.ModelDigest] = struct{}{}
+		seenHandles[binding.Handle] = struct{}{}
+		if binding.ModelDigest == slot.desired {
+			copy := binding
+			desiredBinding = &copy
+		}
+	}
+
+	if slot.desired == "" {
+		for _, binding := range bindings {
+			if err := c.unloadForRecovery(ctx, slot.backend, binding); err != nil {
+				return err
+			}
+		}
+		c.releaseRecoveredSlot(slot, nil)
+		return nil
+	}
+	if desiredBinding == nil && len(bindings) >= MaxRecoveryBindingsHard {
+		return errors.New("no bounded recovery candidate capacity")
+	}
+
+	lease, acquired, err := c.recoveryLease(slot, slot.desired)
+	if err != nil {
+		return err
+	}
+	keepLease := false
+	defer func() {
+		if acquired && !keepLease {
+			_ = lease.Close()
+		}
+	}()
+	model := lease.Model()
+	if model.SizeBytes == 0 || model.SizeBytes > slot.policy.MaxModelBytes {
+		return errors.New("recovered artifact exceeds policy")
+	}
+	verifyContext, cancelVerify := context.WithTimeout(ctx, c.operationLimit)
+	verifyErr := verifyArtifact(verifyContext, lease)
+	cancelVerify()
+	if verifyErr != nil {
+		return errors.New("recovered artifact verification failed")
+	}
+
+	var binding Binding
+	loadedCandidate := false
+	if desiredBinding != nil {
+		binding = *desiredBinding
+		healthContext, cancelHealth := context.WithTimeout(ctx, c.operationLimit)
+		healthErr, _ := safeBackendCall(func() error {
+			return slot.backend.Health(healthContext, binding)
+		})
+		cancelHealth()
+		if healthErr != nil {
+			keepLease = true
+			c.retainRecoveryCandidate(
+				slot, &loadedModel{binding: binding, lease: lease}, false,
+			)
+			return errors.New("recovered binding health failed")
+		}
+	} else {
+		loadContext, cancelLoad := context.WithTimeout(ctx, c.operationLimit)
+		loaded, loadErr, loadPanicked := safeLoad(slot.backend, loadContext, LoadRequest{
+			SlotID: slot.policy.ID, Model: slot.policy.Model,
+			ModelDigest: slot.desired, SizeBytes: model.SizeBytes, Artifact: lease,
+		})
+		cancelLoad()
+		if loadPanicked || loadErr != nil {
+			keepLease = true
+			c.retainRecoveryCandidate(
+				slot, &loadedModel{binding: loaded, lease: lease}, loadPanicked,
+			)
+			return errors.New("recovery load failed")
+		}
+		binding = loaded
+		loadedCandidate = true
+		if validateBinding(slot.policy, slot.desired, binding) != nil {
+			_ = c.unloadForRecovery(ctx, slot.backend, binding)
+			keepLease = true
+			c.retainRecoveryCandidate(
+				slot, &loadedModel{binding: binding, lease: lease}, false,
+			)
+			return errors.New("invalid recovery load binding")
+		}
+		healthContext, cancelHealth := context.WithTimeout(ctx, c.operationLimit)
+		healthErr, _ := safeBackendCall(func() error {
+			return slot.backend.Health(healthContext, binding)
+		})
+		cancelHealth()
+		if healthErr != nil {
+			_ = c.unloadForRecovery(ctx, slot.backend, binding)
+			keepLease = true
+			c.retainRecoveryCandidate(
+				slot, &loadedModel{binding: binding, lease: lease}, false,
+			)
+			return errors.New("recovery load health failed")
+		}
+	}
+	if err := c.manager.Activate(slot.desired); err != nil {
+		if loadedCandidate {
+			_ = c.unloadForRecovery(ctx, slot.backend, binding)
+		}
+		keepLease = true
+		c.retainRecoveryCandidate(
+			slot, &loadedModel{binding: binding, lease: lease}, false,
+		)
+		return errors.New("recovered artifact activation failed")
+	}
+	active := &loadedModel{binding: binding, lease: lease}
+	for _, unexpected := range bindings {
+		if unexpected.ModelDigest == slot.desired {
+			continue
+		}
+		if err := c.unloadForRecovery(ctx, slot.backend, unexpected); err != nil {
+			keepLease = true
+			c.retainRecoveryCandidate(slot, active, false)
+			return err
+		}
+	}
+	keepLease = true
+	c.releaseRecoveredSlot(slot, active)
+	return nil
+}
+
+func (c *Controller) retainRecoveryCandidate(
+	slot *runtimeSlot,
+	retained *loadedModel,
+	uncertain bool,
+) {
+	c.mu.Lock()
+	previousOrphan := slot.orphan
+	if slot.active != nil && slot.active.lease == retained.lease {
+		slot.orphan = nil
+	} else {
+		slot.orphan = retained
+	}
+	slot.uncertain = slot.uncertain || uncertain
+	c.mu.Unlock()
+	if previousOrphan != nil && previousOrphan.lease != retained.lease {
+		_ = c.manager.Deactivate(loadedDigest(previousOrphan))
+		_ = previousOrphan.lease.Close()
+	}
+}
+
+func (c *Controller) recoveryLease(
+	slot *runtimeSlot,
+	digest string,
+) (*modelmanager.ArtifactLease, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if slot.active != nil && loadedDigest(slot.active) == digest &&
+		slot.active.lease != nil {
+		return slot.active.lease, false, nil
+	}
+	if slot.orphan != nil && loadedDigest(slot.orphan) == digest &&
+		slot.orphan.lease != nil {
+		return slot.orphan.lease, false, nil
+	}
+	lease, err := c.manager.AcquireArtifact(digest)
+	return lease, true, err
+}
+
+func (c *Controller) releaseRecoveredSlot(
+	slot *runtimeSlot,
+	active *loadedModel,
+) {
+	c.mu.Lock()
+	previousActive, previousOrphan := slot.active, slot.orphan
+	slot.active, slot.orphan, slot.uncertain = active, nil, false
+	c.mu.Unlock()
+	for _, previous := range []*loadedModel{previousActive, previousOrphan} {
+		if previous == nil || (active != nil && previous.lease == active.lease) {
+			continue
+		}
+		_ = c.manager.Deactivate(loadedDigest(previous))
+		_ = previous.lease.Close()
+	}
+}
+
+func (c *Controller) unloadForRecovery(
+	ctx context.Context,
+	backend Backend,
+	binding Binding,
+) error {
+	cleanupContext, cancelCleanup := context.WithTimeout(ctx, c.cleanupLimit)
+	defer cancelCleanup()
+	err, _ := safeBackendCall(func() error {
+		return backend.Unload(cleanupContext, binding)
+	})
+	return err
+}
+
+func (c *Controller) finishRecoveryAttempt(kind ErrorKind) {
+	c.mu.Lock()
+	c.recoveryNeeded = true
+	for _, slot := range c.slots {
+		slot.busy, slot.state, slot.lastError = false, StateRecovering, kind
+	}
+	c.mu.Unlock()
 }
 
 func (c *Controller) Activate(
@@ -296,19 +689,23 @@ func (c *Controller) Activate(
 		return c.finishFailure(slot, old, nil, kind), newError(kind, nil)
 	}
 
+	if err := c.persistDesired(slot.policy.ID, digest); err != nil {
+		_ = c.cleanupCandidate(slot, candidate)
+		return c.finishRecoveryFailure(slot, old, candidate),
+			newError(ErrorPersistence, err)
+	}
+
 	if err := c.manager.Activate(digest); err != nil {
-		if cleanupErr := c.cleanupCandidate(slot, candidate); cleanupErr != nil {
-			return c.finishFailure(slot, old, candidate, ErrorCleanup),
-				newError(ErrorCleanup, nil)
-		}
-		_ = lease.Close()
-		return c.finishFailure(slot, old, nil, ErrorArtifact),
-			newError(ErrorArtifact, err)
+		return c.rollbackPersistedCandidate(
+			slot, old, candidate, ErrorArtifact,
+		)
 	}
 
 	if old != nil {
 		if err := c.manager.Drain(old.binding.ModelDigest); err != nil {
-			return c.rollbackCandidate(slot, old, candidate, ErrorInternal)
+			return c.rollbackPersistedCandidate(
+				slot, old, candidate, ErrorInternal,
+			)
 		}
 		unloadContext, cancelUnload := context.WithTimeout(ctx, c.operationLimit)
 		unloadErr, _ := safeBackendCall(func() error {
@@ -317,7 +714,7 @@ func (c *Controller) Activate(
 		cancelUnload()
 		if unloadErr != nil {
 			_ = c.manager.Activate(old.binding.ModelDigest)
-			return c.rollbackCandidate(
+			return c.rollbackPersistedCandidate(
 				slot, old, candidate, contextErrorKind(ctx, unloadErr, ErrorCleanup),
 			)
 		}
@@ -342,6 +739,11 @@ func (c *Controller) Deactivate(ctx context.Context, slotID string) (Status, err
 		c.mu.Unlock()
 		return status, newError(ErrorClosed, nil)
 	}
+	if c.recoveryNeeded {
+		status := statusLocked(slot)
+		c.mu.Unlock()
+		return status, newError(ErrorRecovery, nil)
+	}
 	if slot.busy {
 		status := statusLocked(slot)
 		c.mu.Unlock()
@@ -361,7 +763,17 @@ func (c *Controller) Deactivate(ctx context.Context, slotID string) (Status, err
 	slot.busy, slot.state, slot.lastError = true, StateDraining, ""
 	c.mu.Unlock()
 
+	if err := c.persistDesired(slot.policy.ID, ""); err != nil {
+		return c.finishRecoveryFailure(slot, active, nil),
+			newError(ErrorPersistence, err)
+	}
 	if err := c.manager.Drain(active.binding.ModelDigest); err != nil {
+		if persistErr := c.persistDesired(
+			slot.policy.ID, active.binding.ModelDigest,
+		); persistErr != nil {
+			return c.finishRecoveryFailure(slot, active, nil),
+				newError(ErrorPersistence, persistErr)
+		}
 		return c.finishDeactivateFailure(slot, ErrorArtifact),
 			newError(ErrorArtifact, err)
 	}
@@ -372,6 +784,12 @@ func (c *Controller) Deactivate(ctx context.Context, slotID string) (Status, err
 	cancelOperation()
 	if unloadErr != nil {
 		_ = c.manager.Activate(active.binding.ModelDigest)
+		if persistErr := c.persistDesired(
+			slot.policy.ID, active.binding.ModelDigest,
+		); persistErr != nil {
+			return c.finishRecoveryFailure(slot, active, nil),
+				newError(ErrorPersistence, persistErr)
+		}
 		kind := contextErrorKind(ctx, unloadErr, ErrorBackend)
 		return c.finishDeactivateFailure(slot, kind), newError(kind, nil)
 	}
@@ -379,6 +797,9 @@ func (c *Controller) Deactivate(ctx context.Context, slotID string) (Status, err
 	_ = active.lease.Close()
 	c.mu.Lock()
 	slot.active, slot.busy, slot.state, slot.lastError = nil, false, StateInactive, ""
+	if c.recoveryNeeded {
+		slot.state, slot.lastError = StateRecovering, ErrorRecovery
+	}
 	status := statusLocked(slot)
 	c.mu.Unlock()
 	return status, nil
@@ -398,6 +819,11 @@ func (c *Controller) RetryCleanup(ctx context.Context, slotID string) (Status, e
 		status := statusLocked(slot)
 		c.mu.Unlock()
 		return status, newError(ErrorClosed, nil)
+	}
+	if c.recoveryNeeded {
+		status := statusLocked(slot)
+		c.mu.Unlock()
+		return status, newError(ErrorRecovery, nil)
 	}
 	if slot.busy {
 		status := statusLocked(slot)
@@ -442,6 +868,9 @@ func (c *Controller) RetryCleanup(ctx context.Context, slotID string) (Status, e
 		slot.state = StateActive
 	} else {
 		slot.state = StateInactive
+	}
+	if c.recoveryNeeded {
+		slot.state, slot.lastError = StateRecovering, ErrorRecovery
 	}
 	status := statusLocked(slot)
 	c.mu.Unlock()
@@ -554,6 +983,9 @@ func (c *Controller) beginActivation(
 	if c.closed {
 		return nil, nil, statusLocked(slot), newError(ErrorClosed, nil)
 	}
+	if c.recoveryNeeded {
+		return nil, nil, statusLocked(slot), newError(ErrorRecovery, nil)
+	}
 	if slot.busy {
 		return nil, nil, statusLocked(slot), newError(ErrorBusy, nil)
 	}
@@ -578,13 +1010,25 @@ func (c *Controller) beginActivation(
 	return slot, old, Status{}, nil
 }
 
-func (c *Controller) rollbackCandidate(
+func (c *Controller) rollbackPersistedCandidate(
 	slot *runtimeSlot,
 	old *loadedModel,
 	candidate *loadedModel,
 	kind ErrorKind,
 ) (Status, error) {
 	cleanupErr := c.cleanupCandidate(slot, candidate)
+	oldDigest := ""
+	if old != nil {
+		oldDigest = old.binding.ModelDigest
+	}
+	persistErr := c.persistDesired(slot.policy.ID, oldDigest)
+	if persistErr != nil {
+		if cleanupErr == nil {
+			_ = c.manager.Deactivate(candidate.binding.ModelDigest)
+		}
+		return c.finishRecoveryFailure(slot, old, candidate),
+			newError(ErrorPersistence, persistErr)
+	}
 	if cleanupErr == nil {
 		_ = c.manager.Deactivate(candidate.binding.ModelDigest)
 		_ = candidate.lease.Close()
@@ -592,6 +1036,70 @@ func (c *Controller) rollbackCandidate(
 	}
 	return c.finishFailure(slot, old, candidate, ErrorCleanup),
 		newError(ErrorCleanup, nil)
+}
+
+func (c *Controller) finishRecoveryFailure(
+	slot *runtimeSlot,
+	old *loadedModel,
+	retained *loadedModel,
+) Status {
+	c.mu.Lock()
+	c.recoveryNeeded = true
+	for _, candidate := range c.slots {
+		if candidate.state != StateClosed {
+			candidate.state, candidate.lastError = StateRecovering, ErrorRecovery
+		}
+	}
+	slot.active, slot.orphan, slot.pending = old, retained, ""
+	slot.busy, slot.state, slot.lastError = false, StateRecovering, ErrorPersistence
+	status := statusLocked(slot)
+	c.mu.Unlock()
+	return status
+}
+
+func (c *Controller) persistDesired(slotID string, digest string) error {
+	if c.stateStore == nil {
+		return nil
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	c.mu.Lock()
+	if c.slots[slotID] == nil {
+		c.mu.Unlock()
+		return errors.New("unknown activation slot")
+	}
+	if c.recoveryNeeded {
+		c.mu.Unlock()
+		return errors.New("activation recovery is required")
+	}
+	records := make([]persistedActiveSlot, 0, len(c.slots))
+	for _, id := range c.orderedIDs {
+		current := c.slots[id].desired
+		if id == slotID {
+			current = digest
+		}
+		if current != "" {
+			records = append(records, persistedActiveSlot{ID: id, Digest: current})
+		}
+	}
+	c.mu.Unlock()
+
+	if err := c.stateStore.save(records); err != nil {
+		c.mu.Lock()
+		c.recoveryNeeded = true
+		for _, slot := range c.slots {
+			if slot.state != StateClosed {
+				slot.state, slot.lastError = StateRecovering, ErrorRecovery
+			}
+		}
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Lock()
+	c.slots[slotID].desired = digest
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *Controller) cleanupCandidate(slot *runtimeSlot, candidate *loadedModel) error {
@@ -622,6 +1130,9 @@ func (c *Controller) finishSuccess(slot *runtimeSlot, active *loadedModel) Statu
 	c.mu.Lock()
 	slot.active, slot.orphan, slot.pending = active, nil, ""
 	slot.busy, slot.state, slot.lastError = false, StateActive, ""
+	if c.recoveryNeeded {
+		slot.state, slot.lastError = StateRecovering, ErrorRecovery
+	}
 	status := statusLocked(slot)
 	c.mu.Unlock()
 	return status
@@ -636,7 +1147,9 @@ func (c *Controller) finishFailure(
 	c.mu.Lock()
 	slot.active, slot.orphan, slot.pending = old, orphan, ""
 	slot.busy, slot.lastError = false, kind
-	if old != nil {
+	if c.recoveryNeeded {
+		slot.state, slot.lastError = StateRecovering, ErrorRecovery
+	} else if old != nil {
 		slot.state = StateActive
 	} else {
 		slot.state = StateFailed
@@ -649,6 +1162,9 @@ func (c *Controller) finishFailure(
 func (c *Controller) finishDeactivateFailure(slot *runtimeSlot, kind ErrorKind) Status {
 	c.mu.Lock()
 	slot.busy, slot.state, slot.lastError = false, StateActive, kind
+	if c.recoveryNeeded {
+		slot.state, slot.lastError = StateRecovering, ErrorRecovery
+	}
 	status := statusLocked(slot)
 	c.mu.Unlock()
 	return status
@@ -665,6 +1181,8 @@ func statusLocked(slot *runtimeSlot) Status {
 		status.ModelDigest = slot.active.binding.ModelDigest
 		status.RuntimeRevision = slot.active.binding.RuntimeRevision
 		status.DigestEvidence = slot.active.binding.DigestEvidence
+	} else if slot.state == StateRecovering {
+		status.ModelDigest = slot.desired
 	}
 	return status
 }
@@ -769,6 +1287,20 @@ func safeLoad(
 	}()
 	binding, err = backend.Load(ctx, request)
 	return binding, err, false
+}
+
+func safeInspect(
+	backend RecoveryBackend,
+	ctx context.Context,
+	slotID string,
+) (bindings RecoveryBindings, err error, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			bindings, err, panicked = RecoveryBindings{}, nil, true
+		}
+	}()
+	bindings, err = backend.Inspect(ctx, slotID)
+	return bindings, err, false
 }
 
 func safeBackendCall(call func() error) (err error, panicked bool) {

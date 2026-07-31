@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -29,10 +30,12 @@ type fakeBackend struct {
 	unloadCalls int
 	loaded      []Binding
 	unloaded    []Binding
+	current     map[string]Binding
 
-	loadFn   func(context.Context, LoadRequest) (Binding, error)
-	healthFn func(context.Context, Binding) error
-	unloadFn func(context.Context, Binding) error
+	loadFn    func(context.Context, LoadRequest) (Binding, error)
+	healthFn  func(context.Context, Binding) error
+	unloadFn  func(context.Context, Binding) error
+	inspectFn func(context.Context, string) (RecoveryBindings, error)
 }
 
 func (f *fakeBackend) Load(ctx context.Context, request LoadRequest) (Binding, error) {
@@ -40,16 +43,31 @@ func (f *fakeBackend) Load(ctx context.Context, request LoadRequest) (Binding, e
 	f.loadCalls++
 	loadFn := f.loadFn
 	f.mu.Unlock()
+	var binding Binding
+	var err error
 	if loadFn != nil {
-		return loadFn(ctx, request)
+		binding, err = loadFn(ctx, request)
+	} else {
+		var data []byte
+		data, err = io.ReadAll(
+			io.NewSectionReader(request.Artifact, 0, int64(request.SizeBytes)),
+		)
+		if err == nil && uint64(len(data)) != request.SizeBytes {
+			err = errors.New("fake artifact read")
+		}
+		binding = matchingBinding(request)
 	}
-	data, err := io.ReadAll(io.NewSectionReader(request.Artifact, 0, int64(request.SizeBytes)))
-	if err != nil || uint64(len(data)) != request.SizeBytes {
-		return Binding{}, errors.New("fake artifact read")
+	if err != nil {
+		return binding, err
 	}
-	binding := matchingBinding(request)
 	f.mu.Lock()
 	f.loaded = append(f.loaded, binding)
+	if f.current == nil {
+		f.current = make(map[string]Binding)
+	}
+	if binding.Handle != "" {
+		f.current[binding.Handle] = binding
+	}
 	f.mu.Unlock()
 	return binding, nil
 }
@@ -71,12 +89,47 @@ func (f *fakeBackend) Unload(ctx context.Context, binding Binding) error {
 	unloadFn := f.unloadFn
 	f.mu.Unlock()
 	if unloadFn != nil {
-		return unloadFn(ctx, binding)
+		if err := unloadFn(ctx, binding); err != nil {
+			return err
+		}
 	}
 	f.mu.Lock()
 	f.unloaded = append(f.unloaded, binding)
+	delete(f.current, binding.Handle)
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeBackend) Inspect(
+	ctx context.Context,
+	slotID string,
+) (RecoveryBindings, error) {
+	f.mu.Lock()
+	inspectFn := f.inspectFn
+	f.mu.Unlock()
+	if inspectFn != nil {
+		return inspectFn(ctx, slotID)
+	}
+	if err := ctx.Err(); err != nil {
+		return RecoveryBindings{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	result := RecoveryBindings{}
+	for _, binding := range f.current {
+		if binding.SlotID == slotID {
+			if result.Count < MaxRecoveryBindingsHard {
+				result.Bindings[result.Count] = binding
+			}
+			result.Count++
+		}
+	}
+	if result.Count <= MaxRecoveryBindingsHard {
+		sort.Slice(result.Bindings[:result.Count], func(i, j int) bool {
+			return result.Bindings[i].Handle < result.Bindings[j].Handle
+		})
+	}
+	return result, nil
 }
 
 func (f *fakeBackend) counts() (int, int, int) {

@@ -100,9 +100,9 @@ SHA-256. Manifest expiry still rejects a new import, while an artifact that
 was accepted during the signed validity window may restart after expiry.
 Recovery verifies every retained artifact before applying capacity-driven
 evictions. Volatile active, draining, pinned, and in-use state is deliberately
-restored as `ready`; no model is automatically loaded into a runtime. The
-cache root is an operator-owned single-manager boundary; concurrent processes
-must not share it because cross-process locking is not implemented. The manager
+restored as `ready`; the model manager alone never loads a runtime. The cache
+root is an operator-owned single-manager boundary; concurrent processes must
+not share it because cross-process locking is not implemented. The manager
 does not implement Internet download or accept task-supplied model bytes.
 
 `pkg/modelactivation` adds the in-process coordination contract for a future
@@ -122,11 +122,34 @@ Failure rolls the candidate back; failed cleanup retains at most one bounded
 candidate lease per slot, blocks further activation, and exposes an explicit
 retry operation. Shutdown synchronously unloads bindings and releases leases.
 
+An optional persistent mode records only sorted fixed slot IDs and desired
+SHA-256 digests in a canonical mode-0600 state file under a mode-0700
+operator-owned directory. The file is capped at 64 KiB, the directory scan at
+128 entries, and the state at 64 slots. Writes use a new generation, a synced
+temporary file, atomic rename, and directory sync. A write error is treated as
+an ambiguous commit: every lifecycle operation is blocked until explicit
+recovery reloads the file. This local generation is crash ordering, not a
+tamper-proof or externally anchored rollback counter. The state directory is
+a single-controller ownership boundary; cross-process locking is not
+implemented.
+
+Persistent controllers start in `recovering`. Their backend inspection result
+is a fixed-size value containing at most two bindings per slot. Recovery
+reloads and strictly validates the state file, obtains a path-free lease,
+rehashes the full desired artifact, and health-checks an existing exact
+binding or loads it as a separate candidate. Only after the desired binding is
+healthy may recovery unload an older or uncommitted binding. Missing,
+oversized, duplicate, mismatched, or non-locally-observed bindings fail
+closed. Recovery also refuses to load a missing desired binding when both
+fixed runtime binding positions are already occupied, so it never creates an
+unbounded or third transient binding. One retained candidate lease per slot
+keeps retry state bounded and non-evictable. A normal shutdown unloads runtime
+bindings but retains desired intent so a later process can restore them.
+
 This is a fake-tested validation and lifecycle foundation only. No Ollama,
 LocalAI, vLLM, llama.cpp, or vendor activation backend is enabled, and the
 worker does not yet instantiate the controller. Backend-specific staging,
-crash-safe persistent active/known-good slots, and worker configuration remain
-planned.
+production state-directory configuration, and worker wiring remain planned.
 
 ## Runtime adapters
 
@@ -204,13 +227,13 @@ Implemented:
   model binding
 - private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
-- path-free model leases and bounded runtime-activation coordination contract
+- path-free model leases, bounded runtime-activation coordination, and
+  crash-safe active/known-good intent with explicit fake-backend recovery
 - container isolation contract and validation layer with `DenyAll`
 
 Planned, not claimed by this release:
 
-- audited activation backends, persistent known-good slots, and worker wiring
-  for configured runtimes
+- audited activation backends and worker wiring for configured runtimes
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core

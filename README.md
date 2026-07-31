@@ -29,7 +29,8 @@ The Go 1.24 module currently contains:
   restart-time integrity recovery, and crash-residue cleanup;
 - path-free model artifact leases plus a bounded, fake-tested runtime
   activation coordinator contract with activation-time SHA-256 verification,
-  health gating, known-good preservation, rollback, and retryable cleanup;
+  health gating, known-good preservation, rollback, retryable cleanup, and
+  optional crash-safe activation intent with explicit startup recovery;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
   with fixed-size singleflight state, expiring success/failure caches, and
@@ -144,17 +145,24 @@ TTL; it creates no periodic watcher.
   admitted until a bounded preflight succeeds again.
 - Runtime adapter connection pools are closed exactly once during graceful
   shutdown.
+- Optional activation state contains only fixed administrator slot IDs and
+  SHA-256 digests in a private local file. It is crash-recovery intent, not a
+  remote trust assertion or substitute for signed model verification.
 
 ## Not implemented
 
 This repository does not yet provide or enable an audited activation backend
 for Ollama, LocalAI, vLLM, or llama.cpp. `pkg/modelactivation` defines the
-bounded coordination and rollback contract and is tested with a fake backend,
-but it is not wired into `tos-ai-worker`. An operator must still ensure that
-each configured model name is loaded and bound to the declared digest in the
-separately managed runtime. Ollama exposes a runtime digest that is checked
-exactly; generic OpenAI-compatible model-list APIs expose an ID but do not
-attest its configured content digest.
+bounded coordination, rollback, persistent-intent, and recovery contracts and
+is tested with a fake backend, but it is not wired into `tos-ai-worker`.
+Enabling its optional private state directory requires an explicit successful
+`Recover` before lifecycle operations; that recovery rehashes the desired
+artifact, health-checks or reloads it, and removes at most one crash-residue
+candidate per fixed slot. An operator must still ensure that each configured
+model name is loaded and bound to the declared digest in the separately
+managed runtime. Ollama exposes a runtime digest that is checked exactly;
+generic OpenAI-compatible model-list APIs expose an ID but do not attest its
+configured content digest.
 
 This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet
