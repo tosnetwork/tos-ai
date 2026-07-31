@@ -164,8 +164,9 @@ and size it for the actual host and configured adapters.
 The worker also opens `-task-store`, a separate mode-0600 bbolt database in a
 mode-0700 non-symlink directory. When omitted it is placed beside the private
 socket as `worker-tasks.db`. It uses the protocol default of 10,000 retained
-tasks; request/result bytes, retention, execution duration, priority, and
-cleanup work retain independent protocol hard limits. The store
+tasks; `-task-store-max-tasks` may select a stricter positive bound up to the
+one-million hard ceiling. Request/result bytes, retention, execution duration,
+priority, and cleanup work retain independent protocol hard limits. The store
 contains invocation payloads and successful outputs until retention expiry,
 so production deployments should use owner-controlled encrypted storage and
 exclude it from backups that outlive task retention.
@@ -328,6 +329,11 @@ thresholds from one through ten.
   read-only, cancellation is bound to request ID, task ID, and request digest,
   and an accepted/running task stranded by process failure remains uncertain;
   it is never silently resubmitted.
+- Durable task capacity is advertised as `storage.task_slots`, included in
+  every capability and Quote commitment, and exposed through fixed private
+  metrics. A full or unavailable store removes routable capabilities and
+  rejects new Quote owners; exact Quote replay and atomic `ClaimTask` retain
+  their existing semantics.
 - Production admission and process-capacity values come only from a private
   startup policy and are checked against effective observed RAM/free VRAM
   before the socket is created. On Linux, host totals are reduced by

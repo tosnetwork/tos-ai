@@ -42,6 +42,13 @@ func TestAIResourceDimensionsAndRequestedUpperBounds(t *testing.T) {
 	}}, resources); err != nil {
 		t.Fatal(err)
 	}
+	if err := validateRequestedLimits([]*edgev1.ResourceLimit{{
+		Id:       resourceTaskSlots,
+		Unit:     edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
+		Quantity: 1,
+	}}, resources); err != nil {
+		t.Fatal(err)
+	}
 	for name, requested := range map[string][]*edgev1.ResourceLimit{
 		"below requirement": {{
 			Id: resourceRAM, Unit: edgev1.ResourceUnit_RESOURCE_UNIT_BYTES,
@@ -92,11 +99,12 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 	health, err := service.Health(
 		context.Background(), connect.NewRequest(&edgev1.HealthRequest{}),
 	)
-	if err != nil || len(health.Msg.Readiness) != 6 {
+	if err != nil || len(health.Msg.Readiness) != 7 {
 		t.Fatalf("health=%v err=%v", health, err)
 	}
 	wantComponents := []string{
 		"worker", "admission", "resources", "runtimes", "model-binding", "gpu",
+		"task-store",
 	}
 	for index, id := range wantComponents {
 		if health.Msg.Readiness[index].Id != id ||
@@ -119,7 +127,7 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 		capabilities.Msg.CollectedUnixMillis <= 0 ||
 		capabilities.Msg.ExpiresUnixMillis <= capabilities.Msg.CollectedUnixMillis ||
 		len(capabilities.Msg.Capabilities) != 1 ||
-		len(capabilities.Msg.Resources) != len(aiResourceDimensions) {
+		len(capabilities.Msg.Resources) != len(aiResourceDimensions)+1 {
 		t.Fatalf("capabilities=%v err=%v", capabilities, err)
 	}
 	for _, claim := range capabilities.Msg.Resources {
@@ -127,6 +135,20 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 			claim.AvailableExternal > claim.Total-claim.OwnerReserved {
 			t.Fatalf("unsafe resource claim=%v", claim)
 		}
+	}
+	taskSlots := resourceClaimByID(capabilities.Msg.Resources, resourceTaskSlots)
+	if taskSlots.Total != 64 || taskSlots.AvailableExternal != 64 ||
+		taskSlots.Evidence.Level !=
+			edgev1.EvidenceLevel_EVIDENCE_LEVEL_DECLARED ||
+		limitByID(
+			capabilities.Msg.Capabilities[0].AdmissionLimits,
+			resourceTaskSlots,
+		).Quantity != 1 ||
+		limitByID(
+			capabilities.Msg.Capabilities[0].AdmissionLimits,
+			resourceOutput,
+		).Quantity != capabilities.Msg.Capabilities[0].MaxOutputBytes {
+		t.Fatalf("invalid durable capability accounting: %v", capabilities.Msg)
 	}
 	encoded, err := protojson.Marshal(capabilities.Msg)
 	if err != nil {
@@ -159,7 +181,8 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 		t.Fatalf("quote=%v err=%v", quote, err)
 	}
 	if limitByID(quote.Msg.CommittedLimits, resourceRAM).Quantity != 1<<20 ||
-		limitByID(quote.Msg.CommittedLimits, resourceOutput).Quantity != 16 {
+		limitByID(quote.Msg.CommittedLimits, resourceOutput).Quantity != 16 ||
+		limitByID(quote.Msg.CommittedLimits, resourceTaskSlots).Quantity != 1 {
 		t.Fatalf("committed limits=%v", quote.Msg.CommittedLimits)
 	}
 	invalid := &edgev1.QuoteRequest{
@@ -223,6 +246,95 @@ func TestDurableTaskResultSurvivesWorkerRestart(t *testing.T) {
 	}
 }
 
+func TestTaskStoreSaturationBlocksRoutingAndRecoversAfterCleanup(t *testing.T) {
+	service := newTestServiceAtWithCapacity(
+		t,
+		filepath.Join(t.TempDir(), "worker-tasks.db"),
+		1,
+	)
+	service.RefreshRuntimes(context.Background())
+	deadline := time.Now().Add(time.Minute)
+	first := quotedInvocation(t, service, "task-capacity-0001", deadline)
+	raced := quotedInvocation(t, service, "task-capacity-race", deadline)
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(first),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(first),
+	); err != nil {
+		t.Fatalf("exact Invoke replay was blocked by saturation: %v", err)
+	}
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(raced),
+	); err == nil || connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("authoritative capacity race error=%v", err)
+	}
+	replayedQuote, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "task-capacity-0001", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo",
+			InputBytes: 5, MaxOutputBytes: 16,
+			DeadlineUnixMillis: deadline.UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		}),
+	)
+	if err != nil || replayedQuote.Msg.QuoteId != first.QuoteId {
+		t.Fatalf("exact Quote replay was blocked by saturation: %v %v", replayedQuote, err)
+	}
+
+	health, err := service.Health(
+		context.Background(), connect.NewRequest(&edgev1.HealthRequest{}),
+	)
+	if err != nil || health.Msg.Readiness[6].Id != "task-store" ||
+		health.Msg.Readiness[6].Status !=
+			edgev1.ReadinessStatus_READINESS_STATUS_UNAVAILABLE ||
+		health.Msg.Readiness[6].ReasonCode != "capacity_exhausted" {
+		t.Fatalf("saturated health=%v err=%v", health, err)
+	}
+	capabilities, err := service.GetCapabilities(
+		context.Background(), connect.NewRequest(&edgev1.GetCapabilitiesRequest{}),
+	)
+	taskSlots := resourceClaimByID(capabilities.Msg.Resources, resourceTaskSlots)
+	if err != nil || len(capabilities.Msg.Capabilities) != 0 ||
+		taskSlots.Total != 1 || taskSlots.AvailableExternal != 0 {
+		t.Fatalf("saturated capabilities=%v err=%v", capabilities, err)
+	}
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "task-capacity-0002", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo",
+			InputBytes: 5, MaxOutputBytes: 16,
+			DeadlineUnixMillis: time.Now().Add(time.Minute).UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		}),
+	); err == nil || connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("saturated Quote error=%v", err)
+	}
+
+	future := time.Now().Add(2 * time.Hour)
+	service.config.Now = func() time.Time { return future }
+	removed, _, err := service.taskStore.Cleanup(
+		future,
+		localrpc.DefaultWorkerMaxPrunePerWrite,
+	)
+	if err != nil || removed != 1 {
+		t.Fatalf("cleanup removed=%d err=%v", removed, err)
+	}
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "task-capacity-0003", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo",
+			InputBytes: 5, MaxOutputBytes: 16,
+			DeadlineUnixMillis: future.Add(time.Minute).UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		}),
+	); err != nil {
+		t.Fatalf("Quote did not recover after bounded cleanup: %v", err)
+	}
+}
+
 func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 	service := newTestService(t)
 	service.RefreshRuntimes(context.Background())
@@ -254,12 +366,12 @@ func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if health, err := client.Health(context.Background()); err != nil ||
-		len(health.Readiness) != 6 {
+		len(health.Readiness) != 7 {
 		t.Fatalf("validated Health=%v err=%v", health, err)
 	}
 	capabilities, err := client.GetCapabilities(context.Background())
 	if err != nil || len(capabilities.Capabilities) != 1 ||
-		len(capabilities.Resources) != len(aiResourceDimensions) {
+		len(capabilities.Resources) != len(aiResourceDimensions)+1 {
 		t.Fatalf("validated capabilities=%v err=%v", capabilities, err)
 	}
 	now := time.Now().UTC()
@@ -315,10 +427,18 @@ func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 }
 
 func newTestServiceAt(t *testing.T, path string) *Service {
+	return newTestServiceAtWithCapacity(t, path, 64)
+}
+
+func newTestServiceAtWithCapacity(
+	t *testing.T,
+	path string,
+	maxTasks int,
+) *Service {
 	t.Helper()
 	scheduler, controller := newTestDependencies(t, 4)
 	service, err := NewService(
-		testServiceConfigAt(t, path), scheduler, controller,
+		testServiceConfigAtLimit(t, path, maxTasks), scheduler, controller,
 		[]airuntime.Adapter{mock.New(0)},
 	)
 	if err != nil {
@@ -330,6 +450,18 @@ func newTestServiceAt(t *testing.T, path string) *Service {
 		_ = service.Shutdown(ctx)
 	})
 	return service
+}
+
+func resourceClaimByID(
+	claims []*edgev1.ResourceClaim,
+	id string,
+) *edgev1.ResourceClaim {
+	for _, claim := range claims {
+		if claim.Id == id {
+			return claim
+		}
+	}
+	return &edgev1.ResourceClaim{}
 }
 
 func limitByID(

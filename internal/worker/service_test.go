@@ -126,6 +126,14 @@ func testServiceConfig(t *testing.T) Config {
 }
 
 func testServiceConfigAt(t *testing.T, path string) Config {
+	return testServiceConfigAtLimit(t, path, 64)
+}
+
+func testServiceConfigAtLimit(
+	t *testing.T,
+	path string,
+	maxTasks int,
+) Config {
 	t.Helper()
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -133,7 +141,7 @@ func testServiceConfigAt(t *testing.T, path string) Config {
 	storeConfig := localrpc.DefaultWorkerTaskStoreConfig(
 		path,
 	)
-	storeConfig.MaxTasks = 64
+	storeConfig.MaxTasks = maxTasks
 	storeConfig.MaxInvocationDuration = time.Hour
 	storeConfig.AllowedPriorities = []edgev1.Priority{
 		edgev1.Priority_PRIORITY_LOCAL_ASYNC,

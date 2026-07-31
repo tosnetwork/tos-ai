@@ -479,6 +479,9 @@ Implemented:
 - bounded durable task/replay state, read-only restart recovery, exact
   cancellation, scheduler, local admission, resource owner reserve, and
   owner-reserved execution workers
+- task-store capacity readiness, `storage.task_slots` capability/Quote
+  commitments, full-store routing suppression, and fixed private capacity
+  metrics
 - graceful cancellation and shutdown resource cleanup
 - Linux host, cgroup v1/v2 effective-resource, and NVIDIA NVML probes with
   fake backends

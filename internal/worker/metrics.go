@@ -182,14 +182,19 @@ func safeMetricsSnapshot(
 		return Readiness{}, admission.Snapshot{}, false
 	}
 	snapshot = service.admission.Snapshot()
-	readiness = service.readiness(snapshot)
+	readiness = service.readiness(
+		snapshot,
+		service.currentTaskStoreCapacity(),
+	)
 	valid = readiness.RuntimeReady >= 0 && readiness.RuntimeTotal >= 0 &&
 		readiness.RuntimeReady <= readiness.RuntimeTotal && snapshot.Running >= 0 &&
 		snapshot.Reserved >= snapshot.Running && snapshot.MaxRunning > 0 &&
 		snapshot.MaxQueue >= 0 && snapshot.Running <= snapshot.MaxRunning &&
 		snapshot.Reserved-snapshot.Running <= snapshot.MaxQueue &&
 		metricResourcesFit(snapshot.Used, snapshot.Capacity) &&
-		metricResourcesFit(snapshot.OwnerReserved, snapshot.Capacity)
+		metricResourcesFit(snapshot.OwnerReserved, snapshot.Capacity) &&
+		readiness.TaskSlots <= readiness.TaskCapacity &&
+		readiness.TaskCapacity > 0
 	return readiness, snapshot, valid
 }
 
@@ -236,6 +241,36 @@ func (m *OperationalMetrics) render(
 	encoded = appendMetric(encoded, "tos_ai_worker_admission_ready", boolMetric(
 		readiness.Admission == "ready",
 	))
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_ready", "gauge",
+		"Whether the durable task store has capacity for a new task.",
+	)
+	encoded = appendMetric(encoded, "tos_ai_worker_task_store_ready", boolMetric(
+		readiness.TaskStore == "ready",
+	))
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_tasks", "gauge",
+		"Durable task identities currently retained.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_tasks", readiness.TaskSlots,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_capacity", "gauge",
+		"Maximum durable task identities retained by policy.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_capacity", readiness.TaskCapacity,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_available", "gauge",
+		"Durable task slots currently available.",
+	)
+	encoded = appendMetric(
+		encoded,
+		"tos_ai_worker_task_store_available",
+		readiness.TaskCapacity-readiness.TaskSlots,
+	)
 	encoded = appendMetricHeader(
 		encoded, "tos_ai_worker_runtimes", "gauge",
 		"Configured model runtimes by fixed readiness state.",

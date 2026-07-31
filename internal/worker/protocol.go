@@ -17,6 +17,7 @@ const (
 	resourceBatch     = "runtime.batch"
 	resourceOutput    = "runtime.output"
 	resourceExecution = "runtime.execution"
+	resourceTaskSlots = "storage.task_slots"
 )
 
 type resourceDimension struct {
@@ -83,6 +84,15 @@ func wireResourceLimits(resources admission.Resources) []*edgev1.ResourceLimit {
 	return limits
 }
 
+func wireCommittedLimits(resources admission.Resources) []*edgev1.ResourceLimit {
+	limits := wireResourceLimits(resources)
+	return append(limits, &edgev1.ResourceLimit{
+		Id:       resourceTaskSlots,
+		Unit:     edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
+		Quantity: 1,
+	})
+}
+
 // validateRequestedLimits treats caller limits as upper bounds. The worker
 // still derives the actual admission profile from private configuration and
 // rejects unknown dimensions rather than accepting payload-based overrides.
@@ -93,12 +103,17 @@ func validateRequestedLimits(
 	if len(requested) == 0 {
 		return nil
 	}
-	if len(requested) > len(aiResourceDimensions) {
+	if len(requested) > len(aiResourceDimensions)+1 {
 		return errors.New("too many requested resource limits")
 	}
 	actualLimits := make(map[string]*edgev1.ResourceLimit, len(aiResourceDimensions))
 	for _, limit := range wireResourceLimits(actual) {
 		actualLimits[limit.Id] = limit
+	}
+	actualLimits[resourceTaskSlots] = &edgev1.ResourceLimit{
+		Id:       resourceTaskSlots,
+		Unit:     edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
+		Quantity: 1,
 	}
 	seen := make(map[string]struct{}, len(requested))
 	for _, limit := range requested {
@@ -122,12 +137,13 @@ func validateRequestedLimits(
 
 func wireResourceClaims(
 	snapshot admission.Snapshot,
+	tasks taskStoreCapacity,
 	revision string,
 	now time.Time,
 	expires time.Time,
 	issuer string,
 ) []*edgev1.ResourceClaim {
-	claims := make([]*edgev1.ResourceClaim, 0, len(aiResourceDimensions))
+	claims := make([]*edgev1.ResourceClaim, 0, len(aiResourceDimensions)+1)
 	for _, dimension := range aiResourceDimensions {
 		total := dimension.quantity(snapshot.Capacity)
 		if total == 0 {
@@ -146,6 +162,23 @@ func wireResourceClaims(
 			Evidence: declaredEvidence(now, expires, issuer),
 		})
 	}
+	taskAvailability := tasks.Available
+	if !snapshot.Accepting {
+		taskAvailability = 0
+	}
+	claims = append(claims, &edgev1.ResourceClaim{
+		Id:            resourceTaskSlots,
+		ResourceClass: edgev1.ResourceClass_RESOURCE_CLASS_STORAGE,
+		Unit:          edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
+		Total:         tasks.Capacity, AvailableExternal: taskAvailability,
+		Revision: revision,
+		Evidence: readinessEvidence(
+			edgev1.EvidenceLevel_EVIDENCE_LEVEL_DECLARED,
+			now,
+			expires,
+			issuer,
+		),
+	})
 	return claims
 }
 
@@ -250,5 +283,11 @@ func wireReadiness(
 		component("runtimes", runtimeStatus, runtimeReason, observed),
 		component("model-binding", bindingStatus, bindingReason, bindingEvidence),
 		component("gpu", gpuStatus, gpuReason, observed),
+		component(
+			"task-store",
+			wireReadinessStatus(readiness.TaskStore),
+			readiness.TaskStoreReason,
+			observed,
+		),
 	}
 }

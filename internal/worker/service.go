@@ -207,17 +207,24 @@ func preflightScanLimit(
 }
 
 func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequest]) (*connect.Response[edgev1.HealthResponse], error) {
-	readiness := s.Readiness()
+	snapshot := s.admission.Snapshot()
+	taskCapacity := s.currentTaskStoreCapacity()
+	readiness := s.readiness(snapshot, taskCapacity)
 	now := s.config.Now().UTC()
 	expires := now.Add(s.config.PreflightTTL)
-	status := fmt.Sprintf("%s;admission=%s;resources=%s;runtimes=%d/%d;binding=%s;gpu=%s;running=%d;reserved=%d",
+	status := fmt.Sprintf("%s;admission=%s;resources=%s;runtimes=%d/%d;binding=%s;gpu=%s;tasks=%d/%d;running=%d;reserved=%d",
 		readiness.Status, readiness.Admission, readiness.Resources, readiness.RuntimeReady,
 		readiness.RuntimeTotal, readiness.BindingEvidence, readiness.GPU,
+		readiness.TaskSlots, readiness.TaskCapacity,
 		readiness.Running, readiness.Reserved)
 	return connect.NewResponse(&edgev1.HealthResponse{
 		Status: status, Version: s.config.Version,
 		Readiness: wireReadiness(
-			readiness, s.capacityRevision(), now, expires, "tos-ai-worker",
+			readiness,
+			s.capacityRevisionFor(snapshot, taskCapacity),
+			now,
+			expires,
+			"tos-ai-worker",
 		),
 	}), nil
 }
@@ -230,19 +237,26 @@ type Readiness struct {
 	RuntimeTotal    int
 	BindingEvidence string
 	GPU             string
+	TaskStore       string
+	TaskStoreReason string
+	TaskSlots       uint64
+	TaskCapacity    uint64
 	Running         int
 	Reserved        int
 }
 
 func (s *Service) Readiness() Readiness {
 	snapshot := s.admission.Snapshot()
-	return s.readiness(snapshot)
+	return s.readiness(snapshot, s.currentTaskStoreCapacity())
 }
 
 // readiness derives the complete readiness view from one admission snapshot.
 // Callers that expose multiple admission gauges can therefore avoid mixing
 // values observed at different points in a reservation lifecycle.
-func (s *Service) readiness(snapshot admission.Snapshot) Readiness {
+func (s *Service) readiness(
+	snapshot admission.Snapshot,
+	tasks taskStoreCapacity,
+) Readiness {
 	status, admissionStatus := "ready", "ready"
 	if s.draining.Load() || !snapshot.Accepting {
 		status, admissionStatus = "draining", "draining"
@@ -275,6 +289,9 @@ func (s *Service) readiness(snapshot admission.Snapshot) Readiness {
 	if status != "draining" && !resourceHealth.Ready {
 		status, admissionStatus = "degraded", "blocked"
 	}
+	if status != "draining" && !tasks.Ready {
+		status, admissionStatus = "degraded", "blocked"
+	}
 	bindingEvidence := "unknown"
 	switch {
 	case declared && observed:
@@ -292,8 +309,43 @@ func (s *Service) readiness(snapshot admission.Snapshot) Readiness {
 		Status: status, Admission: admissionStatus,
 		Resources: resourceHealth.Status, RuntimeReady: runtimeReady,
 		RuntimeTotal: len(s.runtimeSlots), BindingEvidence: bindingEvidence,
-		GPU: gpu, Running: snapshot.Running, Reserved: snapshot.Reserved,
+		GPU: gpu, TaskStore: tasks.Status, TaskStoreReason: tasks.Reason,
+		TaskSlots: tasks.Tasks, TaskCapacity: tasks.Capacity,
+		Running: snapshot.Running, Reserved: snapshot.Reserved,
 	}
+}
+
+type taskStoreCapacity struct {
+	Tasks     uint64
+	Capacity  uint64
+	Available uint64
+	Ready     bool
+	Status    string
+	Reason    string
+}
+
+func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
+	output := taskStoreCapacity{
+		Status: "unavailable", Reason: "store_unavailable",
+	}
+	stats, err := s.taskStore.Stats()
+	if err != nil || stats.Capacity == 0 ||
+		stats.Tasks > stats.Capacity ||
+		stats.Available != stats.Capacity-stats.Tasks {
+		return output
+	}
+	output.Tasks = stats.Tasks
+	output.Capacity = stats.Capacity
+	output.Available = stats.Available
+	if output.Available == 0 {
+		output.Status = "unavailable"
+		output.Reason = "capacity_exhausted"
+		return output
+	}
+	output.Ready = true
+	output.Status = "ready"
+	output.Reason = "capacity_available"
+	return output
 }
 
 // RefreshRuntimes performs an explicitly bounded refresh. Failures update
@@ -378,20 +430,22 @@ func (s *Service) monitorRuntimes() {
 }
 
 func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1.GetCapabilitiesRequest]) (*connect.Response[edgev1.GetCapabilitiesResponse], error) {
-	response := s.capabilitiesSnapshot()
-	if !s.currentResourceHealth().Ready {
+	response, accepting := s.capabilitiesSnapshot()
+	if !accepting {
 		return connect.NewResponse(response), nil
 	}
 	s.refreshRuntimes(ctx, false)
-	if !s.currentResourceHealth().Ready {
-		return connect.NewResponse(s.capabilitiesSnapshot()), nil
+	response, accepting = s.capabilitiesSnapshot()
+	if !accepting {
+		return connect.NewResponse(response), nil
 	}
-	response = s.capabilitiesSnapshot()
 	for _, capability := range s.capabilities {
 		slot := s.runtimeSlots[adapterKey(capability.ServiceID, capability.Operation, capability.Model)]
 		if slot == nil || !slot.snapshot().ready {
 			continue
 		}
+		capabilityResources := capability.Admission
+		capabilityResources.OutputBytes = capability.MaxOutputBytes
 		wire := &edgev1.Capability{
 			ServiceId:       capability.ServiceID,
 			Operation:       capability.Operation,
@@ -401,7 +455,7 @@ func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1
 			RuntimeRevision: capability.RuntimeRevision,
 			MaxInputBytes:   capability.MaxInputBytes,
 			MaxOutputBytes:  capability.MaxOutputBytes,
-			AdmissionLimits: wireResourceLimits(capability.Admission),
+			AdmissionLimits: wireCommittedLimits(capabilityResources),
 		}
 		for _, priority := range capability.AcceptedPriorities {
 			wire.AcceptedPriorities = append(wire.AcceptedPriorities, toWirePriority(priority))
@@ -411,23 +465,28 @@ func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1
 	return connect.NewResponse(response), nil
 }
 
-func (s *Service) capabilitiesSnapshot() *edgev1.GetCapabilitiesResponse {
+func (s *Service) capabilitiesSnapshot() (
+	*edgev1.GetCapabilitiesResponse,
+	bool,
+) {
 	now := s.config.Now().UTC()
 	expires := now.Add(s.config.PreflightTTL)
 	snapshot := s.admission.Snapshot()
-	if !s.currentResourceHealth().Ready {
+	tasks := s.currentTaskStoreCapacity()
+	resourcesReady := s.currentResourceHealth().Ready
+	if !resourcesReady || !tasks.Ready {
 		snapshot.Accepting = false
 	}
-	revision := s.capacityRevisionFor(snapshot)
+	revision := s.capacityRevisionFor(snapshot, tasks)
 	return &edgev1.GetCapabilitiesResponse{
 		CapacityRevision: revision,
 		Resources: wireResourceClaims(
-			snapshot, revision, now, expires, "tos-ai-worker",
+			snapshot, tasks, revision, now, expires, "tos-ai-worker",
 		),
 		TerminalRevision:    s.config.Version,
 		CollectedUnixMillis: now.UnixMilli(),
 		ExpiresUnixMillis:   expires.UnixMilli(),
-	}
+	}, resourcesReady && tasks.Ready && snapshot.Accepting
 }
 
 func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.QuoteRequest]) (*connect.Response[edgev1.QuoteResponse], error) {
@@ -475,6 +534,19 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 			connect.CodeUnavailable, errResourcesUnavailable,
 		)
 	}
+	taskCapacity := s.currentTaskStoreCapacity()
+	if !taskCapacity.Ready {
+		if taskCapacity.Reason == "capacity_exhausted" {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New("durable task capacity unavailable"),
+			)
+		}
+		return nil, connect.NewError(
+			connect.CodeUnavailable,
+			errors.New("durable task store unavailable"),
+		)
+	}
 	if _, err := slot.ensure(ctx, false); err != nil {
 		return nil, normalizePreflightError(err)
 	}
@@ -512,7 +584,7 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		CapacityRevision:  s.capacityRevision(),
 		ModelRevision:     capability.ModelDigest,
 		RuntimeRevision:   capability.RuntimeRevision,
-		CommittedLimits:   wireResourceLimits(resources),
+		CommittedLimits:   wireCommittedLimits(resources),
 	}
 	s.quotes.add(quoteID, input.RequestId, quoteBinding{
 		response:       response,
@@ -946,10 +1018,16 @@ func randomID() (string, error) {
 }
 
 func (s *Service) capacityRevision() string {
-	return s.capacityRevisionFor(s.admission.Snapshot())
+	return s.capacityRevisionFor(
+		s.admission.Snapshot(),
+		s.currentTaskStoreCapacity(),
+	)
 }
 
-func (s *Service) capacityRevisionFor(snapshot admission.Snapshot) string {
+func (s *Service) capacityRevisionFor(
+	snapshot admission.Snapshot,
+	tasks taskStoreCapacity,
+) string {
 	ready := 0
 	for _, slot := range s.runtimeSlots {
 		if slot.snapshot().ready {
@@ -961,8 +1039,9 @@ func (s *Service) capacityRevisionFor(snapshot admission.Snapshot) string {
 		resourcesReady = 1
 	}
 	return fmt.Sprintf(
-		"tier1-%d-%d-%d-%d",
+		"tier1-%d-%d-%d-%d-%d-%d",
 		resourcesReady, ready, snapshot.Running, snapshot.Reserved,
+		tasks.Tasks, tasks.Capacity,
 	)
 }
 
@@ -995,8 +1074,12 @@ func normalizeExecutionError(err error) *connect.Error {
 	case errors.Is(err, scheduler.ErrQueueFull):
 		return connect.NewError(connect.CodeResourceExhausted, err)
 	case errors.Is(err, admission.ErrQueueFull), errors.Is(err, admission.ErrCapacity),
-		errors.Is(err, admission.ErrConcurrency):
+		errors.Is(err, admission.ErrConcurrency),
+		errors.Is(err, localrpc.ErrTaskCapacity):
 		return connect.NewError(connect.CodeResourceExhausted, errors.New("local capacity unavailable"))
+	case errors.Is(err, localrpc.ErrTaskClosed),
+		errors.Is(err, localrpc.ErrTaskCorrupt):
+		return connect.NewError(connect.CodeUnavailable, errors.New("durable task store unavailable"))
 	case errors.Is(err, admission.ErrStopped), errors.Is(err, scheduler.ErrStopped):
 		return connect.NewError(connect.CodeUnavailable, errors.New("worker is draining"))
 	case errors.As(err, &preflightError):

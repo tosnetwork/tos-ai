@@ -8,12 +8,16 @@ remain owned by `tos-protocol`; this repository does not copy or fork them.
 
 ## Implemented coverage
 
-- `Health` returns six structured readiness components in addition to its
+- `Health` returns seven structured readiness components in addition to its
   compact diagnostic status.
 - `GetCapabilities` returns fresh, revisioned resource claims and
   per-capability admission limits.
-- RAM, VRAM, KV cache, context, batch, output, and execution time use the exact
-  identifiers and units defined by the protocol alignment contract.
+- RAM, VRAM, KV cache, context, batch, output, execution time, and durable task
+  slots use the exact identifiers and units defined by the protocol alignment
+  contract.
+- `storage.task_slots` reports only bounded logical count/capacity. Every
+  capability and Quote commits one slot; saturation suppresses routing before
+  Invoke while the atomic durable claim remains authoritative.
 - Quote treats `requested_limits` as caller-accepted upper bounds, rejects
   unknown or undersized dimensions, and returns the actual locally checked
   `committed_limits`.

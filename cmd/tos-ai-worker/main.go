@@ -67,6 +67,7 @@ func run() error {
 	var modelTrustConfigPath string
 	var terminalPolicyPath string
 	var taskStorePath string
+	var taskStoreMaxTasks int
 	var internalResourceProbe bool
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
@@ -94,6 +95,12 @@ func run() error {
 	flag.StringVar(
 		&taskStorePath, "task-store", "",
 		"private durable Worker task database",
+	)
+	flag.IntVar(
+		&taskStoreMaxTasks,
+		"task-store-max-tasks",
+		localrpc.DefaultWorkerMaxTasks,
+		"maximum retained durable Worker tasks",
 	)
 	flag.BoolVar(
 		&internalResourceProbe, "internal-resource-probe", false,
@@ -165,6 +172,7 @@ func run() error {
 		return errors.Join(err, resourceErr)
 	}
 	taskStoreConfig := localrpc.DefaultWorkerTaskStoreConfig(taskStorePath)
+	taskStoreConfig.MaxTasks = taskStoreMaxTasks
 	taskStoreConfig.MaxInvocationDuration = policy.MaxDeadline
 	taskStoreConfig.AllowedPriorities = []edgev1.Priority{
 		edgev1.Priority_PRIORITY_LOCAL_ASYNC,
