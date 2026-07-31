@@ -43,12 +43,13 @@ type Config struct {
 }
 
 type Adapter struct {
-	endpoint    string
-	apiKey      string
-	httpClient  *http.Client
-	capability  airuntime.Capability
-	maxRequest  uint64
-	maxResponse uint64
+	endpoint          string
+	preflightEndpoint string
+	apiKey            string
+	httpClient        *http.Client
+	capability        airuntime.Capability
+	maxRequest        uint64
+	maxResponse       uint64
 }
 
 func New(config Config) (*Adapter, error) {
@@ -87,10 +88,13 @@ func New(config Config) (*Adapter, error) {
 		return nil, err
 	}
 	return &Adapter{
-		endpoint: httpclient.Endpoint(baseURL, "/v1/chat/completions"),
-		apiKey:   config.APIKey, httpClient: client, maxRequest: config.MaxRequestBytes,
-		maxResponse: config.MaxResponseBytes,
-		capability:  capability,
+		endpoint:          httpclient.Endpoint(baseURL, "/v1/chat/completions"),
+		preflightEndpoint: httpclient.Endpoint(baseURL, "/v1/models"),
+		apiKey:            config.APIKey,
+		httpClient:        client,
+		maxRequest:        config.MaxRequestBytes,
+		maxResponse:       config.MaxResponseBytes,
+		capability:        capability,
 	}, nil
 }
 
@@ -101,6 +105,71 @@ func (a *Adapter) Capability() airuntime.Capability {
 func (a *Adapter) Close() error {
 	a.httpClient.CloseIdleConnections()
 	return nil
+}
+
+func (a *Adapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.preflightEndpoint, nil)
+	if err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorInternal, nil)
+	}
+	if a.apiKey != "" {
+		request.Header.Set("Authorization", "Bearer "+a.apiKey)
+	}
+	response, err := a.httpClient.Do(request)
+	if err != nil {
+		return airuntime.Preflight{}, classifyTransportError(ctx, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorRemote, nil)
+	}
+	data, err := io.ReadAll(io.LimitReader(
+		response.Body, int64(airuntime.MaxPreflightResponseBytesHard)+1,
+	))
+	if err != nil {
+		return airuntime.Preflight{}, classifyTransportError(ctx, err)
+	}
+	if uint64(len(data)) > airuntime.MaxPreflightResponseBytesHard {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorLimit, nil)
+	}
+	var inventory struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&inventory); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+	}
+	if inventory.Object != "list" {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+	}
+	if len(inventory.Data) > airuntime.MaxPreflightModelsHard {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorLimit, nil)
+	}
+	matches := 0
+	for _, candidate := range inventory.Data {
+		if candidate.ID == a.capability.Model {
+			matches++
+		}
+	}
+	if matches == 0 {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorUnavailable, nil)
+	}
+	if matches != 1 {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+	}
+	result := airuntime.Preflight{
+		Model:          a.capability.Model,
+		ModelDigest:    a.capability.ModelDigest,
+		DigestEvidence: airuntime.BindingDeclared,
+	}
+	if err := airuntime.ValidatePreflight(a.capability, result); err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+	}
+	return result, nil
 }
 
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {

@@ -67,16 +67,27 @@ func run() error {
 		return err
 	}
 	service, err := worker.NewService(worker.Config{
-		Version:        "0.1.0-dev",
-		QuoteTTL:       30 * time.Second,
-		MaxQuotes:      4096,
-		MaxInvocations: 4096,
-		MaxDeadline:    15 * time.Minute,
-		PriceNanoTOS:   0,
-		GPUStatus:      report.NVIDIA.Status,
+		Version:             "0.1.0-dev",
+		QuoteTTL:            30 * time.Second,
+		MaxQuotes:           4096,
+		MaxInvocations:      4096,
+		MaxDeadline:         15 * time.Minute,
+		PreflightTimeout:    5 * time.Second,
+		PreflightTTL:        15 * time.Second,
+		PreflightFailureTTL: 2 * time.Second,
+		MaxPreflightWaiters: preflightWaiters(maxConnections),
+		PriceNanoTOS:        0,
+		GPUStatus:           report.NVIDIA.Status,
 	}, taskScheduler, admissionController, adapters)
 	if err != nil {
 		return err
+	}
+	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 10*time.Second)
+	readiness := service.RefreshRuntimes(preflightContext)
+	cancelPreflight()
+	if readiness.RuntimeReady != readiness.RuntimeTotal {
+		log.Printf("runtime preflight degraded: ready=%d total=%d",
+			readiness.RuntimeReady, readiness.RuntimeTotal)
 	}
 	path, handler := edgev1connect.NewWorkerServiceHandler(
 		service,
@@ -197,4 +208,14 @@ func defaultSocket() string {
 		return filepath.Join(runtimeDirectory, "tos-ai", "worker.sock")
 	}
 	return fmt.Sprintf("/run/user/%d/tos-ai/worker.sock", os.Getuid())
+}
+
+func preflightWaiters(maxConnections int) int {
+	if maxConnections <= 0 {
+		return maxConnections
+	}
+	if maxConnections > worker.MaxPreflightWaitersHard {
+		return worker.MaxPreflightWaitersHard
+	}
+	return maxConnections
 }

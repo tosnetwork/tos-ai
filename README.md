@@ -28,6 +28,9 @@ The Go 1.24 module currently contains:
   active/pinned/in-use entries, atomic artifact/metadata activation,
   restart-time integrity recovery, and crash-residue cleanup;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
+- bounded runtime/model preflight before advertisement, Quote, and Invoke,
+  with fixed-size singleflight state, expiring success/failure caches, and
+  stable redacted failures;
 - strict administrator-owned JSON runtime configuration with bounded defaults,
   duplicate/unknown-field rejection, and private credential-file loading;
 - bounded HTTP transports with administrator-selected endpoints, HTTPS for
@@ -82,6 +85,16 @@ adapters. An invocation payload can never select or override an endpoint.
 Model import similarly accepts a bounded reader and an approved signed
 manifest, not an arbitrary Internet URL.
 
+The worker preflights configured runtimes at startup, refreshes stale bindings
+for capabilities and Quote, and performs an authoritative recheck for every
+new Invoke owner. Ollama model names and SHA-256 digests are matched against
+its bounded `/api/tags` inventory and are reported as `locally-observed`.
+OpenAI-compatible `/v1/models` can prove only that the configured model ID is
+present; its configured content digest remains `declared`. A failed or stale
+runtime is omitted from capabilities and cannot reach admission or execution.
+Preflight responses are capped at 1 MiB and 256 models, and per-adapter
+concurrent waiters are capped at 256.
+
 The runtime configuration must be a regular, non-symlink file owned by the
 worker user with no group or other permissions. It is capped at 1 MiB and 64
 adapters. OpenAI-compatible credentials are referenced through `apiKeyFile`;
@@ -105,7 +118,9 @@ and capacity derived conservatively from locally observed RAM/VRAM. Hard
 limits reject more than 128 workers, 4096 queued tasks, 4096 socket
 connections, a one-hour admission deadline, or oversized resource
 configuration. The owner reserve is removed from external/background
-capacity before it is advertised or admitted.
+capacity before it is advertised or admitted. Runtime preflight uses a
+five-second check timeout, a 15-second success TTL, and a two-second failure
+TTL; it creates no periodic watcher.
 
 ## Security boundaries
 
@@ -122,6 +137,8 @@ capacity before it is advertised or admitted.
   Invoke repeats local admission before adapter execution.
 - Runtime errors exposed across RPC are stable categories and do not include
   internal endpoints, paths, or credentials.
+- Cached runtime readiness expires; stale adapters are not advertised or
+  admitted until a bounded preflight succeeds again.
 - Runtime adapter connection pools are closed exactly once during graceful
   shutdown.
 
@@ -129,8 +146,10 @@ capacity before it is advertised or admitted.
 
 This repository does not yet provide automatic activation of imported model
 files in Ollama, LocalAI, or vLLM. An operator must ensure that each configured
-model name is bound to the declared digest in the separately managed runtime;
-the generic HTTP APIs do not attest that binding.
+model name is bound to the declared digest in the separately managed runtime.
+Ollama exposes a runtime digest that is checked exactly; generic
+OpenAI-compatible model-list APIs expose an ID but do not attest its configured
+content digest.
 
 This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet

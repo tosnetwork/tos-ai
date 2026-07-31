@@ -6,11 +6,13 @@ package ollama
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-ai/pkg/adapters/internal/httpclient"
@@ -41,11 +43,12 @@ const (
 )
 
 type Adapter struct {
-	endpoint    string
-	httpClient  *http.Client
-	capability  airuntime.Capability
-	maxRequest  uint64
-	maxResponse uint64
+	endpoint          string
+	preflightEndpoint string
+	httpClient        *http.Client
+	capability        airuntime.Capability
+	maxRequest        uint64
+	maxResponse       uint64
 }
 
 func New(config Config) (*Adapter, error) {
@@ -88,11 +91,12 @@ func New(config Config) (*Adapter, error) {
 		return nil, err
 	}
 	return &Adapter{
-		endpoint:    httpclient.Endpoint(baseURL, "/api/generate"),
-		httpClient:  client,
-		maxRequest:  config.MaxRequestBytes,
-		maxResponse: config.MaxResponseBytes,
-		capability:  capability,
+		endpoint:          httpclient.Endpoint(baseURL, "/api/generate"),
+		preflightEndpoint: httpclient.Endpoint(baseURL, "/api/tags"),
+		httpClient:        client,
+		maxRequest:        config.MaxRequestBytes,
+		maxResponse:       config.MaxResponseBytes,
+		capability:        capability,
 	}, nil
 }
 
@@ -103,6 +107,67 @@ func (a *Adapter) Capability() airuntime.Capability {
 func (a *Adapter) Close() error {
 	a.httpClient.CloseIdleConnections()
 	return nil
+}
+
+func (a *Adapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.preflightEndpoint, nil)
+	if err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorInternal, nil)
+	}
+	response, err := a.httpClient.Do(request)
+	if err != nil {
+		return airuntime.Preflight{}, classifyTransportError(ctx, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorRemote, nil)
+	}
+	data, err := io.ReadAll(io.LimitReader(
+		response.Body, int64(airuntime.MaxPreflightResponseBytesHard)+1,
+	))
+	if err != nil {
+		return airuntime.Preflight{}, classifyTransportError(ctx, err)
+	}
+	if uint64(len(data)) > airuntime.MaxPreflightResponseBytesHard {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorLimit, nil)
+	}
+	var inventory struct {
+		Models []struct {
+			Name   string `json:"name"`
+			Model  string `json:"model"`
+			Digest string `json:"digest"`
+		} `json:"models"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&inventory); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+	}
+	if len(inventory.Models) > airuntime.MaxPreflightModelsHard {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorLimit, nil)
+	}
+	var result *airuntime.Preflight
+	for _, candidate := range inventory.Models {
+		if candidate.Name != a.capability.Model && candidate.Model != a.capability.Model {
+			continue
+		}
+		if result != nil || !validDigestHex(candidate.Digest) {
+			return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+		}
+		value := airuntime.Preflight{
+			Model:          a.capability.Model,
+			ModelDigest:    "sha256:" + candidate.Digest,
+			DigestEvidence: airuntime.BindingLocallyObserved,
+		}
+		result = &value
+	}
+	if result == nil {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorUnavailable, nil)
+	}
+	if err := airuntime.ValidatePreflight(a.capability, *result); err != nil {
+		return airuntime.Preflight{}, airuntime.NewError(airuntime.ErrorProtocol, nil)
+	}
+	return *result, nil
 }
 
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
@@ -128,17 +193,7 @@ func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airun
 	start := time.Now()
 	httpResponse, err := a.httpClient.Do(httpRequest)
 	if err != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorCanceled, context.Canceled)
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
-		}
-		var networkError net.Error
-		if errors.As(err, &networkError) && networkError.Timeout() {
-			return airuntime.Response{}, airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
-		}
-		return airuntime.Response{}, airuntime.NewError(airuntime.ErrorUnavailable, nil)
+		return airuntime.Response{}, classifyTransportError(ctx, err)
 	}
 	defer httpResponse.Body.Close()
 	if httpResponse.StatusCode != http.StatusOK {
@@ -197,4 +252,27 @@ func responseLimit(maximum, outputBytes uint64) uint64 {
 		return maximum
 	}
 	return encoded
+}
+
+func classifyTransportError(ctx context.Context, err error) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return airuntime.NewError(airuntime.ErrorCanceled, context.Canceled)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return airuntime.NewError(airuntime.ErrorTimeout, context.DeadlineExceeded)
+	}
+	return airuntime.NewError(airuntime.ErrorUnavailable, nil)
+}
+
+func validDigestHex(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }

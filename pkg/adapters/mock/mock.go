@@ -48,6 +48,14 @@ func (a *Adapter) Capability() airuntime.Capability {
 	return a.capability
 }
 
+func (a *Adapter) Preflight(context.Context) (airuntime.Preflight, error) {
+	return airuntime.Preflight{
+		Model:          a.capability.Model,
+		ModelDigest:    a.capability.ModelDigest,
+		DigestEvidence: airuntime.BindingLocallyObserved,
+	}, nil
+}
+
 func (a *Adapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
 	if err := airuntime.ValidateRequest(a.capability, request); err != nil {
 		return airuntime.Response{}, err

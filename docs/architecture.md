@@ -15,6 +15,7 @@ tos-ai-worker
        +-- idempotent quote/invocation replay stores
        +-- authoritative local admission reservations
        +-- bounded priority scheduler
+       +-- bounded runtime/model preflight
        +-- approved runtime adapter
        +-- privacy-preserving host/NVML probe
        +-- signed model/update verification libraries
@@ -108,7 +109,9 @@ does not implement Internet download or accept task-supplied model bytes.
 
 The adapter ABI binds service, operation, model digest, runtime revision,
 request/output bounds, accepted priority classes, and local admission
-requirements.
+requirements. Every adapter also provides a cancellation-aware preflight that
+must return the exact configured model binding plus an explicit digest
+evidence level.
 
 - `mock` is deterministic and development-only.
 - `ollama` uses `/api/generate`.
@@ -121,6 +124,23 @@ and allow HTTP only for loopback or an explicitly configured private/local
 CIDR. Returned errors are categorized without endpoint, filesystem, or
 credential details.
 
+Ollama preflight reads `/api/tags`, accepts at most 1 MiB and 256 entries, and
+requires one exact model-name and SHA-256 digest match. Its digest evidence is
+`locally-observed`. OpenAI-compatible preflight reads `/v1/models` with the
+same bounds and requires one exact model ID. Because that API provides no
+portable content digest, its administrator-configured digest remains
+`declared`; the worker does not upgrade that claim to observed or attested.
+
+Each configured adapter has one fixed-size preflight slot. Concurrent checks
+coalesce without spawning a watcher, waiters have an explicit cap, success
+and failure have separate short TTLs, and adapter panics or errors are reduced
+to stable categories. Startup performs a bounded refresh but remains
+diagnosable when a local runtime is down. Stale or failed slots are excluded
+from capabilities, rejected before Quote admission checks, and rechecked
+authoritatively for every new owner inside the idempotent Invoke lifecycle
+before reservation. Completed or in-flight request-ID replays retain their
+original result and do not create duplicate checks or executions.
+
 `tos-ai-worker -runtime-config` loads a bounded JSON document from a private,
 current-user-owned, non-symlink regular file. Unknown fields, duplicate keys,
 excessive nesting, multiple JSON values, more than 64 adapters, and insecure
@@ -130,11 +150,11 @@ If the flag is omitted, the worker retains its deterministic development mock.
 If the flag is present, the mock is not mixed into the configured production
 capabilities. Adapter connection pools are closed once after scheduler drain.
 
-The configured model digest is an administrator assertion used to bind quotes
-and responses. Ollama and generic OpenAI-compatible HTTP APIs do not provide a
-common cryptographic attestation that their named model currently matches that
-digest. Deployments must enforce that binding in the separately managed
-runtime; automatic activation of `pkg/modelmanager` artifacts is still
+The configured model digest remains an administrator assertion for generic
+OpenAI-compatible runtimes. Ollama supplies a runtime digest for an exact
+local observation, but neither interface provides hardware attestation or a
+portable proof that the process loaded a particular `pkg/modelmanager`
+artifact. Automatic activation of verified model-manager artifacts is still
 planned.
 
 ## Execution isolation
@@ -157,6 +177,8 @@ Implemented:
 - graceful cancellation and shutdown resource cleanup
 - Linux host and NVIDIA NVML probes with fake backends
 - deterministic, Ollama, and OpenAI-compatible adapters
+- bounded runtime preflight, readiness filtering, and evidence-preserving
+  model binding
 - private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
 - container isolation contract and validation layer with `DenyAll`

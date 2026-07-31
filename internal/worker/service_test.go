@@ -42,13 +42,17 @@ func newTestService(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	service, err := NewService(Config{
-		Version:        "test",
-		QuoteTTL:       time.Minute,
-		MaxQuotes:      4,
-		MaxInvocations: 4,
-		MaxDeadline:    time.Hour,
-		Now:            time.Now,
-		GPUStatus:      "unavailable",
+		Version:             "test",
+		QuoteTTL:            time.Minute,
+		MaxQuotes:           4,
+		MaxInvocations:      4,
+		MaxDeadline:         time.Hour,
+		PreflightTimeout:    time.Second,
+		PreflightTTL:        time.Minute,
+		PreflightFailureTTL: time.Second,
+		MaxPreflightWaiters: 4,
+		Now:                 time.Now,
+		GPUStatus:           "unavailable",
 	}, taskScheduler, admissionController, []airuntime.Adapter{mock.New(0)})
 	if err != nil {
 		t.Fatal(err)
@@ -163,12 +167,22 @@ func TestInvokeRejectsRequestIDReuseWithDifferentPayload(t *testing.T) {
 
 type faultAdapter struct {
 	capability airuntime.Capability
+	preflight  func(context.Context) (airuntime.Preflight, error)
 	execute    func(context.Context, airuntime.Request) (airuntime.Response, error)
 	closeCount atomic.Int32
 	closeErr   error
 }
 
 func (a *faultAdapter) Capability() airuntime.Capability { return a.capability }
+func (a *faultAdapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
+	if a.preflight != nil {
+		return a.preflight(ctx)
+	}
+	return airuntime.Preflight{
+		Model: a.capability.Model, ModelDigest: a.capability.ModelDigest,
+		DigestEvidence: airuntime.BindingLocallyObserved,
+	}, nil
+}
 func (a *faultAdapter) Execute(ctx context.Context, request airuntime.Request) (airuntime.Response, error) {
 	return a.execute(ctx, request)
 }
@@ -204,6 +218,8 @@ func newFaultService(t *testing.T, execute func(context.Context, airuntime.Reque
 	service, err := NewService(Config{
 		Version: "test", QuoteTTL: time.Minute, MaxQuotes: 8, MaxInvocations: 8,
 		MaxDeadline: time.Hour, GPUStatus: "unavailable",
+		PreflightTimeout: time.Second, PreflightTTL: time.Minute,
+		PreflightFailureTTL: time.Second, MaxPreflightWaiters: 4,
 	}, taskScheduler, admissionController, []airuntime.Adapter{adapter})
 	if err != nil {
 		t.Fatal(err)
