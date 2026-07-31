@@ -23,28 +23,37 @@ import (
 )
 
 const (
-	MaxQuotesHard      = 65536
-	MaxInvocationsHard = 65536
-	MaxAdaptersHard    = 64
-	MaxQuoteTTLHard    = 5 * time.Minute
-	MaxDeadlineHard    = time.Hour
+	MaxQuotesHard           = 65536
+	MaxInvocationsHard      = 65536
+	MaxAdaptersHard         = 64
+	MaxPreflightWaitersHard = 256
+	MaxQuoteTTLHard         = 5 * time.Minute
+	MaxDeadlineHard         = time.Hour
+	MaxPreflightTimeoutHard = 30 * time.Second
+	MaxPreflightTTLHard     = 5 * time.Minute
+	MaxFailureTTLHard       = 30 * time.Second
 )
 
 type Config struct {
-	Version        string
-	QuoteTTL       time.Duration
-	MaxQuotes      int
-	MaxInvocations int
-	MaxDeadline    time.Duration
-	PriceNanoTOS   uint64
-	Now            func() time.Time
-	GPUStatus      string
+	Version             string
+	QuoteTTL            time.Duration
+	MaxQuotes           int
+	MaxInvocations      int
+	MaxDeadline         time.Duration
+	PreflightTimeout    time.Duration
+	PreflightTTL        time.Duration
+	PreflightFailureTTL time.Duration
+	MaxPreflightWaiters int
+	PriceNanoTOS        uint64
+	Now                 func() time.Time
+	GPUStatus           string
 }
 
 type Service struct {
 	config       Config
 	scheduler    *scheduler.Scheduler
 	adapters     map[string]airuntime.Adapter
+	runtimeSlots map[string]*runtimeSlot
 	capabilities []airuntime.Capability
 	quotes       *quoteStore
 	invocations  *invocationStore
@@ -63,25 +72,40 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		admissionController == nil || len(adapters) == 0 ||
 		config.QuoteTTL > MaxQuoteTTLHard || config.MaxQuotes > MaxQuotesHard ||
 		config.MaxInvocations > MaxInvocationsHard || config.MaxDeadline > MaxDeadlineHard ||
-		len(adapters) > MaxAdaptersHard {
+		len(adapters) > MaxAdaptersHard ||
+		config.PreflightTimeout <= 0 || config.PreflightTimeout > MaxPreflightTimeoutHard ||
+		config.PreflightTTL <= 0 || config.PreflightTTL > MaxPreflightTTLHard ||
+		config.PreflightFailureTTL <= 0 || config.PreflightFailureTTL > MaxFailureTTLHard ||
+		config.PreflightFailureTTL > config.PreflightTTL ||
+		config.MaxPreflightWaiters <= 0 ||
+		config.MaxPreflightWaiters > MaxPreflightWaitersHard {
 		return nil, errors.New("invalid worker configuration")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
 	service := &Service{
-		config:      config,
-		scheduler:   taskScheduler,
-		adapters:    make(map[string]airuntime.Adapter, len(adapters)),
-		quotes:      newQuoteStore(config.MaxQuotes),
-		invocations: newInvocationStore(config.MaxInvocations),
-		admission:   admissionController,
+		config:       config,
+		scheduler:    taskScheduler,
+		adapters:     make(map[string]airuntime.Adapter, len(adapters)),
+		runtimeSlots: make(map[string]*runtimeSlot, len(adapters)),
+		quotes:       newQuoteStore(config.MaxQuotes),
+		invocations:  newInvocationStore(config.MaxInvocations),
+		admission:    admissionController,
+	}
+	preflight := preflightConfig{
+		timeout: config.PreflightTimeout, successTTL: config.PreflightTTL,
+		failureTTL: config.PreflightFailureTTL, maxWaiters: config.MaxPreflightWaiters,
+		now: config.Now,
 	}
 	for _, adapter := range adapters {
 		if adapter == nil {
 			return nil, errors.New("nil runtime adapter")
 		}
 		capability := adapter.Capability()
+		capability.AcceptedPriorities = append(
+			[]airuntime.Priority(nil), capability.AcceptedPriorities...,
+		)
 		if err := airuntime.ValidateCapability(capability); err != nil {
 			return nil, errors.New("runtime adapter has invalid capability")
 		}
@@ -103,6 +127,7 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 			return nil, fmt.Errorf("duplicate adapter capability %q", key)
 		}
 		service.adapters[key] = adapter
+		service.runtimeSlots[key] = newRuntimeSlot(adapter, capability, preflight)
 		service.capabilities = append(service.capabilities, capability)
 	}
 	sort.Slice(service.capabilities, func(a, b int) bool {
@@ -118,19 +143,22 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 
 func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequest]) (*connect.Response[edgev1.HealthResponse], error) {
 	readiness := s.Readiness()
-	status := fmt.Sprintf("%s;admission=%s;runtimes=%d;gpu=%s;running=%d;reserved=%d",
-		readiness.Status, readiness.Admission, readiness.Runtimes, readiness.GPU,
+	status := fmt.Sprintf("%s;admission=%s;runtimes=%d/%d;binding=%s;gpu=%s;running=%d;reserved=%d",
+		readiness.Status, readiness.Admission, readiness.RuntimeReady,
+		readiness.RuntimeTotal, readiness.BindingEvidence, readiness.GPU,
 		readiness.Running, readiness.Reserved)
 	return connect.NewResponse(&edgev1.HealthResponse{Status: status, Version: s.config.Version}), nil
 }
 
 type Readiness struct {
-	Status    string
-	Admission string
-	Runtimes  int
-	GPU       string
-	Running   int
-	Reserved  int
+	Status          string
+	Admission       string
+	RuntimeReady    int
+	RuntimeTotal    int
+	BindingEvidence string
+	GPU             string
+	Running         int
+	Reserved        int
 }
 
 func (s *Service) Readiness() Readiness {
@@ -139,19 +167,79 @@ func (s *Service) Readiness() Readiness {
 	if s.draining.Load() || !snapshot.Accepting {
 		status, admissionStatus = "draining", "draining"
 	}
+	runtimeReady, checked := 0, 0
+	declared, observed := false, false
+	for _, slot := range s.runtimeSlots {
+		state := slot.snapshot()
+		if state.checked {
+			checked++
+		}
+		if !state.ready {
+			continue
+		}
+		runtimeReady++
+		switch state.evidence {
+		case airuntime.BindingDeclared:
+			declared = true
+		case airuntime.BindingLocallyObserved:
+			observed = true
+		}
+	}
+	if status != "draining" && runtimeReady != len(s.runtimeSlots) {
+		status = "degraded"
+		if checked == 0 {
+			status = "starting"
+		}
+	}
+	bindingEvidence := "unknown"
+	switch {
+	case declared && observed:
+		bindingEvidence = "mixed"
+	case declared:
+		bindingEvidence = string(airuntime.BindingDeclared)
+	case observed:
+		bindingEvidence = string(airuntime.BindingLocallyObserved)
+	}
 	gpu := s.config.GPUStatus
 	if gpu == "" {
 		gpu = "unknown"
 	}
 	return Readiness{
-		Status: status, Admission: admissionStatus, Runtimes: len(s.adapters),
+		Status: status, Admission: admissionStatus, RuntimeReady: runtimeReady,
+		RuntimeTotal: len(s.runtimeSlots), BindingEvidence: bindingEvidence,
 		GPU: gpu, Running: snapshot.Running, Reserved: snapshot.Reserved,
 	}
 }
 
-func (s *Service) GetCapabilities(_ context.Context, _ *connect.Request[edgev1.GetCapabilitiesRequest]) (*connect.Response[edgev1.GetCapabilitiesResponse], error) {
+// RefreshRuntimes performs an explicitly bounded refresh without creating a
+// periodic watcher. Failures update readiness but do not prevent the private
+// worker from starting, so an operator can diagnose and repair a local
+// runtime through the Unix socket.
+func (s *Service) RefreshRuntimes(ctx context.Context) Readiness {
+	s.refreshRuntimes(ctx, true)
+	return s.Readiness()
+}
+
+func (s *Service) refreshRuntimes(ctx context.Context, force bool) {
+	for _, capability := range s.capabilities {
+		if ctx.Err() != nil {
+			return
+		}
+		key := adapterKey(capability.ServiceID, capability.Operation, capability.Model)
+		if slot := s.runtimeSlots[key]; slot != nil {
+			_, _ = slot.ensure(ctx, force)
+		}
+	}
+}
+
+func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1.GetCapabilitiesRequest]) (*connect.Response[edgev1.GetCapabilitiesResponse], error) {
+	s.refreshRuntimes(ctx, false)
 	response := &edgev1.GetCapabilitiesResponse{CapacityRevision: s.capacityRevision()}
 	for _, capability := range s.capabilities {
+		slot := s.runtimeSlots[adapterKey(capability.ServiceID, capability.Operation, capability.Model)]
+		if slot == nil || !slot.snapshot().ready {
+			continue
+		}
 		wire := &edgev1.Capability{
 			ServiceId:       capability.ServiceID,
 			Operation:       capability.Operation,
@@ -170,7 +258,7 @@ func (s *Service) GetCapabilities(_ context.Context, _ *connect.Request[edgev1.G
 	return connect.NewResponse(response), nil
 }
 
-func (s *Service) Quote(_ context.Context, request *connect.Request[edgev1.QuoteRequest]) (*connect.Response[edgev1.QuoteResponse], error) {
+func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.QuoteRequest]) (*connect.Response[edgev1.QuoteResponse], error) {
 	input := request.Msg
 	if err := validateID(input.RequestId); err != nil {
 		return nil, invalidArgument(err)
@@ -178,11 +266,16 @@ func (s *Service) Quote(_ context.Context, request *connect.Request[edgev1.Quote
 	if err := validateSelector(input.ServiceId, input.Operation, input.Model); err != nil {
 		return nil, invalidArgument(err)
 	}
-	adapter := s.adapters[adapterKey(input.ServiceId, input.Operation, input.Model)]
+	key := adapterKey(input.ServiceId, input.Operation, input.Model)
+	adapter := s.adapters[key]
 	if adapter == nil {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("capability not found"))
 	}
-	capability := adapter.Capability()
+	slot := s.runtimeSlots[key]
+	if slot == nil {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("runtime is unavailable"))
+	}
+	capability := slot.capability
 	priority, err := fromWirePriority(input.Priority)
 	if err != nil || !acceptsPriority(capability, priority) {
 		return nil, invalidArgument(errors.New("priority is not accepted by this capability"))
@@ -204,6 +297,9 @@ func (s *Service) Quote(_ context.Context, request *connect.Request[edgev1.Quote
 		return nil, connect.NewError(connect.CodeAlreadyExists, findErr)
 	} else if found {
 		return connect.NewResponse(existing), nil
+	}
+	if _, err := slot.ensure(ctx, false); err != nil {
+		return nil, normalizePreflightError(err)
 	}
 	class, err := admissionClass(priority)
 	if err != nil {
@@ -273,9 +369,14 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 	if err := validateBinding(binding, input); err != nil {
 		return nil, invalidArgument(err)
 	}
-	adapter := s.adapters[adapterKey(input.ServiceId, input.Operation, input.Model)]
+	key := adapterKey(input.ServiceId, input.Operation, input.Model)
+	adapter := s.adapters[key]
 	if adapter == nil {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("capability not found"))
+	}
+	slot := s.runtimeSlots[key]
+	if slot == nil {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("runtime is unavailable"))
 	}
 	call, owner, err := s.invocations.begin(input.RequestId, fingerprint)
 	if err != nil {
@@ -285,13 +386,17 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 		return nil, connect.NewError(connect.CodeResourceExhausted, err)
 	}
 	if owner {
+		if _, err := slot.ensure(ctx, true); err != nil {
+			s.invocations.finish(call, nil, newPreflightFailure(err))
+			return s.awaitInvocation(ctx, input.RequestId, call, true)
+		}
 		priority, _ := fromWirePriority(input.Priority)
 		class, classErr := admissionClass(priority)
 		if classErr != nil {
 			s.invocations.finish(call, nil, classErr)
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
-		capability := adapter.Capability()
+		capability := slot.capability
 		resources := admissionResources(capability, input.MaxOutputBytes, time.Until(time.UnixMilli(input.DeadlineUnixMillis)))
 		reservation, reservationOwner, reserveErr := s.admission.Reserve(admission.Request{
 			ID: input.RequestId, Fingerprint: fingerprint, Class: class, Resources: resources,
@@ -314,7 +419,7 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 					return airuntime.Response{}, err
 				}
 				defer reservation.Release()
-				return executeAdapter(adapter, runContext, airuntime.Request{
+				return executeAdapter(adapter, capability, runContext, airuntime.Request{
 					RequestID:      input.RequestId,
 					Operation:      input.Operation,
 					Model:          input.Model,
@@ -468,7 +573,13 @@ func randomID() (string, error) {
 
 func (s *Service) capacityRevision() string {
 	snapshot := s.admission.Snapshot()
-	return fmt.Sprintf("tier1-%d-%d-%d", len(s.capabilities), snapshot.Running, snapshot.Reserved)
+	ready := 0
+	for _, slot := range s.runtimeSlots {
+		if slot.snapshot().ready {
+			ready++
+		}
+	}
+	return fmt.Sprintf("tier1-%d-%d-%d", ready, snapshot.Running, snapshot.Reserved)
 }
 
 func toWirePriority(priority airuntime.Priority) edgev1.Priority {
@@ -489,6 +600,7 @@ func invalidArgument(err error) *connect.Error {
 
 func normalizeExecutionError(err error) *connect.Error {
 	var runtimeError *airuntime.Error
+	var preflightError *preflightFailure
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, scheduler.ErrCanceled):
 		return connect.NewError(connect.CodeCanceled, err)
@@ -501,6 +613,8 @@ func normalizeExecutionError(err error) *connect.Error {
 		return connect.NewError(connect.CodeResourceExhausted, errors.New("local capacity unavailable"))
 	case errors.Is(err, admission.ErrStopped), errors.Is(err, scheduler.ErrStopped):
 		return connect.NewError(connect.CodeUnavailable, errors.New("worker is draining"))
+	case errors.As(err, &preflightError):
+		return normalizePreflightError(airuntime.NewError(preflightError.kind, nil))
 	case errors.As(err, &runtimeError):
 		switch runtimeError.Kind {
 		case airuntime.ErrorCanceled:
@@ -534,6 +648,23 @@ func normalizeAdmissionError(err error) *connect.Error {
 	}
 }
 
+func normalizePreflightError(err error) *connect.Error {
+	switch airuntime.ErrorKindOf(err) {
+	case airuntime.ErrorCanceled:
+		return connect.NewError(connect.CodeCanceled, errors.New("runtime preflight canceled"))
+	case airuntime.ErrorTimeout:
+		return connect.NewError(connect.CodeUnavailable, errors.New("runtime preflight timed out"))
+	case airuntime.ErrorLimit:
+		return connect.NewError(connect.CodeResourceExhausted, errors.New("runtime preflight limit exceeded"))
+	case airuntime.ErrorProtocol:
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("runtime model binding rejected"))
+	case airuntime.ErrorUnavailable, airuntime.ErrorRemote:
+		return connect.NewError(connect.CodeUnavailable, errors.New("runtime model is unavailable"))
+	default:
+		return connect.NewError(connect.CodeInternal, errors.New("runtime preflight failed"))
+	}
+}
+
 func admissionClass(priority airuntime.Priority) (admission.Class, error) {
 	switch priority {
 	case airuntime.PriorityLocalAsync:
@@ -556,7 +687,12 @@ func admissionResources(capability airuntime.Capability, outputBytes uint64, ava
 	return resources
 }
 
-func executeAdapter(adapter airuntime.Adapter, ctx context.Context, request airuntime.Request) (response airuntime.Response, err error) {
+func executeAdapter(
+	adapter airuntime.Adapter,
+	capability airuntime.Capability,
+	ctx context.Context,
+	request airuntime.Request,
+) (response airuntime.Response, err error) {
 	defer func() {
 		if recover() != nil {
 			response = airuntime.Response{}
@@ -567,7 +703,6 @@ func executeAdapter(adapter airuntime.Adapter, ctx context.Context, request airu
 	if err != nil {
 		return airuntime.Response{}, err
 	}
-	capability := adapter.Capability()
 	if uint64(len(response.Output)) > request.MaxOutputBytes ||
 		response.Usage.OutputBytes > request.MaxOutputBytes ||
 		response.ModelRevision != capability.ModelDigest ||

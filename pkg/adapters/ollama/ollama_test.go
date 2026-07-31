@@ -2,6 +2,8 @@ package ollama
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,6 +53,141 @@ func TestExecuteIsBoundedAndCapturesUsage(t *testing.T) {
 	}
 	if string(response.Output) != "answer" || response.Usage.OutputTokens != 1 {
 		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestPreflightVerifiesObservedModelDigest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/api/tags" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(fmt.Sprintf(
+			`{"models":[{"name":"qwen","model":"qwen","digest":"%s","size":123}]}`,
+			strings.Repeat("a", 64),
+		)))
+	}))
+	defer server.Close()
+	adapter, err := New(config(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Preflight(context.Background())
+	if err != nil || result.ModelDigest != adapter.capability.ModelDigest ||
+		result.DigestEvidence != airuntime.BindingLocallyObserved {
+		t.Fatalf("preflight=%#v err=%v", result, err)
+	}
+}
+
+func TestPreflightRejectsMissingMismatchedAndAmbiguousModels(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		kind airuntime.ErrorKind
+	}{
+		{"missing", `{"models":[{"name":"other","digest":"` + strings.Repeat("a", 64) + `"}]}`, airuntime.ErrorUnavailable},
+		{"mismatch", `{"models":[{"name":"qwen","digest":"` + strings.Repeat("b", 64) + `"}]}`, airuntime.ErrorProtocol},
+		{"invalid digest", `{"models":[{"name":"qwen","digest":"not-a-digest"}]}`, airuntime.ErrorProtocol},
+		{"duplicate", `{"models":[{"name":"qwen","digest":"` + strings.Repeat("a", 64) + `"},{"model":"qwen","digest":"` + strings.Repeat("a", 64) + `"}]}`, airuntime.ErrorProtocol},
+		{"trailing JSON", `{"models":[]}{"secret":"value"}`, airuntime.ErrorProtocol},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			adapter, err := New(config(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != test.kind {
+				t.Fatalf("preflight error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPreflightBoundsInventoryAndRedactsHTTPFailure(t *testing.T) {
+	t.Run("body bytes", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(strings.Repeat("x", int(airuntime.MaxPreflightResponseBytesHard)+1)))
+		}))
+		defer server.Close()
+		adapter, err := New(config(server.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != airuntime.ErrorLimit {
+			t.Fatalf("body limit error = %v", err)
+		}
+	})
+
+	t.Run("model count", func(t *testing.T) {
+		body := `{"models":[`
+		for index := 0; index <= airuntime.MaxPreflightModelsHard; index++ {
+			if index > 0 {
+				body += ","
+			}
+			body += `{"name":"other"}`
+		}
+		body += "]}"
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(body))
+		}))
+		defer server.Close()
+		adapter, err := New(config(server.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != airuntime.ErrorLimit {
+			t.Fatalf("model count error = %v", err)
+		}
+	})
+
+	t.Run("HTTP error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusUnauthorized)
+			_, _ = writer.Write([]byte(`{"endpoint":"http://secret","token":"secret"}`))
+		}))
+		defer server.Close()
+		adapter, err := New(config(server.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != airuntime.ErrorRemote ||
+			strings.Contains(err.Error(), "secret") {
+			t.Fatalf("HTTP error leaked details: %v", err)
+		}
+	})
+}
+
+func TestPreflightPropagatesTimeoutAndCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(time.Second):
+			writer.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	timeoutConfig := config(server.URL)
+	timeoutConfig.Timeout = 20 * time.Millisecond
+	timeoutAdapter, err := New(timeoutConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := timeoutAdapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != airuntime.ErrorTimeout {
+		t.Fatalf("preflight timeout = %v", err)
+	}
+	cancelAdapter, err := New(config(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cancelAdapter.Preflight(ctx); airuntime.ErrorKindOf(err) != airuntime.ErrorCanceled ||
+		!errors.Is(err, context.Canceled) {
+		t.Fatalf("preflight cancellation = %v", err)
 	}
 }
 

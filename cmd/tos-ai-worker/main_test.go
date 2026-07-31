@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 )
@@ -15,6 +16,18 @@ func TestConfiguredAdaptersDefaultsToMockAndRejectsMixedMode(t *testing.T) {
 	}
 	if _, err := configuredAdapters("/private/runtime.json", time.Millisecond); err == nil {
 		t.Fatal("mock and production runtime configuration accepted together")
+	}
+}
+
+func TestPreflightWaitersAreBoundedByConnectionsAndHardLimit(t *testing.T) {
+	if got := preflightWaiters(8); got != 8 {
+		t.Fatalf("preflight waiters = %d", got)
+	}
+	if got := preflightWaiters(worker.MaxPreflightWaitersHard + 1); got != worker.MaxPreflightWaitersHard {
+		t.Fatalf("hard-bounded preflight waiters = %d", got)
+	}
+	if got := preflightWaiters(0); got != 0 {
+		t.Fatalf("invalid connection count was hidden: %d", got)
 	}
 }
 

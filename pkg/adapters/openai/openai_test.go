@@ -54,6 +54,80 @@ func TestExecuteSuccess(t *testing.T) {
 	}
 }
 
+func TestPreflightObservesModelIDButKeepsDigestDeclared(t *testing.T) {
+	adapter, server := newAdapter(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/models" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatal("preflight credential was not applied")
+		}
+		_, _ = writer.Write([]byte(`{"object":"list","data":[{"id":"approved","object":"model","owned_by":"local"}]}`))
+	}), time.Second, 2048)
+	defer server.Close()
+	adapter.apiKey = "test-token"
+	result, err := adapter.Preflight(context.Background())
+	if err != nil || result.Model != "approved" ||
+		result.ModelDigest != adapter.capability.ModelDigest ||
+		result.DigestEvidence != airuntime.BindingDeclared {
+		t.Fatalf("preflight=%#v err=%v", result, err)
+	}
+}
+
+func TestPreflightRejectsMissingDuplicateAndMaliciousInventory(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		kind airuntime.ErrorKind
+	}{
+		{"missing", `{"object":"list","data":[{"id":"other"}]}`, airuntime.ErrorUnavailable},
+		{"duplicate", `{"object":"list","data":[{"id":"approved"},{"id":"approved"}]}`, airuntime.ErrorProtocol},
+		{"wrong object", `{"object":"models","data":[{"id":"approved"}]}`, airuntime.ErrorProtocol},
+		{"malicious JSON", `{"object":"list","data":[{"id":"approved"}]}{"token":"secret"}`, airuntime.ErrorProtocol},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, server := newAdapter(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(test.body))
+			}), time.Second, 2048)
+			defer server.Close()
+			if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != test.kind {
+				t.Fatalf("preflight error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPreflightBoundsBodyAndModelCount(t *testing.T) {
+	t.Run("body bytes", func(t *testing.T) {
+		adapter, server := newAdapter(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(strings.Repeat("x", int(airuntime.MaxPreflightResponseBytesHard)+1)))
+		}), time.Second, 2048)
+		defer server.Close()
+		if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != airuntime.ErrorLimit {
+			t.Fatalf("body limit error = %v", err)
+		}
+	})
+
+	t.Run("model count", func(t *testing.T) {
+		body := `{"object":"list","data":[`
+		for index := 0; index <= airuntime.MaxPreflightModelsHard; index++ {
+			if index > 0 {
+				body += ","
+			}
+			body += `{"id":"other"}`
+		}
+		body += "]}"
+		adapter, server := newAdapter(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(body))
+		}), time.Second, 2048)
+		defer server.Close()
+		if _, err := adapter.Preflight(context.Background()); airuntime.ErrorKindOf(err) != airuntime.ErrorLimit {
+			t.Fatalf("model count error = %v", err)
+		}
+	})
+}
+
 func TestOversizedResponseAndMaliciousJSON(t *testing.T) {
 	adapter, server := newAdapter(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write([]byte(strings.Repeat("x", 500)))

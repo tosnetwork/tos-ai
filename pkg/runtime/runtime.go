@@ -15,9 +15,18 @@ import (
 )
 
 const (
-	MaxCapabilityStringBytes = 256
-	MaxAcceptedPriorities    = 3
-	MaxInputOutputBytesHard  = uint64(64 << 20)
+	MaxCapabilityStringBytes      = 256
+	MaxAcceptedPriorities         = 3
+	MaxInputOutputBytesHard       = uint64(64 << 20)
+	MaxPreflightResponseBytesHard = uint64(1 << 20)
+	MaxPreflightModelsHard        = 256
+)
+
+type BindingEvidence string
+
+const (
+	BindingDeclared        BindingEvidence = "declared"
+	BindingLocallyObserved BindingEvidence = "locally-observed"
 )
 
 type Priority uint8
@@ -67,8 +76,15 @@ type Response struct {
 	RuntimeRevision string
 }
 
+type Preflight struct {
+	Model          string
+	ModelDigest    string
+	DigestEvidence BindingEvidence
+}
+
 type Adapter interface {
 	Capability() Capability
+	Preflight(context.Context) (Preflight, error)
 	Execute(context.Context, Request) (Response, error)
 }
 
@@ -176,6 +192,19 @@ func ValidateCapability(capability Capability) error {
 		seen[priority] = struct{}{}
 	}
 	return nil
+}
+
+func ValidatePreflight(capability Capability, preflight Preflight) error {
+	if preflight.Model != capability.Model ||
+		preflight.ModelDigest != capability.ModelDigest {
+		return errors.New("runtime model binding does not match capability")
+	}
+	switch preflight.DigestEvidence {
+	case BindingDeclared, BindingLocallyObserved:
+		return nil
+	default:
+		return errors.New("runtime model binding has invalid evidence")
+	}
 }
 
 func MillisecondsSince(start time.Time) uint64 {
