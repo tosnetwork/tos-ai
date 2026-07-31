@@ -5,11 +5,15 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -17,6 +21,8 @@ import (
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
 	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 )
+
+const maxMetricsResponseBytes = 16 << 10
 
 func main() {
 	var socketPath string
@@ -29,7 +35,7 @@ func main() {
 	flag.StringVar(&quoteID, "quote-id", "", "existing quote ID for invoke")
 	flag.Parse()
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: tos-ai-cli [flags] health|capabilities|quote|invoke|cancel [value]")
+		fmt.Fprintln(os.Stderr, "usage: tos-ai-cli [flags] health|capabilities|metrics|quote|invoke|cancel [value]")
 		os.Exit(2)
 	}
 	httpClient, err := localrpc.HTTPClient(socketPath, timeout)
@@ -53,6 +59,11 @@ func main() {
 			log.Fatal(err)
 		}
 		printJSON(response.Msg)
+	case "metrics":
+		if flag.NArg() != 1 {
+			log.Fatal("metrics accepts no arguments")
+		}
+		printMetrics(ctx, httpClient)
 	case "quote":
 		if flag.NArg() > 2 {
 			log.Fatal("quote accepts at most one text argument")
@@ -149,6 +160,56 @@ func printJSON(value interface{}) {
 		log.Fatal(err)
 	}
 	fmt.Println(string(encoded))
+}
+
+func printMetrics(ctx context.Context, client *http.Client) {
+	encoded, err := fetchMetrics(ctx, client)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, err := os.Stdout.Write(encoded); err != nil {
+		log.Fatal("write metrics response")
+	}
+}
+
+func fetchMetrics(ctx context.Context, client *http.Client) ([]byte, error) {
+	if client == nil {
+		return nil, errors.New("metrics client is unavailable")
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, "http://unix/metrics", nil,
+	)
+	if err != nil {
+		return nil, errors.New("create metrics request")
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, errors.New("metrics request failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK ||
+		!strings.HasPrefix(response.Header.Get("Content-Type"), "text/plain;") ||
+		response.ContentLength > maxMetricsResponseBytes {
+		return nil, errors.New("metrics response rejected")
+	}
+	encoded, err := io.ReadAll(io.LimitReader(
+		response.Body, maxMetricsResponseBytes+1,
+	))
+	if err != nil || len(encoded) == 0 || len(encoded) > maxMetricsResponseBytes ||
+		encoded[len(encoded)-1] != '\n' || !safeMetricsText(encoded) {
+		return nil, errors.New("metrics response rejected")
+	}
+	return encoded, nil
+}
+
+func safeMetricsText(encoded []byte) bool {
+	for _, value := range encoded {
+		if value == '\n' || value >= 0x20 && value <= 0x7e {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func defaultSocket() string {

@@ -12,8 +12,12 @@ The Go 1.24 module currently contains:
 - `tos-ai-worker`, a private ConnectRPC worker served only on an exclusively
   owned mode-0600 Unix socket, with bounded connections and no public
   listener;
-- `tos-ai-cli`, with `health`, `capabilities`, `quote`, `invoke`, and `cancel`
-  diagnostics;
+- `tos-ai-cli`, with `health`, `capabilities`, `metrics`, `quote`, `invoke`,
+  and `cancel` diagnostics;
+- a private Prometheus text snapshot on the same Unix socket, with a 16 KiB
+  response cap and only fixed method, outcome, state, limit, and resource
+  labels. It does not emit request IDs, model names, endpoints, credentials,
+  host identifiers, or hardware identifiers;
 - CPU, RAM, OS, and architecture discovery plus NVIDIA/go-nvml GPU, VRAM,
   driver, CUDA capability, temperature, and power probes. On Linux, reported
   CPU is bounded by scheduler affinity, while CPU and RAM both honor strict,
@@ -101,6 +105,9 @@ go run ./cmd/tos-ai-cli \
 
 go run ./cmd/tos-ai-cli \
   -socket /run/user/$(id -u)/tos-ai/worker.sock capabilities
+
+go run ./cmd/tos-ai-cli \
+  -socket /run/user/$(id -u)/tos-ai/worker.sock metrics
 
 go run ./cmd/tos-ai-cli \
   -socket /run/user/$(id -u)/tos-ai/worker.sock quote hello
@@ -316,6 +323,11 @@ thresholds from one through ten.
   underneath existing reservations or preempting in-flight work.
 - Runtime errors exposed across RPC are stable categories and do not include
   internal endpoints, paths, or credentials.
+- Operational metrics are available only as `GET /metrics` on the same
+  mode-0600 Unix socket. The snapshot is capped at 16 KiB, uses a fixed set of
+  low-cardinality series, and never uses request, model, endpoint, error, or
+  hardware data as labels. Counters live only for the worker process lifetime;
+  this endpoint is neither a public listener nor a durable audit journal.
 - Cached runtime readiness expires; stale adapters are not advertised or
   admitted until a bounded preflight succeeds again.
 - Runtime health checks are tied to the worker lifecycle. Shutdown stops new
@@ -360,10 +372,11 @@ digest.
 
 This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet
-management, an offline journal, streaming RPC, a production containerd
-backend, physical-I/O control, or audited NVIDIA runtime packaging. It does
-not support arbitrary consumer containers/programs/models, unrestricted
-fine-tuning, training, token issuance, or bare GPU rental.
+management, an offline journal, a remote metrics collector/exporter, streaming
+RPC, a production containerd backend, physical-I/O control, or audited NVIDIA
+runtime packaging. It does not support arbitrary consumer
+containers/programs/models, unrestricted fine-tuning, training, token
+issuance, or bare GPU rental.
 
 Terminal policy reload and dynamic RAM/VRAM capacity rebalancing are not
 implemented. The current monitor verifies that configured RAM backing,

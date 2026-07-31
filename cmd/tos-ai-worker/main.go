@@ -189,13 +189,16 @@ func run() error {
 		log.Printf("runtime preflight degraded: ready=%d total=%d",
 			readiness.RuntimeReady, readiness.RuntimeTotal)
 	}
+	operationalMetrics := worker.NewOperationalMetrics()
 	path, handler := edgev1connect.NewWorkerServiceHandler(
 		service,
 		connect.WithReadMaxBytes(2<<20),
 		connect.WithSendMaxBytes(2<<20),
+		connect.WithInterceptors(operationalMetrics.Interceptor()),
 	)
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
+	mux.Handle(worker.MetricsPath, operationalMetrics.Handler(service))
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,

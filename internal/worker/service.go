@@ -209,6 +209,13 @@ type Readiness struct {
 
 func (s *Service) Readiness() Readiness {
 	snapshot := s.admission.Snapshot()
+	return s.readiness(snapshot)
+}
+
+// readiness derives the complete readiness view from one admission snapshot.
+// Callers that expose multiple admission gauges can therefore avoid mixing
+// values observed at different points in a reservation lifecycle.
+func (s *Service) readiness(snapshot admission.Snapshot) Readiness {
 	status, admissionStatus := "ready", "ready"
 	if s.draining.Load() || !snapshot.Accepting {
 		status, admissionStatus = "draining", "draining"

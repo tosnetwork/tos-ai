@@ -14,6 +14,7 @@ tos-ai-worker
        +-- immutable administrator terminal resource policy
        +-- exclusive private socket ownership and bounded connections
        +-- bounded RPC body limits
+       +-- bounded low-cardinality operational metrics
        +-- idempotent quote/invocation replay stores
        +-- authoritative local admission reservations
        +-- bounded priority scheduler
@@ -405,6 +406,33 @@ signed cache. Ollama activation binds one private model to the exact approved
 source blob, but neither interface provides hardware attestation or proves
 how runtime memory is executed.
 
+## Private operational metrics
+
+The worker serves Prometheus text at `GET /metrics` on its existing
+mode-0600 Unix socket. It creates no TCP listener, discovery service, exporter
+goroutine, watcher, or remote egress path. The diagnostic CLI uses the same
+bounded Unix transport and accepts at most 16 KiB of printable metrics text,
+so an unexpected local response cannot stream without limit or inject terminal
+control sequences.
+
+Metric storage has a fixed shape: five protocol methods multiplied by the
+fixed Connect outcome enum, plus one in-flight gauge per method. Readiness,
+runtime counts, admission task state, configured limits, and the six fixed
+admission resource dimensions are rendered from bounded values. Counters use
+saturating atomics; no request creates a map entry or label value. In
+particular, request IDs, service/model selectors, runtime endpoints, error
+text, credentials, filesystem paths, hostnames, and stable hardware
+identifiers are neither retained nor emitted. A scrape is GET-only, rejects a
+query or body, returns `no-store`, and is capped at 16 KiB.
+
+Readiness and admission gauges are derived from one admission snapshot, so a
+single response does not combine pre- and post-reservation task counts. RPC
+counters are intentionally process-local and reset on restart. This endpoint
+is private operational telemetry, not authenticated public monitoring, a
+durable audit log, a billing record, or the planned offline journal. A
+collector that needs remote access must run outside the worker and preserve
+the Unix identity boundary.
+
 ## Execution isolation
 
 `pkg/executor` remains fail closed. `DenyAll` is the default and there is no
@@ -435,6 +463,8 @@ Implemented:
 - exclusively owned private bounded Unix-socket worker and diagnostic CLI
 - fail-closed runtime selection with an explicit development mock mode
 - readiness/draining health summary without secret data
+- private bounded low-cardinality operational metrics on the existing Unix
+  socket, with a bounded safe-text CLI diagnostic
 - bounded replay, scheduler, local admission, resource owner reserve, and
   owner-reserved execution workers
 - graceful cancellation and shutdown resource cleanup
@@ -473,6 +503,7 @@ Planned, not claimed by this release:
 - active/known-good software update slots and crash recovery
 - ARD catalog/Registry, relay, offline journal, fleet, and physical-terminal
   profiles
+- authenticated remote metrics collection and durable operational history
 
 KubeEdge, EdgeX, Ollama, LocalAI, vLLM, and containerd remain external
 projects or design sources; this daemon does not fork or embed their control
