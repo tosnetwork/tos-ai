@@ -46,6 +46,19 @@ func Sign(manifest Manifest, privateKey ed25519.PrivateKey) (Manifest, error) {
 }
 
 func (m Manifest) Verify(publicKey ed25519.PublicKey, target string, currentSecurityRevision uint64, now time.Time) error {
+	if err := m.VerifyInstalled(publicKey, target, currentSecurityRevision); err != nil {
+		return err
+	}
+	if time.UnixMilli(m.IssuedAt).After(now.Add(2*time.Minute)) || !time.UnixMilli(m.ExpiresAt).After(now) {
+		return errors.New("manifest is outside its validity window")
+	}
+	return nil
+}
+
+// VerifyInstalled revalidates the authenticity and security policy of an
+// artifact that was accepted while its manifest was valid. Expiry gates new
+// imports; it does not make already-installed content invalid on restart.
+func (m Manifest) VerifyInstalled(publicKey ed25519.PublicKey, target string, currentSecurityRevision uint64) error {
 	if len(publicKey) != ed25519.PublicKeySize {
 		return errors.New("invalid Ed25519 public key")
 	}
@@ -57,9 +70,6 @@ func (m Manifest) Verify(publicKey ed25519.PublicKey, target string, currentSecu
 	}
 	if m.SecurityRevision < currentSecurityRevision {
 		return errors.New("security revision rollback rejected")
-	}
-	if time.UnixMilli(m.IssuedAt).After(now.Add(2*time.Minute)) || !time.UnixMilli(m.ExpiresAt).After(now) {
-		return errors.New("manifest is outside its validity window")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(m.Signature)
 	if err != nil || !ed25519.Verify(publicKey, m.signingMessage(), signature) {

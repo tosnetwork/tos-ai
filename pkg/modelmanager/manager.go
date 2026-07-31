@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,9 +18,11 @@ import (
 )
 
 const (
-	MaxModelsHard     = 1024
-	MaxTotalBytesHard = uint64(1 << 40)
-	MaxSignersHard    = 64
+	MaxModelsHard           = 1024
+	MaxTotalBytesHard       = uint64(1 << 40)
+	MaxSignersHard          = 64
+	MaxMetadataBytes        = int64(16 << 10)
+	MaxDirectoryEntriesHard = 4096
 )
 
 var (
@@ -65,9 +66,10 @@ type Model struct {
 }
 
 type entry struct {
-	model   Model
-	path    string
-	element *list.Element
+	model        Model
+	path         string
+	metadataPath string
+	element      *list.Element
 }
 
 type Manager struct {
@@ -100,14 +102,18 @@ func New(config Config) (*Manager, error) {
 	}
 	info, err := os.Lstat(config.RootDir)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode().Perm()&0o077 != 0 {
+		info.Mode().Perm() != 0o700 {
 		return nil, errors.New("model cache must be a private non-symlink directory")
 	}
-	return &Manager{
+	manager := &Manager{
 		config:  config,
 		entries: make(map[string]*entry, config.MaxModels),
 		lru:     list.New(),
-	}, nil
+	}
+	if err := manager.recover(); err != nil {
+		return nil, err
+	}
+	return manager, nil
 }
 
 func (m *Manager) Import(ctx context.Context, manifest update.Manifest, source io.Reader) (Model, error) {
@@ -165,16 +171,20 @@ func (m *Manager) Import(ctx context.Context, manifest update.Manifest, source i
 	m.reservedBytes += manifest.SizeBytes
 	m.mu.Unlock()
 
-	temp, err := os.CreateTemp(m.config.RootDir, ".model-stage-*")
+	temp, err := os.CreateTemp(m.config.RootDir, artifactStagePrefix)
 	if err != nil {
 		return Model{}, m.failImport(current, "", "staging", err)
 	}
 	tempPath := temp.Name()
+	metadataTempPath := ""
 	success := false
 	defer func() {
 		_ = temp.Close()
 		if !success {
 			_ = os.Remove(tempPath)
+			if metadataTempPath != "" {
+				_ = os.Remove(metadataTempPath)
+			}
 		}
 	}()
 	if err := temp.Chmod(0o600); err != nil {
@@ -199,14 +209,24 @@ func (m *Manager) Import(ctx context.Context, manifest update.Manifest, source i
 	if err := temp.Close(); err != nil {
 		return Model{}, m.failImport(current, tempPath, "staging", err)
 	}
-	finalPath := filepath.Join(m.config.RootDir, strings.TrimPrefix(manifest.Digest, "sha256:")+".model")
-	if err := os.Rename(tempPath, finalPath); err != nil {
+	acceptedAt := m.config.Now()
+	if err := manifest.Verify(publicKey, m.config.Target, m.config.CurrentSecurityRevision, acceptedAt); err != nil {
+		return Model{}, m.failImport(current, tempPath, "validity", err)
+	}
+	metadataTempPath, err = m.writeMetadataTemp(manifest, acceptedAt)
+	if err != nil {
+		return Model{}, m.failImport(current, tempPath, "staging", err)
+	}
+	finalPath := m.artifactPath(manifest.Digest)
+	metadataPath := m.metadataPath(manifest.Digest)
+	if err := m.activateFiles(tempPath, metadataTempPath, finalPath, metadataPath); err != nil {
 		return Model{}, m.failImport(current, tempPath, "activation", err)
 	}
 	success = true
 
 	m.mu.Lock()
 	current.path = finalPath
+	current.metadataPath = metadataPath
 	current.model.State = StateReady
 	current.model.ErrorCategory = ""
 	m.reservedBytes -= manifest.SizeBytes
@@ -333,6 +353,11 @@ func (m *Manager) ensureCapacityLocked(incoming uint64) error {
 }
 
 func (m *Manager) removeLocked(current *entry) error {
+	if current.metadataPath != "" {
+		if err := os.Remove(current.metadataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	if current.path != "" {
 		if err := os.Remove(current.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err

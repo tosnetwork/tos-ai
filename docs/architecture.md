@@ -85,10 +85,24 @@ absent -> verifying -> ready -> active -> draining
 
 Imports write mode-0600 temporary files in a private cache directory, verify
 the complete artifact, sync it, and atomically rename it to its SHA-256
-address. Failure and cancellation remove temporary files. Entry count,
-resident bytes, staging bytes, and LRU state are bounded; active, draining,
-pinned, or in-use models cannot be evicted. The manager does not implement
-Internet download or accept task-supplied model bytes.
+address alongside a canonical metadata sidecar containing the signed manifest
+and its acceptance time. Both files and the cache directory are synced before
+the model becomes ready. Failure and cancellation remove temporary files.
+Entry count, resident bytes, staging bytes, metadata size, directory scan
+count, and LRU state are bounded; active, draining, pinned, or in-use models
+cannot be evicted.
+
+On restart, the manager scans at most 4,096 directory entries, removes staging
+files and incomplete crash pairs, and revalidates signer, target, security
+revision, original acceptance window, size, file mode, path digest, and
+SHA-256. Manifest expiry still rejects a new import, while an artifact that
+was accepted during the signed validity window may restart after expiry.
+Recovery verifies every retained artifact before applying capacity-driven
+evictions. Volatile active, draining, pinned, and in-use state is deliberately
+restored as `ready`; no model is automatically loaded into a runtime. The
+cache root is an operator-owned single-manager boundary; concurrent processes
+must not share it because cross-process locking is not implemented. The manager
+does not implement Internet download or accept task-supplied model bytes.
 
 ## Runtime adapters
 
@@ -149,7 +163,7 @@ Implemented:
 
 Planned, not claimed by this release:
 
-- automatic activation and persistent recovery of signed model slots
+- automatic activation of signed model slots into configured runtimes
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core

@@ -170,12 +170,14 @@ func TestCancellationCleansTemporaryFile(t *testing.T) {
 
 func assertNoTemporaryFiles(t *testing.T, root string) {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(root, ".model-stage-*"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("temporary files leaked: %v", matches)
+	for _, pattern := range []string{artifactStagePrefix, metadataStagePrefix} {
+		matches, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 0 {
+			t.Fatalf("temporary files leaked: %v", matches)
+		}
 	}
 }
 

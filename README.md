@@ -25,7 +25,8 @@ The Go 1.24 module currently contains:
   shutdown;
 - a signed, SHA-256-addressed model-manager library with verifying, ready,
   active, draining, failed, and absent states, bounded LRU storage, protected
-  active/pinned/in-use entries, atomic activation, and temporary-file cleanup;
+  active/pinned/in-use entries, atomic artifact/metadata activation,
+  restart-time integrity recovery, and crash-residue cleanup;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
 - strict administrator-owned JSON runtime configuration with bounded defaults,
   duplicate/unknown-field rejection, and private credential-file loading;
@@ -126,11 +127,10 @@ capacity before it is advertised or admitted.
 
 ## Not implemented
 
-This repository does not yet provide model-cache recovery or automatic
-activation of imported model files in Ollama, LocalAI, or vLLM. An operator
-must ensure that each configured model name is bound to the declared digest in
-the separately managed runtime; the generic HTTP APIs do not attest that
-binding.
+This repository does not yet provide automatic activation of imported model
+files in Ollama, LocalAI, or vLLM. An operator must ensure that each configured
+model name is bound to the declared digest in the separately managed runtime;
+the generic HTTP APIs do not attest that binding.
 
 This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet
