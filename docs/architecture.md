@@ -11,6 +11,7 @@ tos-edge (future wallet/payment/auth boundary)
 tos-ai-worker
        |
        +-- private administrator runtime configuration
+       +-- immutable administrator terminal resource policy
        +-- exclusive private socket ownership and bounded connections
        +-- bounded RPC body limits
        +-- idempotent quote/invocation replay stores
@@ -73,6 +74,33 @@ Invalid counts and telemetry are omitted or marked degraded. Reports never
 contain GPU serial/UUID, PCI address, MAC, hostname, or an intentionally
 stable hardware fingerprint. Evidence is field-source metadata, not proof that
 a self-observation is true.
+
+## Terminal policy authority
+
+Production startup requires one private `-terminal-policy-config` document.
+It is the immutable process authority for scheduler workers and queue slots,
+Unix-socket connection count, quote and invocation replay bounds, maximum
+deadline, runtime-preflight cache and refresh work, aggregate admission
+capacity, owner reserve, and per-request limits. Task payloads and runtime
+endpoints cannot modify these values. The development-only mock mode may omit
+the document and use conservative probe-derived defaults; its legacy resource
+flags cannot be combined with an explicit policy.
+
+The strict JSON document is capped at 64 KiB and accepts only version 1. The
+loader rejects duplicate or unknown fields, excessive nesting, multiple JSON
+values, symlinks, non-regular files, wrong ownership, or group/other file
+permissions. Central package hard limits cap every scheduler, connection,
+replay, deadline, preflight, and admission field. Owner reserve must be
+meaningful for RAM, context, batch, and output, and for VRAM whenever GPU
+capacity is configured.
+
+After NVML and host probing but before allocating runtime state or creating a
+listener, startup also limits configured RAM to 75 percent of observed host
+RAM and configured VRAM to the sum of currently observed free device memory.
+Missing GPUs therefore remain a normal CPU-only state but cannot satisfy a
+positive VRAM policy. The policy is intentionally not hot-reloaded, and the
+current foundation does not continuously re-probe capacity or overcommit
+resources across multiple worker processes.
 
 ## Model lifecycle
 
@@ -269,6 +297,12 @@ development mock flags cannot be mixed with runtime or model-trust
 configuration. Adapter connection pools are closed once after scheduler
 drain.
 
+Outside development mock mode the worker independently requires
+`-terminal-policy-config`; runtime configuration does not carry or override
+terminal capacity. Production startup therefore has two deliberately narrow
+authorities: runtime configuration selects fixed adapters and endpoints,
+while terminal policy bounds local execution and memory pressure.
+
 Optional `-model-trust-config` is accepted only with `-runtime-config`. It is
 capped at 64 KiB and uses the same private-file, duplicate-key, nesting, and
 unknown-field checks. Cache capacity remains bounded by `pkg/modelmanager`;
@@ -319,6 +353,8 @@ Implemented:
 - bounded runtime preflight, readiness filtering, and evidence-preserving
   model binding, with active bounded health refresh and lifecycle cancellation
 - private bounded operator configuration and production adapter wiring
+- mandatory private production terminal policy with observed RAM/free-VRAM
+  startup validation and a single resource authority
 - signed bounded model-manager and update-verification foundations
 - fail-fast exclusive local ownership for model caches and persistent
   activation state, with cleanup-aware handover
@@ -333,6 +369,7 @@ Planned, not claimed by this release:
 
 - activation backends for LocalAI, vLLM, llama.cpp, and vendor runtimes
 - live administrator lifecycle controls for fixed activation slots
+- authenticated policy rollout, hot reload, and dynamic capacity re-probing
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core

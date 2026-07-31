@@ -29,6 +29,14 @@ import (
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
 )
 
+const (
+	defaultWorkers          = 1
+	defaultMaxQueue         = 64
+	defaultMaxConnections   = 128
+	defaultPreflightRefresh = 5 * time.Second
+	defaultPreflightWorkers = 4
+)
+
 func main() {
 	if err := run(); err != nil {
 		log.Print(err)
@@ -47,17 +55,18 @@ func run() error {
 	var mockDelay time.Duration
 	var runtimeConfigPath string
 	var modelTrustConfigPath string
+	var terminalPolicyPath string
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
-	flag.IntVar(&workers, "workers", 1, "concurrent runtime workers")
-	flag.IntVar(&maxQueue, "max-queue", 64, "maximum queued work items")
-	flag.IntVar(&maxConnections, "max-connections", 128, "maximum private socket connections")
+	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
+	flag.IntVar(&maxQueue, "max-queue", defaultMaxQueue, "development maximum queued work items")
+	flag.IntVar(&maxConnections, "max-connections", defaultMaxConnections, "development maximum private socket connections")
 	flag.DurationVar(
-		&preflightRefresh, "runtime-health-interval", 5*time.Second,
-		"bounded runtime health refresh interval",
+		&preflightRefresh, "runtime-health-interval", defaultPreflightRefresh,
+		"development runtime health refresh interval",
 	)
 	flag.IntVar(
-		&preflightWorkers, "runtime-health-workers", 4,
-		"bounded concurrent runtime health checks",
+		&preflightWorkers, "runtime-health-workers", defaultPreflightWorkers,
+		"development concurrent runtime health checks",
 	)
 	flag.BoolVar(&devMock, "dev-mock", false, "explicitly enable the development-only mock runtime")
 	flag.DurationVar(&mockDelay, "mock-delay", 0, "development mock execution delay")
@@ -66,21 +75,34 @@ func run() error {
 		&modelTrustConfigPath, "model-trust-config", "",
 		"private signed-model trust configuration",
 	)
+	flag.StringVar(
+		&terminalPolicyPath, "terminal-policy-config", "",
+		"private administrator terminal resource policy",
+	)
 	flag.Parse()
 
 	report, err := probe.Collect(probe.NewNVMLBackend())
 	if err != nil {
 		return err
 	}
-	admissionConfig, err := defaultAdmissionConfig(report, workers, maxQueue)
+	policy, err := configuredTerminalPolicy(
+		terminalPolicyPath, devMock, report, terminalPolicyFlags{
+			workers: workers, maxQueue: maxQueue,
+			maxConnections:   maxConnections,
+			preflightRefresh: preflightRefresh,
+			preflightWorkers: preflightWorkers,
+		},
+	)
 	if err != nil {
 		return err
 	}
-	admissionController, err := admission.New(admissionConfig)
+	admissionController, err := admission.New(policy.Admission)
 	if err != nil {
 		return err
 	}
-	taskScheduler, err := scheduler.New(scheduler.Config{Workers: workers, MaxQueue: maxQueue})
+	taskScheduler, err := scheduler.New(scheduler.Config{
+		Workers: policy.Workers, MaxQueue: policy.MaxQueue,
+	})
 	if err != nil {
 		return err
 	}
@@ -92,16 +114,16 @@ func run() error {
 	}
 	service, err := worker.NewService(worker.Config{
 		Version:             "0.1.0-dev",
-		QuoteTTL:            30 * time.Second,
-		MaxQuotes:           4096,
-		MaxInvocations:      4096,
-		MaxDeadline:         15 * time.Minute,
-		PreflightTimeout:    5 * time.Second,
-		PreflightTTL:        2 * time.Minute,
-		PreflightFailureTTL: 2 * time.Second,
-		MaxPreflightWaiters: preflightWaiters(maxConnections),
-		PreflightRefresh:    preflightRefresh,
-		PreflightWorkers:    preflightWorkers,
+		QuoteTTL:            policy.QuoteTTL,
+		MaxQuotes:           policy.MaxQuotes,
+		MaxInvocations:      policy.MaxInvocations,
+		MaxDeadline:         policy.MaxDeadline,
+		PreflightTimeout:    policy.PreflightTimeout,
+		PreflightTTL:        policy.PreflightTTL,
+		PreflightFailureTTL: policy.FailureTTL,
+		MaxPreflightWaiters: preflightWaiters(policy.MaxConnections),
+		PreflightRefresh:    policy.RefreshInterval,
+		PreflightWorkers:    policy.PreflightWorkers,
 		PriceNanoTOS:        0,
 		GPUStatus:           report.NVIDIA.Status,
 	}, taskScheduler, admissionController, runtimes.adapters)
@@ -135,7 +157,7 @@ func run() error {
 		IdleTimeout:       time.Minute,
 		MaxHeaderBytes:    16 << 10,
 	}
-	listener, err := unixserver.ListenLimited(socketPath, maxConnections)
+	listener, err := unixserver.ListenLimited(socketPath, policy.MaxConnections)
 	if err != nil {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		serviceErr := service.Shutdown(shutdownContext)
@@ -405,8 +427,110 @@ func closeRuntimeAdapters(adapters []airuntime.Adapter) {
 	}
 }
 
+type terminalPolicyFlags struct {
+	workers          int
+	maxQueue         int
+	maxConnections   int
+	preflightRefresh time.Duration
+	preflightWorkers int
+}
+
+func configuredTerminalPolicy(
+	path string,
+	devMock bool,
+	report probe.Report,
+	flags terminalPolicyFlags,
+) (operatorconfig.TerminalPolicy, error) {
+	if path == "" {
+		if !devMock {
+			return operatorconfig.TerminalPolicy{}, fmt.Errorf(
+				"terminal policy configuration is required outside development mock mode",
+			)
+		}
+		if flags.maxConnections <= 0 ||
+			flags.maxConnections > unixserver.MaxConnectionsHard ||
+			flags.preflightRefresh < worker.MinPreflightRefresh ||
+			flags.preflightRefresh > worker.MaxPreflightRefreshHard ||
+			flags.preflightWorkers <= 0 ||
+			flags.preflightWorkers > worker.MaxPreflightWorkersHard {
+			return operatorconfig.TerminalPolicy{}, fmt.Errorf(
+				"development terminal settings exceed hard limits",
+			)
+		}
+		admissionConfig, err := defaultAdmissionConfig(
+			report, flags.workers, flags.maxQueue,
+		)
+		if err != nil {
+			return operatorconfig.TerminalPolicy{}, err
+		}
+		return operatorconfig.TerminalPolicy{
+			Workers: flags.workers, MaxQueue: flags.maxQueue,
+			MaxConnections: flags.maxConnections,
+			QuoteTTL:       30 * time.Second, MaxQuotes: 4096,
+			MaxInvocations: 4096, MaxDeadline: 15 * time.Minute,
+			PreflightTimeout: 5 * time.Second,
+			PreflightTTL:     2 * time.Minute,
+			FailureTTL:       2 * time.Second,
+			RefreshInterval:  flags.preflightRefresh,
+			PreflightWorkers: flags.preflightWorkers,
+			Admission:        admissionConfig,
+		}, nil
+	}
+	if flags != defaultTerminalPolicyFlags() {
+		return operatorconfig.TerminalPolicy{}, fmt.Errorf(
+			"terminal policy cannot be mixed with development resource flags",
+		)
+	}
+	policy, err := operatorconfig.LoadTerminalPolicy(path)
+	if err != nil {
+		return operatorconfig.TerminalPolicy{}, err
+	}
+	if err := validateObservedTerminalPolicy(report, policy); err != nil {
+		return operatorconfig.TerminalPolicy{}, err
+	}
+	return policy, nil
+}
+
+func defaultTerminalPolicyFlags() terminalPolicyFlags {
+	return terminalPolicyFlags{
+		workers: defaultWorkers, maxQueue: defaultMaxQueue,
+		maxConnections:   defaultMaxConnections,
+		preflightRefresh: defaultPreflightRefresh,
+		preflightWorkers: defaultPreflightWorkers,
+	}
+}
+
+func validateObservedTerminalPolicy(
+	report probe.Report,
+	policy operatorconfig.TerminalPolicy,
+) error {
+	if report.Host.MemoryBytes < 64<<20 {
+		return fmt.Errorf("insufficient observed host RAM")
+	}
+	maximumRAM := report.Host.MemoryBytes - report.Host.MemoryBytes/4
+	if policy.Admission.Capacity.RAMBytes > maximumRAM {
+		return fmt.Errorf("terminal RAM policy exceeds observed safe capacity")
+	}
+	var availableVRAM uint64
+	for _, device := range report.NVIDIA.Devices {
+		if device.VRAMUsedBytes > device.VRAMBytes {
+			return fmt.Errorf("invalid observed VRAM")
+		}
+		available := device.VRAMBytes - device.VRAMUsedBytes
+		if ^uint64(0)-availableVRAM < available {
+			return fmt.Errorf("observed VRAM overflow")
+		}
+		availableVRAM += available
+	}
+	if policy.Admission.Capacity.VRAMBytes > availableVRAM {
+		return fmt.Errorf("terminal VRAM policy exceeds observed capacity")
+	}
+	return nil
+}
+
 func defaultAdmissionConfig(report probe.Report, workers, maxQueue int) (admission.Config, error) {
-	if workers <= 0 || workers > 128 || maxQueue <= 0 || maxQueue > 4096 {
+	if workers <= 0 || workers > scheduler.MaxWorkersHard || maxQueue <= 0 ||
+		maxQueue > scheduler.MaxQueueHard {
 		return admission.Config{}, fmt.Errorf("workers or queue exceed hard limits")
 	}
 	ramCapacity := report.Host.MemoryBytes / 2
@@ -418,6 +542,9 @@ func defaultAdmissionConfig(report probe.Report, workers, maxQueue int) (admissi
 	}
 	var vramCapacity uint64
 	for _, device := range report.NVIDIA.Devices {
+		if device.VRAMUsedBytes > device.VRAMBytes {
+			return admission.Config{}, fmt.Errorf("invalid observed VRAM")
+		}
 		available := device.VRAMBytes - device.VRAMUsedBytes
 		if ^uint64(0)-vramCapacity < available {
 			return admission.Config{}, fmt.Errorf("observed VRAM overflow")

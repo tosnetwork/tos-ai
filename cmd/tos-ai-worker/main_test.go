@@ -399,6 +399,189 @@ func TestDefaultAdmissionConfigRejectsInsufficientRAM(t *testing.T) {
 	if err == nil {
 		t.Fatal("insufficient RAM accepted")
 	}
+	_, err = defaultAdmissionConfig(probe.Report{
+		Host: probe.Host{MemoryBytes: 16 << 30},
+		NVIDIA: probe.NVIDIAReport{Devices: []probe.NVIDIADevice{{
+			VRAMBytes: 1, VRAMUsedBytes: 2,
+		}}},
+	}, 1, 1)
+	if err == nil {
+		t.Fatal("invalid observed VRAM accepted")
+	}
+}
+
+func TestConfiguredTerminalPolicyRequiresProductionConfig(t *testing.T) {
+	report := probe.Report{
+		Host:   probe.Host{MemoryBytes: 16 << 30},
+		NVIDIA: probe.NVIDIAReport{Status: "unavailable"},
+	}
+	flags := defaultTerminalPolicyFlags()
+	if _, err := configuredTerminalPolicy("", false, report, flags); err == nil {
+		t.Fatal("production mode accepted a missing terminal policy")
+	}
+	policy, err := configuredTerminalPolicy("", true, report, flags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Workers != defaultWorkers ||
+		policy.MaxConnections != defaultMaxConnections ||
+		policy.Admission.Capacity.VRAMBytes != 0 {
+		t.Fatalf("development policy=%#v", policy)
+	}
+	if _, err := admission.New(policy.Admission); err != nil {
+		t.Fatal(err)
+	}
+	invalid := []terminalPolicyFlags{
+		func() terminalPolicyFlags {
+			value := flags
+			value.maxConnections = 0
+			return value
+		}(),
+		func() terminalPolicyFlags {
+			value := flags
+			value.preflightRefresh = worker.MinPreflightRefresh - time.Nanosecond
+			return value
+		}(),
+		func() terminalPolicyFlags {
+			value := flags
+			value.preflightWorkers = worker.MaxPreflightWorkersHard + 1
+			return value
+		}(),
+	}
+	for _, value := range invalid {
+		if _, err := configuredTerminalPolicy("", true, report, value); err == nil {
+			t.Fatalf("invalid development terminal settings accepted: %#v", value)
+		}
+	}
+}
+
+func TestConfiguredTerminalPolicyValidatesObservedCapacity(t *testing.T) {
+	report := probe.Report{
+		Host: probe.Host{MemoryBytes: 16 << 30},
+		NVIDIA: probe.NVIDIAReport{
+			Status: "available",
+			Devices: []probe.NVIDIADevice{{
+				VRAMBytes: 8 << 30, VRAMUsedBytes: 2 << 30,
+			}},
+		},
+	}
+	path := writeWorkerPrivate(
+		t, "terminal-policy.json", workerTerminalPolicyJSON(8<<30, 4<<30),
+	)
+	policy, err := configuredTerminalPolicy(
+		path, false, report, defaultTerminalPolicyFlags(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Admission.Capacity.RAMBytes != 8<<30 ||
+		policy.Admission.Capacity.VRAMBytes != 4<<30 {
+		t.Fatalf("loaded admission=%#v", policy.Admission)
+	}
+
+	tests := []struct {
+		name   string
+		path   string
+		report probe.Report
+	}{
+		{
+			name: "RAM headroom",
+			path: writeWorkerPrivate(
+				t, "excessive-ram.json",
+				workerTerminalPolicyJSON(16<<30, 0),
+			),
+			report: probe.Report{Host: probe.Host{MemoryBytes: 16 << 30}},
+		},
+		{
+			name:   "missing GPU",
+			path:   path,
+			report: probe.Report{Host: probe.Host{MemoryBytes: 16 << 30}},
+		},
+		{
+			name: "invalid observed GPU",
+			path: path,
+			report: probe.Report{
+				Host: probe.Host{MemoryBytes: 16 << 30},
+				NVIDIA: probe.NVIDIAReport{Devices: []probe.NVIDIADevice{{
+					VRAMBytes: 2 << 30, VRAMUsedBytes: 3 << 30,
+				}}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := configuredTerminalPolicy(
+				test.path, false, test.report, defaultTerminalPolicyFlags(),
+			)
+			if err == nil || strings.Contains(err.Error(), test.path) {
+				t.Fatalf("unsafe observed capacity error=%v", err)
+			}
+		})
+	}
+}
+
+func TestConfiguredTerminalPolicyRejectsDevelopmentFlagMixing(t *testing.T) {
+	path := writeWorkerPrivate(
+		t, "terminal-policy.json", workerTerminalPolicyJSON(8<<30, 0),
+	)
+	flags := defaultTerminalPolicyFlags()
+	flags.workers++
+	_, err := configuredTerminalPolicy(path, true, probe.Report{
+		Host: probe.Host{MemoryBytes: 16 << 30},
+	}, flags)
+	if err == nil {
+		t.Fatal("terminal policy was mixed with development resource flags")
+	}
+}
+
+func workerTerminalPolicyJSON(ramBytes, vramBytes uint64) string {
+	ownerVRAM := vramBytes / 4
+	return fmt.Sprintf(`{
+  "version":1,
+  "workers":2,
+  "maxQueue":8,
+  "maxConnections":32,
+  "quoteTtlMillis":30000,
+  "maxQuotes":128,
+  "maxInvocations":64,
+  "maxDeadlineMillis":900000,
+  "preflight":{
+    "timeoutMillis":5000,
+    "successTtlMillis":120000,
+    "failureTtlMillis":2000,
+    "refreshMillis":5000,
+    "workers":4
+  },
+  "admission":{
+    "capacity":{
+      "ramBytes":%d,
+      "vramBytes":%d,
+      "kvCacheBytes":4294967296,
+      "contextTokens":262144,
+      "batchSize":64,
+      "outputBytes":67108864,
+      "executionMillis":900000
+    },
+    "ownerReserved":{
+      "ramBytes":1073741824,
+      "vramBytes":%d,
+      "kvCacheBytes":1073741824,
+      "contextTokens":32768,
+      "batchSize":8,
+      "outputBytes":8388608,
+      "executionMillis":0
+    },
+    "perRequestMax":{
+      "ramBytes":2147483648,
+      "vramBytes":%d,
+      "kvCacheBytes":2147483648,
+      "contextTokens":32768,
+      "batchSize":8,
+      "outputBytes":8388608,
+      "executionMillis":900000
+    }
+  }
+}`, ramBytes, vramBytes, ownerVRAM, vramBytes)
 }
 
 func writeWorkerPrivate(t *testing.T, name string, value string) string {

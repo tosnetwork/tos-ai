@@ -15,6 +15,7 @@ import (
 
 const (
 	activeSocketProbeLimit = 250 * time.Millisecond
+	MaxConnectionsHard     = 4096
 )
 
 type Listener struct {
@@ -35,7 +36,7 @@ func ListenLimited(path string, maxConnections int) (*Listener, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("Unix socket path must be absolute")
 	}
-	if maxConnections <= 0 || maxConnections > 4096 {
+	if maxConnections <= 0 || maxConnections > MaxConnectionsHard {
 		return nil, errors.New("invalid Unix socket connection limit")
 	}
 	parent := filepath.Dir(path)

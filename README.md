@@ -48,6 +48,9 @@ The Go 1.24 module currently contains:
   failures;
 - strict administrator-owned JSON runtime configuration with bounded defaults,
   duplicate/unknown-field rejection, and private credential-file loading;
+- a separate immutable terminal policy that is mandatory outside development
+  mock mode and bounds scheduler capacity, socket connections, replay state,
+  deadlines, runtime health work, admission resources, and owner reserve;
 - bounded HTTP transports with administrator-selected endpoints, HTTPS for
   remote endpoints, explicit local-CIDR exceptions for plaintext, deadline
   propagation, and stable redacted runtime error categories;
@@ -109,9 +112,30 @@ cache:
 ```sh
 go run ./cmd/tos-ai-worker \
   -socket /run/user/$(id -u)/tos-ai/worker.sock \
+  -terminal-policy-config /etc/tos-ai/terminal-policy.json \
   -runtime-config /etc/tos-ai/runtime.json \
   -model-trust-config /etc/tos-ai/model-trust.json
 ```
+
+Production mode requires `-terminal-policy-config`. This private, strict JSON
+file is the single authority for worker and queue counts, connection and
+replay bounds, deadlines, preflight cadence, aggregate admission capacity,
+owner-reserved capacity, and per-request maxima. It is capped at 64 KiB and
+uses the same regular-file, ownership, mode, duplicate-key, nesting, and
+unknown-field checks as other operator configuration. Startup rejects RAM
+capacity above 75 percent of locally observed host RAM or VRAM capacity above
+the currently observed free VRAM, before creating the listener. A nonzero
+owner reserve is mandatory for RAM, context, batch, and output, and for VRAM
+when VRAM capacity is enabled. The policy is immutable for the process
+lifetime; changing it requires a restart. See
+[docs/terminal-policy-config.example.json](docs/terminal-policy-config.example.json)
+and size it for the actual host and configured adapters.
+
+The `-workers`, `-max-queue`, `-max-connections`,
+`-runtime-health-interval`, and `-runtime-health-workers` flags are retained
+only for explicit `-dev-mock` diagnostics without a terminal policy. They
+cannot be mixed with a policy file, avoiding two competing resource
+authorities.
 
 The model-trust file is private, strict JSON containing the cache path, target,
 security revision, capacity bounds, verification timeout, and canonical
@@ -177,19 +201,19 @@ connections in aggregate, 64 KiB headers, one-hour execution, or a one-minute
 connect timeout. Admission validation may impose lower observed-capacity
 bounds. Invalid or ambiguous configuration fails worker startup.
 
-Default worker bounds are one concurrent task, 64 queued tasks, 128 private
-socket connections, 1 MiB output per request, a 15-minute execution deadline,
-and capacity derived conservatively from locally observed RAM/VRAM. Hard
-limits reject more than 128 workers, 4096 queued tasks, 4096 socket
-connections, a one-hour admission deadline, or oversized resource
-configuration. The owner reserve is removed from external/background
-capacity before it is advertised or admitted. Runtime preflight uses a
-five-second check timeout, a two-minute success TTL, and a two-second failure
-TTL. The default health monitor refreshes every five seconds with four
-workers. Configuration rejects intervals below 250 milliseconds or above
-five minutes, more than 16 workers, or any timeout/interval combination that
-could leave a freshness gap before the success TTL after accounting for every
-configured adapter batch.
+Development mock defaults are one concurrent task, 64 queued tasks, 128
+private socket connections, 1 MiB output per request, a 15-minute execution
+deadline, and capacity derived conservatively from locally observed RAM/VRAM.
+Production values come only from the terminal policy. Hard limits reject more
+than 128 workers, 4096 queued tasks, 4096 socket connections, a one-hour
+admission deadline, or oversized resource configuration. The owner reserve is
+removed from external/background capacity before it is advertised or
+admitted. The development health defaults are a five-second check timeout, a
+two-minute success TTL, a two-second failure TTL, and a five-second refresh
+with four workers. Policy validation rejects refresh intervals below 250
+milliseconds or above five minutes, more than 16 health workers, or any
+timeout/interval combination that could leave a freshness gap before the
+success TTL after accounting for every configured adapter batch.
 
 ## Security boundaries
 
@@ -204,6 +228,9 @@ configured adapter batch.
 - Go scheduling is not a hard real-time or physical-safety loop.
 - Quote is an expiring capability observation, not a permanent reservation.
   Invoke repeats local admission before adapter execution.
+- Production admission and process-capacity values come only from a private
+  startup policy and are checked against observed RAM/free VRAM before the
+  socket is created. Task payloads cannot increase or replace them.
 - Runtime errors exposed across RPC are stable categories and do not include
   internal endpoints, paths, or credentials.
 - Cached runtime readiness expires; stale adapters are not advertised or
@@ -254,6 +281,10 @@ management, an offline journal, streaming RPC, a production containerd
 backend, physical-I/O control, or audited NVIDIA runtime packaging. It does
 not support arbitrary consumer containers/programs/models, unrestricted
 fine-tuning, training, token issuance, or bare GPU rental.
+
+Terminal policy reload and dynamic RAM/VRAM rebalancing are not implemented;
+the current policy is a fail-fast startup authority and observed GPU capacity
+is not continuously re-probed.
 
 Protocol fields needed for richer resource and admission exchange are recorded
 in [docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).
