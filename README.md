@@ -27,6 +27,9 @@ The Go 1.24 module currently contains:
   active, draining, failed, and absent states, bounded LRU storage, protected
   active/pinned/in-use entries, atomic artifact/metadata activation,
   restart-time integrity recovery, and crash-residue cleanup;
+- path-free model artifact leases plus a bounded, fake-tested runtime
+  activation coordinator contract with activation-time SHA-256 verification,
+  health gating, known-good preservation, rollback, and retryable cleanup;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
   with fixed-size singleflight state, expiring success/failure caches, and
@@ -144,12 +147,14 @@ TTL; it creates no periodic watcher.
 
 ## Not implemented
 
-This repository does not yet provide automatic activation of imported model
-files in Ollama, LocalAI, or vLLM. An operator must ensure that each configured
-model name is bound to the declared digest in the separately managed runtime.
-Ollama exposes a runtime digest that is checked exactly; generic
-OpenAI-compatible model-list APIs expose an ID but do not attest its configured
-content digest.
+This repository does not yet provide or enable an audited activation backend
+for Ollama, LocalAI, vLLM, or llama.cpp. `pkg/modelactivation` defines the
+bounded coordination and rollback contract and is tested with a fake backend,
+but it is not wired into `tos-ai-worker`. An operator must still ensure that
+each configured model name is loaded and bound to the declared digest in the
+separately managed runtime. Ollama exposes a runtime digest that is checked
+exactly; generic OpenAI-compatible model-list APIs expose an ID but do not
+attest its configured content digest.
 
 This repository also does not yet provide public ingress, TOS payment
 authorization, receipts, settlement, ARD publication/Registry, fleet

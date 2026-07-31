@@ -26,11 +26,13 @@ const (
 )
 
 var (
-	ErrCapacity = errors.New("model cache capacity is unavailable")
-	ErrBusy     = errors.New("model is already being verified")
-	ErrNotReady = errors.New("model is not ready")
-	ErrInUse    = errors.New("model is active, pinned, or in use")
-	ErrConflict = errors.New("model digest metadata conflicts with cached entry")
+	ErrCapacity    = errors.New("model cache capacity is unavailable")
+	ErrBusy        = errors.New("model is already being verified")
+	ErrNotReady    = errors.New("model is not ready")
+	ErrInUse       = errors.New("model is active, pinned, or in use")
+	ErrConflict    = errors.New("model digest metadata conflicts with cached entry")
+	ErrArtifact    = errors.New("model artifact is unavailable")
+	ErrLeaseClosed = errors.New("model artifact lease is closed")
 )
 
 type State string
@@ -79,6 +81,64 @@ type Manager struct {
 	lru           *list.List
 	totalBytes    uint64
 	reservedBytes uint64
+}
+
+// ArtifactLease exposes an already-open, verified cache artifact without
+// publishing its host path. Holding the lease increments the model's in-use
+// count, so LRU eviction cannot remove the artifact while a runtime backend is
+// preparing or using it.
+type ArtifactLease struct {
+	model   Model
+	file    *os.File
+	release func()
+
+	mu       sync.Mutex
+	closed   bool
+	closeErr error
+}
+
+func (l *ArtifactLease) Model() Model {
+	if l == nil {
+		return Model{}
+	}
+	return l.model
+}
+
+func (l *ArtifactLease) ReadAt(value []byte, offset int64) (int, error) {
+	if l == nil {
+		return 0, ErrLeaseClosed
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed || l.file == nil {
+		return 0, ErrLeaseClosed
+	}
+	return l.file.ReadAt(value, offset)
+}
+
+func (l *ArtifactLease) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	if l.closed {
+		err := l.closeErr
+		l.mu.Unlock()
+		return err
+	}
+	l.closed = true
+	if l.file != nil {
+		l.closeErr = l.file.Close()
+		l.file = nil
+	}
+	release := l.release
+	l.release = nil
+	err := l.closeErr
+	l.mu.Unlock()
+	if release != nil {
+		release()
+	}
+	return err
 }
 
 func New(config Config) (*Manager, error) {
@@ -253,7 +313,8 @@ func (m *Manager) Activate(digest string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.entries[digest]
-	if current == nil || (current.model.State != StateReady && current.model.State != StateDraining) {
+	if current == nil || (current.model.State != StateReady &&
+		current.model.State != StateDraining && current.model.State != StateActive) {
 		return ErrNotReady
 	}
 	current.model.State = StateActive
@@ -265,10 +326,27 @@ func (m *Manager) Drain(digest string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.entries[digest]
-	if current == nil || current.model.State != StateActive {
+	if current == nil || (current.model.State != StateActive &&
+		current.model.State != StateDraining) {
 		return ErrNotReady
 	}
 	current.model.State = StateDraining
+	m.touchLocked(current)
+	return nil
+}
+
+// Deactivate returns an active or draining artifact to the ready cache state.
+// Runtime lifecycle code must call this only after the corresponding runtime
+// binding has been unloaded or safely rolled back.
+func (m *Manager) Deactivate(digest string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.entries[digest]
+	if current == nil || (current.model.State != StateReady &&
+		current.model.State != StateActive && current.model.State != StateDraining) {
+		return ErrNotReady
+	}
+	current.model.State = StateReady
 	m.touchLocked(current)
 	return nil
 }
@@ -293,10 +371,52 @@ func (m *Manager) Acquire(digest string) (Model, func(), error) {
 		m.mu.Unlock()
 		return Model{}, nil, ErrNotReady
 	}
+	result, release := m.acquireLocked(current)
+	m.mu.Unlock()
+	return result, release, nil
+}
+
+// AcquireArtifact returns a path-free lease over a verified cache file.
+// File identity, size, type, and mode are checked again while the model entry
+// is locked so a runtime backend never consumes an unbounded or substituted
+// path supplied by a task.
+func (m *Manager) AcquireArtifact(digest string) (*ArtifactLease, error) {
+	m.mu.Lock()
+	current := m.entries[digest]
+	if current == nil || current.path == "" ||
+		(current.model.State != StateReady && current.model.State != StateActive &&
+			current.model.State != StateDraining) {
+		m.mu.Unlock()
+		return nil, ErrNotReady
+	}
+	pathInfo, err := os.Lstat(current.path)
+	if err != nil || !privateRegular(pathInfo) ||
+		uint64(pathInfo.Size()) != current.model.SizeBytes {
+		m.mu.Unlock()
+		return nil, ErrArtifact
+	}
+	file, err := os.Open(current.path)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, ErrArtifact
+	}
+	info, err := file.Stat()
+	if err != nil || !os.SameFile(pathInfo, info) || !privateRegular(info) ||
+		uint64(info.Size()) != current.model.SizeBytes {
+		_ = file.Close()
+		m.mu.Unlock()
+		return nil, ErrArtifact
+	}
+	model, release := m.acquireLocked(current)
+	m.mu.Unlock()
+	return &ArtifactLease{model: model, file: file, release: release}, nil
+}
+
+func (m *Manager) acquireLocked(current *entry) (Model, func()) {
 	current.model.InUse++
 	m.touchLocked(current)
 	result := current.model
-	m.mu.Unlock()
+	digest := current.model.Digest
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
@@ -308,7 +428,7 @@ func (m *Manager) Acquire(digest string) (Model, func(), error) {
 			m.mu.Unlock()
 		})
 	}
-	return result, release, nil
+	return result, release
 }
 
 func (m *Manager) Status(digest string) Model {

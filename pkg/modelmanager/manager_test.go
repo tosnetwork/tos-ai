@@ -168,6 +168,98 @@ func TestCancellationCleansTemporaryFile(t *testing.T) {
 	assertNoTemporaryFiles(t, f.root)
 }
 
+func TestArtifactLeaseIsPathFreeAndPreventsEviction(t *testing.T) {
+	f := fixture(t, 1, 16)
+	data := []byte("leased")
+	manifest := f.manifest(t, "leased.gguf", data, 5)
+	if _, err := f.manager.Import(context.Background(), manifest, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := f.manager.AcquireArtifact(manifest.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Model().Digest != manifest.Digest || lease.Model().InUse != 1 {
+		t.Fatalf("lease model = %#v", lease.Model())
+	}
+	read := make([]byte, len(data))
+	if count, err := lease.ReadAt(read, 0); err != nil || count != len(data) ||
+		!bytes.Equal(read, data) {
+		t.Fatalf("lease read count=%d data=%q err=%v", count, read, err)
+	}
+	nextData := []byte("next")
+	next := f.manifest(t, "next.gguf", nextData, 5)
+	if _, err := f.manager.Import(
+		context.Background(), next, bytes.NewReader(nextData),
+	); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("leased artifact eviction error = %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatalf("idempotent close = %v", err)
+	}
+	if _, err := lease.ReadAt(read, 0); !errors.Is(err, ErrLeaseClosed) {
+		t.Fatalf("closed lease read = %v", err)
+	}
+	if f.manager.Status(manifest.Digest).InUse != 0 {
+		t.Fatalf("lease did not release model: %#v", f.manager.Status(manifest.Digest))
+	}
+	if _, err := f.manager.Import(context.Background(), next, bytes.NewReader(nextData)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcquireArtifactRejectsChangedCacheFile(t *testing.T) {
+	f := fixture(t, 1, 16)
+	data := []byte("model")
+	manifest := f.manifest(t, "model.gguf", data, 5)
+	if _, err := f.manager.Import(context.Background(), manifest, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, stringsTrimDigest(manifest.Digest)+".model")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.AcquireArtifact(manifest.Digest); !errors.Is(err, ErrArtifact) {
+		t.Fatalf("insecure artifact error = %v", err)
+	}
+	if f.manager.Status(manifest.Digest).InUse != 0 {
+		t.Fatal("failed artifact acquisition leaked an in-use reference")
+	}
+}
+
+func TestDeactivateTransitionsAreIdempotent(t *testing.T) {
+	f := fixture(t, 1, 16)
+	data := []byte("model")
+	manifest := f.manifest(t, "model.gguf", data, 5)
+	if _, err := f.manager.Import(context.Background(), manifest, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Activate(manifest.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Activate(manifest.Digest); err != nil {
+		t.Fatalf("idempotent activate = %v", err)
+	}
+	if err := f.manager.Drain(manifest.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Drain(manifest.Digest); err != nil {
+		t.Fatalf("idempotent drain = %v", err)
+	}
+	if err := f.manager.Deactivate(manifest.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.manager.Deactivate(manifest.Digest); err != nil {
+		t.Fatalf("idempotent deactivate = %v", err)
+	}
+	if f.manager.Status(manifest.Digest).State != StateReady {
+		t.Fatalf("deactivated model = %#v", f.manager.Status(manifest.Digest))
+	}
+}
+
 func assertNoTemporaryFiles(t *testing.T, root string) {
 	t.Helper()
 	for _, pattern := range []string{artifactStagePrefix, metadataStagePrefix} {

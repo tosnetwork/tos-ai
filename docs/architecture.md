@@ -105,6 +105,29 @@ cache root is an operator-owned single-manager boundary; concurrent processes
 must not share it because cross-process locking is not implemented. The manager
 does not implement Internet download or accept task-supplied model bytes.
 
+`pkg/modelactivation` adds the in-process coordination contract for a future
+audited runtime loader. It acquires an already-open, path-free artifact lease,
+which keeps the content-addressed cache entry in use and non-evictable. Before
+the backend sees the artifact, the controller recomputes its SHA-256 through a
+1 MiB buffer under a hard operation timeout. Backends receive only a bounded
+slot policy, exact model digest, size, and `io.ReaderAt`; they do not receive a
+task-selected path, URL, endpoint, owner key, or executable payload.
+
+Each controller has at most 64 fixed administrator slots, one synchronous
+operation per slot, and no queue, watcher, or background goroutine. A
+candidate must return an exact locally observed binding and pass a bounded
+health gate before it can replace the current model. The current binding and
+artifact lease remain the known-good state until replacement succeeds.
+Failure rolls the candidate back; failed cleanup retains at most one bounded
+candidate lease per slot, blocks further activation, and exposes an explicit
+retry operation. Shutdown synchronously unloads bindings and releases leases.
+
+This is a fake-tested validation and lifecycle foundation only. No Ollama,
+LocalAI, vLLM, llama.cpp, or vendor activation backend is enabled, and the
+worker does not yet instantiate the controller. Backend-specific staging,
+crash-safe persistent active/known-good slots, and worker configuration remain
+planned.
+
 ## Runtime adapters
 
 The adapter ABI binds service, operation, model digest, runtime revision,
@@ -181,11 +204,13 @@ Implemented:
   model binding
 - private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
+- path-free model leases and bounded runtime-activation coordination contract
 - container isolation contract and validation layer with `DenyAll`
 
 Planned, not claimed by this release:
 
-- automatic activation of signed model slots into configured runtimes
+- audited activation backends, persistent known-good slots, and worker wiring
+  for configured runtimes
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, and settlement through Edge Core
