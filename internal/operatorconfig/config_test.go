@@ -212,6 +212,19 @@ func TestLoadRejectsUnsafeEndpointDurationAndCredential(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsPlaintextCIDRSpanningPublicAddresses(t *testing.T) {
+	config := fmt.Sprintf(`{"version":1,"adapters":[{
+		"type":"ollama","baseUrl":"http://10.0.0.5:11434",
+		"allowedPlaintextCidrs":["10.0.0.0/7"],
+		"model":"m","modelDigest":"sha256:%s"
+	}]}`, strings.Repeat("d", 64))
+	if _, err := Load(writePrivate(
+		t, "broad-plaintext-cidr.json", config, 0o600,
+	)); err == nil {
+		t.Fatal("plaintext CIDR spanning public addresses was accepted")
+	}
+}
+
 func TestLoadRejectsInsecureCredentialFile(t *testing.T) {
 	credential := writePrivate(t, "credential", "private-token", 0o644)
 	config := fmt.Sprintf(`{"version":1,"adapters":[{

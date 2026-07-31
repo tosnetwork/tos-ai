@@ -55,8 +55,9 @@ The Go 1.24 module currently contains:
   mock mode and bounds scheduler capacity, socket connections, replay state,
   deadlines, runtime health work, admission resources, and owner reserve;
 - bounded HTTP transports with administrator-selected endpoints, HTTPS for
-  remote endpoints, explicit local-CIDR exceptions for plaintext, deadline
-  propagation, and stable redacted runtime error categories;
+  remote endpoints, whole-range validation for explicit local-CIDR plaintext
+  exceptions, loopback-pinned `localhost` resolution, deadline propagation,
+  and stable redacted runtime error categories;
 - a fail-closed container execution policy and narrow future containerd client
   contract. No containerd backend is enabled;
 - Ed25519-signed update manifest verification, SHA-256 artifact verification,
@@ -214,6 +215,16 @@ context tokens, and batch size one. Configured worker adapters cannot exceed
 connections in aggregate, 64 KiB headers, one-hour execution, or a one-minute
 connect timeout. Admission validation may impose lower observed-capacity
 bounds. Invalid or ambiguous configuration fails worker startup.
+
+Remote runtime endpoints require HTTPS. Plaintext endpoints must use a
+loopback literal, `localhost`, or a literal address inside one of at most 16
+administrator-configured local CIDRs. Every configured CIDR must be wholly
+contained in loopback, RFC 1918 private, link-local, or IPv6 ULA space; a wide
+prefix that crosses into public address space fails startup. `localhost`
+resolution accepts at most 16 addresses, requires every result to be
+loopback, binds the configured port, and includes resolution plus connection
+attempts in the configured connect timeout. Every runtime transport also pins
+dials to the configured host and port; redirects remain disabled.
 
 Development mock defaults are one concurrent task, 64 queued tasks, 128
 private socket connections, 1 MiB output per request, a 15-minute execution

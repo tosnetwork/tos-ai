@@ -269,8 +269,23 @@ evidence level.
 HTTP adapters cap request/response/header sizes, connections, and timeouts;
 disable redirects; propagate context cancellation; require HTTPS remotely;
 and allow HTTP only for loopback or an explicitly configured private/local
-CIDR. Returned errors are categorized without endpoint, filesystem, or
+CIDR. Every plaintext CIDR must be wholly contained inside a recognized
+loopback, RFC 1918 private, link-local, or IPv6 ULA range; validating only the
+network address is insufficient because a shorter prefix could also cover
+public addresses. Invalid CIDRs fail startup even when attached to an HTTPS
+adapter. Returned errors are categorized without endpoint, filesystem, or
 credential details.
+
+Plaintext `localhost` is resolved inside the connection timeout through a
+bounded path accepting at most 16 answers. Every answer must be loopback
+before any connection is attempted, the dial target must retain the exact
+configured host and port, and only verified numeric loopback addresses reach
+the socket dialer. This avoids treating a poisoned or unexpectedly broad
+`localhost` resolution as local transport authority. Other plaintext runtime
+hosts must be literal addresses, so they do not acquire a DNS rebinding path.
+All runtime transports additionally reject a dial whose host or port differs
+from the administrator-configured endpoint, including HTTPS transports; the
+HTTP client is not a general-purpose egress client.
 
 A separately managed Ollama model preflight reads `/api/tags`, accepts at most
 1 MiB and 256 entries, and requires one exact model-name and SHA-256 digest

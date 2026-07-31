@@ -14,6 +14,7 @@ const (
 	MaxHeaderBytesHard = runtimehttp.MaxHeaderBytesHard
 	MaxEndpointBytes   = runtimehttp.MaxEndpointBytes
 	MaxPlaintextCIDRs  = runtimehttp.MaxPlaintextCIDRs
+	MaxResolvedIPsHard = runtimehttp.MaxResolvedIPsHard
 )
 
 type Config = runtimehttp.Config
