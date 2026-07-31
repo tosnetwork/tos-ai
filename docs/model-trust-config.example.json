@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "cacheDir": "/var/lib/tos-ai/models",
+  "target": "linux/amd64/cuda",
+  "currentSecurityRevision": 1,
+  "maxModels": 64,
+  "maxTotalBytes": 274877906944,
+  "verifyTimeoutMillis": 120000,
+  "signers": [
+    {
+      "keyId": "operator-models",
+      "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    }
+  ]
+}

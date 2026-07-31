@@ -18,6 +18,7 @@ import (
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/modelapproval"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
@@ -38,12 +39,17 @@ func run() error {
 	var maxConnections int
 	var mockDelay time.Duration
 	var runtimeConfigPath string
+	var modelTrustConfigPath string
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", 1, "concurrent runtime workers")
 	flag.IntVar(&maxQueue, "max-queue", 64, "maximum queued work items")
 	flag.IntVar(&maxConnections, "max-connections", 128, "maximum private socket connections")
 	flag.DurationVar(&mockDelay, "mock-delay", 0, "development mock execution delay")
 	flag.StringVar(&runtimeConfigPath, "runtime-config", "", "private administrator runtime configuration")
+	flag.StringVar(
+		&modelTrustConfigPath, "model-trust-config", "",
+		"private signed-model trust configuration",
+	)
 	flag.Parse()
 
 	report, err := probe.Collect(probe.NewNVMLBackend())
@@ -62,7 +68,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	adapters, err := configuredAdapters(runtimeConfigPath, mockDelay)
+	adapters, err := configuredAdapters(
+		runtimeConfigPath, modelTrustConfigPath, mockDelay,
+	)
 	if err != nil {
 		return err
 	}
@@ -80,6 +88,7 @@ func run() error {
 		GPUStatus:           report.NVIDIA.Status,
 	}, taskScheduler, admissionController, adapters)
 	if err != nil {
+		closeRuntimeAdapters(adapters)
 		return err
 	}
 	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 10*time.Second)
@@ -140,17 +149,54 @@ func run() error {
 	return serviceErr
 }
 
-func configuredAdapters(configPath string, mockDelay time.Duration) ([]airuntime.Adapter, error) {
+func configuredAdapters(
+	configPath string,
+	modelTrustPath string,
+	mockDelay time.Duration,
+) ([]airuntime.Adapter, error) {
 	if mockDelay < 0 || mockDelay > time.Minute {
 		return nil, fmt.Errorf("mock delay exceeds hard limits")
 	}
 	if configPath == "" {
+		if modelTrustPath != "" {
+			return nil, fmt.Errorf("model trust requires a runtime configuration")
+		}
 		return []airuntime.Adapter{mock.New(mockDelay)}, nil
 	}
 	if mockDelay != 0 {
 		return nil, fmt.Errorf("mock delay cannot be used with a runtime configuration")
 	}
-	return operatorconfig.Load(configPath)
+	adapters, err := operatorconfig.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if modelTrustPath == "" {
+		return adapters, nil
+	}
+	trust, err := operatorconfig.LoadModelTrust(modelTrustPath)
+	if err != nil {
+		closeRuntimeAdapters(adapters)
+		return nil, err
+	}
+	verifyContext, cancelVerify := context.WithTimeout(
+		context.Background(), trust.VerificationTimeout,
+	)
+	defer cancelVerify()
+	guarded, err := modelapproval.WrapAll(
+		verifyContext, trust.Manager, adapters, trust.VerificationTimeout,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("approve configured runtime models")
+	}
+	return guarded, nil
+}
+
+func closeRuntimeAdapters(adapters []airuntime.Adapter) {
+	for _, adapter := range adapters {
+		if closer, ok := adapter.(airuntime.AdapterCloser); ok {
+			_ = closer.Close()
+		}
+	}
 }
 
 func defaultAdmissionConfig(report probe.Report, workers, maxQueue int) (admission.Config, error) {

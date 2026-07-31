@@ -211,6 +211,45 @@ func TestArtifactLeaseIsPathFreeAndPreventsEviction(t *testing.T) {
 	}
 }
 
+func TestArtifactLeaseVerifyDetectsTamperingCancellationAndClose(t *testing.T) {
+	f := fixture(t, 1, 32)
+	data := []byte("verified-model")
+	manifest := f.manifest(t, "verified.gguf", data, 5)
+	if _, err := f.manager.Import(
+		context.Background(), manifest, bytes.NewReader(data),
+	); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := f.manager.AcquireArtifact(manifest.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Verify(context.Background()); err != nil {
+		t.Fatalf("valid lease verification=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := lease.Verify(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled lease verification=%v", err)
+	}
+	path := filepath.Join(f.root, stringsTrimDigest(manifest.Digest)+".model")
+	if err := os.WriteFile(path, []byte("tampered-model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Verify(context.Background()); !errors.Is(err, ErrArtifact) {
+		t.Fatalf("tampered lease verification=%v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Verify(context.Background()); !errors.Is(err, ErrArtifact) {
+		t.Fatalf("closed lease verification=%v", err)
+	}
+	if f.manager.Status(manifest.Digest).InUse != 0 {
+		t.Fatalf("verified lease was not released: %#v", f.manager.Status(manifest.Digest))
+	}
+}
+
 func TestAcquireArtifactRejectsChangedCacheFile(t *testing.T) {
 	f := fixture(t, 1, 16)
 	data := []byte("model")

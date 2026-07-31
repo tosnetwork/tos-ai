@@ -103,16 +103,26 @@ func Load(path string) ([]airuntime.Adapter, error) {
 		applyDefaults(&value)
 		if value.MaxConnections > MaxConnectionsPerAdapter ||
 			totalConnections > MaxConnectionsTotal-value.MaxConnections {
+			closeAdapters(adapters)
 			return nil, errors.New("operator runtime configuration exceeds connection limits")
 		}
 		adapter, err := buildAdapter(value)
 		if err != nil {
+			closeAdapters(adapters)
 			return nil, fmt.Errorf("runtime adapter %d is invalid", index)
 		}
 		totalConnections += value.MaxConnections
 		adapters = append(adapters, adapter)
 	}
 	return adapters, nil
+}
+
+func closeAdapters(adapters []airuntime.Adapter) {
+	for _, adapter := range adapters {
+		if closer, ok := adapter.(airuntime.AdapterCloser); ok {
+			_ = closer.Close()
+		}
+	}
 }
 
 func buildAdapter(config adapterConfig) (airuntime.Adapter, error) {

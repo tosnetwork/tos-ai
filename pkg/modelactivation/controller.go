@@ -5,7 +5,6 @@ package modelactivation
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -27,7 +26,6 @@ const (
 	MaxOperationTimeout     = 10 * time.Minute
 	MaxCleanupTimeoutHard   = time.Minute
 	MaxRecoveryBindingsHard = 2
-	hashBufferBytes         = 1 << 20
 )
 
 type State string
@@ -443,7 +441,7 @@ func (c *Controller) recoverSlot(ctx context.Context, slot *runtimeSlot) error {
 		return errors.New("recovered artifact exceeds policy")
 	}
 	verifyContext, cancelVerify := context.WithTimeout(ctx, c.operationLimit)
-	verifyErr := verifyArtifact(verifyContext, lease)
+	verifyErr := lease.Verify(verifyContext)
 	cancelVerify()
 	if verifyErr != nil {
 		return errors.New("recovered artifact verification failed")
@@ -635,7 +633,7 @@ func (c *Controller) Activate(
 	}
 
 	operationContext, cancelOperation := context.WithTimeout(ctx, c.operationLimit)
-	if verifyErr := verifyArtifact(operationContext, lease); verifyErr != nil {
+	if verifyErr := lease.Verify(operationContext); verifyErr != nil {
 		cancelOperation()
 		_ = lease.Close()
 		kind := contextErrorKind(ctx, verifyErr, ErrorArtifact)
@@ -1239,40 +1237,6 @@ func validDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(digest)
 	return err == nil
-}
-
-func verifyArtifact(ctx context.Context, lease *modelmanager.ArtifactLease) error {
-	model := lease.Model()
-	if model.SizeBytes == 0 || !validDigest(model.Digest) {
-		return errors.New("invalid artifact metadata")
-	}
-	hasher := sha256.New()
-	buffer := make([]byte, min(uint64(hashBufferBytes), model.SizeBytes))
-	var offset uint64
-	for offset < model.SizeBytes {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		want := min(uint64(len(buffer)), model.SizeBytes-offset)
-		count, err := lease.ReadAt(buffer[:want], int64(offset))
-		if count > 0 {
-			if _, writeErr := hasher.Write(buffer[:count]); writeErr != nil {
-				return writeErr
-			}
-			offset += uint64(count)
-		}
-		if err != nil && !(errors.Is(err, io.EOF) && offset == model.SizeBytes) {
-			return err
-		}
-		if count == 0 && err == nil {
-			return io.ErrNoProgress
-		}
-	}
-	actual := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
-	if actual != model.Digest {
-		return errors.New("artifact digest mismatch")
-	}
-	return nil
 }
 
 func safeLoad(

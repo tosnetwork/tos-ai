@@ -105,6 +105,18 @@ root is an operator-owned single-manager boundary; concurrent processes must
 not share it because cross-process locking is not implemented. The manager
 does not implement Internet download or accept task-supplied model bytes.
 
+`pkg/modelapproval` optionally connects this cache authority to production
+runtime adapters without activating a model. The worker loads a private,
+strict model-trust configuration containing only Ed25519 public keys and
+bounded cache policy. Each configured adapter must acquire its exact digest
+as a path-free lease and pass a complete SHA-256 rehash during startup. The
+lease remains held, so the approved entry cannot be evicted, and a serialized,
+cancellation-aware rehash runs before every adapter preflight. A missing,
+unsigned, wrong-target, expired-at-import, or security-revision rollback
+artifact fails worker startup. A cache artifact changed after startup prevents
+advertisement and Invoke from reaching local admission. Shutdown closes both
+the runtime adapter and approval lease once.
+
 `pkg/modelactivation` adds the in-process coordination contract for a future
 audited runtime loader. It acquires an already-open, path-free artifact lease,
 which keeps the content-addressed cache entry in use and non-evictable. Before
@@ -196,11 +208,19 @@ If the flag is omitted, the worker retains its deterministic development mock.
 If the flag is present, the mock is not mixed into the configured production
 capabilities. Adapter connection pools are closed once after scheduler drain.
 
+Optional `-model-trust-config` is accepted only with `-runtime-config`. It is
+capped at 64 KiB and uses the same private-file, duplicate-key, nesting, and
+unknown-field checks. Cache capacity remains bounded by `pkg/modelmanager`;
+there are at most 64 signer public keys and one retained lease per configured
+adapter. The worker loads no signing private key. Model approval failures use
+stable unavailable categories and do not expose cache paths or signer data.
+
 The configured model digest remains an administrator assertion for generic
-OpenAI-compatible runtimes. Ollama supplies a runtime digest for an exact
-local observation, but neither interface provides hardware attestation or a
-portable proof that the process loaded a particular `pkg/modelmanager`
-artifact. Automatic activation of verified model-manager artifacts is still
+OpenAI-compatible runtimes even when the same digest is approved in the local
+signed cache. Ollama supplies a runtime digest for an exact local observation,
+so preflight can match that observation to the approved digest. Neither
+interface provides hardware attestation or proves how runtime memory was
+populated. Automatic activation of verified model-manager artifacts is still
 planned.
 
 ## Execution isolation
@@ -227,6 +247,7 @@ Implemented:
   model binding
 - private bounded operator configuration and production adapter wiring
 - signed bounded model-manager and update-verification foundations
+- optional signed-cache model approval guards in worker preflight
 - path-free model leases, bounded runtime-activation coordination, and
   crash-safe active/known-good intent with explicit fake-backend recovery
 - container isolation contract and validation layer with `DenyAll`

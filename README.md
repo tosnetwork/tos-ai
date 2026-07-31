@@ -31,6 +31,9 @@ The Go 1.24 module currently contains:
   activation coordinator contract with activation-time SHA-256 verification,
   health gating, known-good preservation, rollback, retryable cleanup, and
   optional crash-safe activation intent with explicit startup recovery;
+- optional worker model-approval guards that bind configured runtime digests
+  to recovered, signed local cache artifacts, retain bounded leases, and
+  rehash them before every runtime preflight;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
   with fixed-size singleflight state, expiring success/failure caches, and
@@ -88,6 +91,28 @@ replaces the mock with the explicitly configured Ollama and OpenAI-compatible
 adapters. An invocation payload can never select or override an endpoint.
 Model import similarly accepts a bounded reader and an approved signed
 manifest, not an arbitrary Internet URL.
+
+Production adapters may additionally be constrained to the signed local model
+cache:
+
+```sh
+go run ./cmd/tos-ai-worker \
+  -socket /run/user/$(id -u)/tos-ai/worker.sock \
+  -runtime-config /etc/tos-ai/runtime.json \
+  -model-trust-config /etc/tos-ai/model-trust.json
+```
+
+The model-trust file is private, strict JSON containing the cache path, target,
+security revision, capacity bounds, verification timeout, and canonical
+base64 Ed25519 public keys. It never contains a private signing key. Every
+configured adapter digest must already be present as an approved
+`pkg/modelmanager` cache entry or startup fails. The worker retains one
+path-free lease per adapter and rehashes the full artifact before each runtime
+preflight; graceful shutdown releases all leases. There is no model upload or
+download RPC, and the default mock mode rejects `-model-trust-config`. See
+[docs/model-trust-config.example.json](docs/model-trust-config.example.json);
+the example public key is a structural placeholder and must be replaced with
+the operator's approved Ed25519 public key.
 
 The worker preflights configured runtimes at startup, refreshes stale bindings
 for capabilities and Quote, and performs an authoritative recheck for every
@@ -148,6 +173,10 @@ TTL; it creates no periodic watcher.
 - Optional activation state contains only fixed administrator slot IDs and
   SHA-256 digests in a private local file. It is crash-recovery intent, not a
   remote trust assertion or substitute for signed model verification.
+- A signed local cache approval proves only that an administrator-approved
+  artifact is available to this worker. Generic OpenAI-compatible runtime
+  model IDs remain `declared`; the guard does not claim remote content
+  attestation or automatic model activation.
 
 ## Not implemented
 
