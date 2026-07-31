@@ -138,7 +138,8 @@ func TestOperationalMetricsTrackInFlightCancellationAndRelease(t *testing.T) {
 	}
 	cancelResponse, err := client.Cancel(
 		context.Background(), connect.NewRequest(&edgev1.CancelRequest{
-			RequestId: request.RequestId,
+			RequestId: request.RequestId, TaskId: request.TaskId,
+			RequestDigest: request.RequestDigest,
 		}),
 	)
 	if err != nil || !cancelResponse.Msg.Accepted {

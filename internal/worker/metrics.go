@@ -23,6 +23,7 @@ const (
 	metricMethodCapabilities
 	metricMethodQuote
 	metricMethodInvoke
+	metricMethodGetTask
 	metricMethodCancel
 	metricMethodCount
 )
@@ -30,7 +31,7 @@ const (
 const metricOutcomeCount = int(connect.CodeUnauthenticated) + 1
 
 var metricMethodNames = [metricMethodCount]string{
-	"health", "capabilities", "quote", "invoke", "cancel",
+	"health", "capabilities", "quote", "invoke", "get_task", "cancel",
 }
 
 var metricOutcomeNames = [metricOutcomeCount]string{
@@ -68,7 +69,7 @@ func NewOperationalMetrics() *OperationalMetrics {
 	return &OperationalMetrics{}
 }
 
-// Interceptor records only the five protocol-defined unary worker methods.
+// Interceptor records only the six protocol-defined unary worker methods.
 // Unknown procedures pass through without creating a new metric series.
 func (m *OperationalMetrics) Interceptor() connect.Interceptor {
 	return connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
@@ -107,6 +108,8 @@ func metricMethod(procedure string) (int, bool) {
 		return metricMethodQuote, true
 	case edgev1connect.WorkerServiceInvokeProcedure:
 		return metricMethodInvoke, true
+	case edgev1connect.WorkerServiceGetTaskProcedure:
+		return metricMethodGetTask, true
 	case edgev1connect.WorkerServiceCancelProcedure:
 		return metricMethodCancel, true
 	default:

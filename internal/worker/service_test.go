@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,13 +19,14 @@ import (
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
+	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 	"google.golang.org/protobuf/proto"
 )
 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	taskScheduler, admissionController := newTestDependencies(t, 4)
-	service, err := NewService(testServiceConfig(), taskScheduler, admissionController, []airuntime.Adapter{mock.New(0)})
+	service, err := NewService(testServiceConfig(t), taskScheduler, admissionController, []airuntime.Adapter{mock.New(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +94,7 @@ func TestNewServiceRejectsUnsafeRuntimeMonitorConfiguration(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			config := testServiceConfig()
+			config := testServiceConfig(t)
 			test.configure(&config)
 			taskScheduler, admissionController := newTestDependencies(t, 2)
 			if _, err := NewService(
@@ -115,7 +118,33 @@ func TestPreflightScanLimitAccountsForEveryBoundedBatch(t *testing.T) {
 	}
 }
 
-func testServiceConfig() Config {
+func testServiceConfig(t *testing.T) Config {
+	t.Helper()
+	return testServiceConfigAt(
+		t, filepath.Join(t.TempDir(), "worker-tasks.db"),
+	)
+}
+
+func testServiceConfigAt(t *testing.T, path string) Config {
+	t.Helper()
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	storeConfig := localrpc.DefaultWorkerTaskStoreConfig(
+		path,
+	)
+	storeConfig.MaxTasks = 64
+	storeConfig.MaxInvocationDuration = time.Hour
+	storeConfig.AllowedPriorities = []edgev1.Priority{
+		edgev1.Priority_PRIORITY_LOCAL_ASYNC,
+		edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		edgev1.Priority_PRIORITY_BACKGROUND,
+	}
+	store, err := localrpc.OpenWorkerTaskStore(storeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	return Config{
 		Version:             "test",
 		QuoteTTL:            time.Minute,
@@ -130,7 +159,28 @@ func testServiceConfig() Config {
 		PreflightWorkers:    2,
 		Now:                 time.Now,
 		GPUStatus:           "unavailable",
+		TaskStore:           store,
 	}
+}
+
+func bindTestInvocation(
+	t *testing.T,
+	request *edgev1.InvokeRequest,
+) *edgev1.InvokeRequest {
+	t.Helper()
+	if request.TaskId == "" {
+		request.TaskId = "task-" + request.RequestId
+	}
+	if request.RetainUntilUnixMillis == 0 {
+		request.RetainUntilUnixMillis = time.UnixMilli(
+			request.DeadlineUnixMillis,
+		).Add(time.Hour).UnixMilli()
+	}
+	bound, _, err := localrpc.BindInvocationRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bound
 }
 
 func TestQuoteInvokeAndReplay(t *testing.T) {
@@ -149,7 +199,7 @@ func TestQuoteInvokeAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation := &edgev1.InvokeRequest{
+	invocation := bindTestInvocation(t, &edgev1.InvokeRequest{
 		RequestId:          "request-0001",
 		QuoteId:            quote.Msg.QuoteId,
 		ServiceId:          "tos.ai.mock",
@@ -159,7 +209,7 @@ func TestQuoteInvokeAndReplay(t *testing.T) {
 		MaxOutputBytes:     16,
 		DeadlineUnixMillis: deadline,
 		Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
-	}
+	})
 	first, err := service.Invoke(context.Background(), connect.NewRequest(invocation))
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +266,7 @@ func TestInvokeRejectsRequestIDReuseWithDifferentPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation := &edgev1.InvokeRequest{
+	invocation := bindTestInvocation(t, &edgev1.InvokeRequest{
 		RequestId:          "request-0003",
 		QuoteId:            quote.Msg.QuoteId,
 		ServiceId:          "tos.ai.mock",
@@ -226,11 +276,13 @@ func TestInvokeRejectsRequestIDReuseWithDifferentPayload(t *testing.T) {
 		MaxOutputBytes:     16,
 		DeadlineUnixMillis: deadline,
 		Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
-	}
+	})
 	if _, err := service.Invoke(context.Background(), connect.NewRequest(invocation)); err != nil {
 		t.Fatal(err)
 	}
 	invocation.Payload = []byte("second")
+	invocation.RequestDigest = ""
+	invocation = bindTestInvocation(t, invocation)
 	if _, err := service.Invoke(context.Background(), connect.NewRequest(invocation)); err == nil ||
 		connect.CodeOf(err) != connect.CodeAlreadyExists {
 		t.Fatalf("request ID content reuse error = %v", err)
@@ -282,7 +334,7 @@ func newConfiguredFaultService(
 		}
 	}
 	taskScheduler, admissionController := newTestDependencies(t, 2)
-	config := testServiceConfig()
+	config := testServiceConfig(t)
 	config.MaxQuotes = 8
 	config.MaxInvocations = 8
 	if configure != nil {
@@ -314,12 +366,12 @@ func quotedInvocation(t *testing.T, service *Service, requestID string, deadline
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &edgev1.InvokeRequest{
+	return bindTestInvocation(t, &edgev1.InvokeRequest{
 		RequestId: requestID, QuoteId: quote.Msg.QuoteId, ServiceId: "tos.ai.mock",
 		Operation: "generate", Model: "deterministic-echo", Payload: []byte("hello"),
 		MaxOutputBytes: 16, DeadlineUnixMillis: deadline.UnixMilli(),
 		Priority: edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
-	}
+	})
 }
 
 func assertNoReservations(t *testing.T, service *Service) {
@@ -395,7 +447,12 @@ func TestReservationReleasedAfterTimeoutCancelAndDisconnect(t *testing.T) {
 		cancelResult <- err
 	}()
 	<-cancelStarted
-	response, err := cancelService.Cancel(context.Background(), connect.NewRequest(&edgev1.CancelRequest{RequestId: cancelRequest.RequestId}))
+	response, err := cancelService.Cancel(context.Background(), connect.NewRequest(
+		&edgev1.CancelRequest{
+			RequestId: cancelRequest.RequestId, TaskId: cancelRequest.TaskId,
+			RequestDigest: cancelRequest.RequestDigest,
+		},
+	))
 	if err != nil || !response.Msg.Accepted {
 		t.Fatalf("cancel response=%v err=%v", response, err)
 	}
@@ -473,7 +530,7 @@ func TestOwnerWorkerRemainsAvailableThroughInvokeFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := testServiceConfig()
+	config := testServiceConfig(t)
 	config.MaxQuotes = 8
 	config.MaxInvocations = 8
 	service, err := NewService(
@@ -501,13 +558,13 @@ func TestOwnerWorkerRemainsAvailableThroughInvokeFlow(t *testing.T) {
 		if quoteErr != nil {
 			t.Fatal(quoteErr)
 		}
-		return &edgev1.InvokeRequest{
+		return bindTestInvocation(t, &edgev1.InvokeRequest{
 			RequestId: id, QuoteId: quote.Msg.QuoteId,
 			ServiceId: capability.ServiceID, Operation: capability.Operation,
 			Model: capability.Model, Payload: []byte("hello"),
 			MaxOutputBytes: 16, DeadlineUnixMillis: deadline.UnixMilli(),
 			Priority: priority,
-		}
+		})
 	}
 	externalOne := invocation(
 		"owner-external-one", edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
@@ -681,7 +738,7 @@ func TestDynamicResourceHealthGatesNewWorkAndRecovers(t *testing.T) {
 		Ready: true, Status: "ready", GPU: "no-devices",
 	}}
 	taskScheduler, admissionController := newTestDependencies(t, 4)
-	config := testServiceConfig()
+	config := testServiceConfig(t)
 	config.ResourceHealth = resources
 	service, err := NewService(
 		config, taskScheduler, admissionController,
@@ -752,12 +809,12 @@ func TestDynamicResourceHealthGatesNewWorkAndRecovers(t *testing.T) {
 	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Fatalf("new quote while degraded error=%v", err)
 	}
-	invocation := &edgev1.InvokeRequest{
+	invocation := bindTestInvocation(t, &edgev1.InvokeRequest{
 		RequestId: quoteRequest.RequestId, QuoteId: quote.Msg.QuoteId,
 		ServiceId: quoteRequest.ServiceId, Operation: quoteRequest.Operation,
 		Model: quoteRequest.Model, Payload: []byte("hello"), MaxOutputBytes: 16,
 		DeadlineUnixMillis: deadline, Priority: quoteRequest.Priority,
-	}
+	})
 	if _, err := service.Invoke(
 		context.Background(), connect.NewRequest(invocation),
 	); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
@@ -924,7 +981,7 @@ func TestResourceHealthProviderFailsClosed(t *testing.T) {
 		Ready: true, Status: "degraded", GPU: "unknown",
 	}}
 	taskScheduler, admissionController := newTestDependencies(t, 2)
-	config := testServiceConfig()
+	config := testServiceConfig(t)
 	config.ResourceHealth = resources
 	if _, err := NewService(
 		config, taskScheduler, admissionController,

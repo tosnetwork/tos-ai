@@ -31,7 +31,9 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
+	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
+	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 )
 
 const (
@@ -64,6 +66,7 @@ func run() error {
 	var runtimeConfigPath string
 	var modelTrustConfigPath string
 	var terminalPolicyPath string
+	var taskStorePath string
 	var internalResourceProbe bool
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
@@ -88,6 +91,10 @@ func run() error {
 		&terminalPolicyPath, "terminal-policy-config", "",
 		"private administrator terminal resource policy",
 	)
+	flag.StringVar(
+		&taskStorePath, "task-store", "",
+		"private durable Worker task database",
+	)
 	flag.BoolVar(
 		&internalResourceProbe, "internal-resource-probe", false,
 		"internal resource probe subprocess",
@@ -95,6 +102,12 @@ func run() error {
 	flag.Parse()
 	if internalResourceProbe {
 		return runInternalResourceProbe(flag.Args(), os.Stdout)
+	}
+	if taskStorePath == "" {
+		taskStorePath = filepath.Join(filepath.Dir(socketPath), "worker-tasks.db")
+	}
+	if err := unixserver.PreparePrivateFileTarget(taskStorePath); err != nil {
+		return errors.New("prepare Worker task store directory")
 	}
 
 	resourceContext, cancelResources := context.WithTimeout(
@@ -151,6 +164,31 @@ func run() error {
 		cancelResources()
 		return errors.Join(err, resourceErr)
 	}
+	taskStoreConfig := localrpc.DefaultWorkerTaskStoreConfig(taskStorePath)
+	taskStoreConfig.MaxInvocationDuration = policy.MaxDeadline
+	taskStoreConfig.AllowedPriorities = []edgev1.Priority{
+		edgev1.Priority_PRIORITY_LOCAL_ASYNC,
+		edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		edgev1.Priority_PRIORITY_BACKGROUND,
+	}
+	taskStore, err := localrpc.OpenWorkerTaskStore(taskStoreConfig)
+	if err != nil {
+		resourceContext, cancelResources := context.WithTimeout(
+			context.Background(), policy.ResourceMonitor.Timeout,
+		)
+		resourceErr := resourceMonitor.Shutdown(resourceContext)
+		cancelResources()
+		closeRuntimeAdapters(runtimes.adapters)
+		shutdownContext, cancel := context.WithTimeout(
+			context.Background(), runtimes.activationCleanupTimeout(),
+		)
+		defer cancel()
+		return errors.Join(
+			errors.New("open Worker task store"),
+			resourceErr,
+			runtimes.closeRuntimeState(shutdownContext),
+		)
+	}
 	service, err := worker.NewService(worker.Config{
 		Version:             "0.1.0-dev",
 		QuoteTTL:            policy.QuoteTTL,
@@ -166,8 +204,10 @@ func run() error {
 		PriceNanoTOS:        0,
 		GPUStatus:           report.NVIDIA.Status,
 		ResourceHealth:      resourceMonitor,
+		TaskStore:           taskStore,
 	}, taskScheduler, admissionController, runtimes.adapters)
 	if err != nil {
+		taskStoreErr := taskStore.Close()
 		resourceContext, cancelResources := context.WithTimeout(
 			context.Background(), policy.ResourceMonitor.Timeout,
 		)
@@ -179,7 +219,7 @@ func run() error {
 		)
 		defer cancel()
 		return errors.Join(
-			err, resourceErr, runtimes.closeRuntimeState(shutdownContext),
+			err, taskStoreErr, resourceErr, runtimes.closeRuntimeState(shutdownContext),
 		)
 	}
 	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 10*time.Second)

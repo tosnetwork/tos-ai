@@ -178,6 +178,32 @@ func TestListenRejectsUnsafeDirectoryAndOversizedName(t *testing.T) {
 	})
 }
 
+func TestPreparePrivateFileTargetRejectsSymlinkAndInsecureFile(t *testing.T) {
+	directory := filepath.Dir(privateSocketPath(t))
+	target := filepath.Join(directory, "target.db")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "linked.db")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreparePrivateFileTarget(link); err == nil {
+		t.Fatal("state-file symlink was accepted")
+	}
+	if err := os.Chmod(target, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreparePrivateFileTarget(target); err == nil {
+		t.Fatal("insecure state-file mode was accepted")
+	}
+	if err := PreparePrivateFileTarget(
+		filepath.Join(directory, "new.db"),
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func privateSocketPath(t *testing.T) string {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "private")

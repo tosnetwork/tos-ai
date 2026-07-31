@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/pkg/admission"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -24,6 +25,7 @@ type quoteBinding struct {
 	maxOutputBytes uint64
 	deadlineMillis int64
 	priority       edgev1.Priority
+	resources      admission.Resources
 	fingerprint    [sha256.Size]byte
 }
 

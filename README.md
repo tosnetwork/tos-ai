@@ -13,7 +13,7 @@ The Go 1.24 module currently contains:
   owned mode-0600 Unix socket, with bounded connections and no public
   listener;
 - `tos-ai-cli`, with `health`, `capabilities`, `metrics`, `quote`, `invoke`,
-  and `cancel` diagnostics;
+  `get-task`, and exact-identity `cancel` diagnostics;
 - a private Prometheus text snapshot on the same Unix socket, with a 16 KiB
   response cap and only fixed method, outcome, state, limit, and resource
   labels. It does not emit request IDs, model names, endpoints, credentials,
@@ -35,9 +35,11 @@ The Go 1.24 module currently contains:
 - scheduler-level owner worker reservation, so external/background saturation
   cannot consume every execution slot while local asynchronous work may still
   use the full pool when capacity is idle;
-- idempotent Quote/Invoke handling and reservation cleanup after success,
-  failure, cancellation, deadline, disconnect, adapter failure, panic, and
-  shutdown;
+- idempotent Quote handling plus a mode-0600 bounded bbolt Worker task store
+  that durably binds task ID, request digest, retention, lifecycle, and final
+  result; exact Invoke replay cannot execute twice, `GetTask` survives a
+  worker restart, and reservation cleanup covers success, failure,
+  cancellation, deadline, disconnect, adapter failure, panic, and shutdown;
 - a signed, SHA-256-addressed model-manager library with verifying, ready,
   active, draining, failed, and absent states, bounded LRU storage, protected
   active/pinned/in-use entries, atomic artifact/metadata activation,
@@ -159,6 +161,15 @@ process lifetime; changing it requires a restart. See
 [docs/terminal-policy-config.example.json](docs/terminal-policy-config.example.json)
 and size it for the actual host and configured adapters.
 
+The worker also opens `-task-store`, a separate mode-0600 bbolt database in a
+mode-0700 non-symlink directory. When omitted it is placed beside the private
+socket as `worker-tasks.db`. It uses the protocol default of 10,000 retained
+tasks; request/result bytes, retention, execution duration, priority, and
+cleanup work retain independent protocol hard limits. The store
+contains invocation payloads and successful outputs until retention expiry,
+so production deployments should use owner-controlled encrypted storage and
+exclude it from backups that outlive task retention.
+
 The current policy schema is version 3. Versions 1 and 2 remain accepted for
 upgrade compatibility with fixed safe monitor defaults of a ten-second
 interval, five-second timeout, and two-sample failure/recovery thresholds.
@@ -174,7 +185,7 @@ re-observes scheduler affinity plus cgroup v1/v2 memory, CPU-quota, and cpuset
 constraints without returning cgroup paths. After
 the configured failure threshold, readiness reports `resources=degraded`,
 capabilities become empty, and new Quote/Invoke owners receive unavailable.
-Exact Quote retries and in-flight or completed Invoke replays preserve their
+Exact Quote retries and exact durable task observations preserve their
 idempotent result, and already-running work is not preempted. Admission
 reopens only after the configured recovery threshold. CPU-only policies treat
 a missing GPU as normal. A positive VRAM policy requires the configured GPU
@@ -313,6 +324,10 @@ thresholds from one through ten.
 - Go scheduling is not a hard real-time or physical-safety loop.
 - Quote is an expiring capability observation, not a permanent reservation.
   Invoke repeats local admission before adapter execution.
+- Every Invoke is claimed durably before executor admission. `GetTask` is
+  read-only, cancellation is bound to request ID, task ID, and request digest,
+  and an accepted/running task stranded by process failure remains uncertain;
+  it is never silently resubmitted.
 - Production admission and process-capacity values come only from a private
   startup policy and are checked against effective observed RAM/free VRAM
   before the socket is created. On Linux, host totals are reduced by
@@ -386,8 +401,9 @@ resize admission from current memory consumption, pressure signals,
 fluctuating free memory, or coordinate capacity across multiple worker
 processes.
 
-Protocol fields needed for richer resource and admission exchange are recorded
-in [docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).
+The non-streaming WorkerService v0.1 alignment and the deliberately separate
+streaming gap are recorded in
+[docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).
 
 No license has been selected for this new repository yet. Add one before the
 first public release.

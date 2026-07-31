@@ -15,7 +15,8 @@ tos-ai-worker
        +-- exclusive private socket ownership and bounded connections
        +-- bounded RPC body limits
        +-- bounded low-cardinality operational metrics
-       +-- idempotent quote/invocation replay stores
+       +-- idempotent quote cache
+       +-- bounded durable Worker task/result store
        +-- authoritative local admission reservations
        +-- bounded priority scheduler
        +-- bounded runtime/model preflight
@@ -27,23 +28,33 @@ tos-ai-worker
 
 ## Execution and reservation lifecycle
 
-Quote validates an exact configured adapter and performs a current admission
-check. It creates no durable capacity claim. Invoke validates the quote
-binding and request fingerprint, then reserves all configured RAM, VRAM, KV
-cache, context, batch, output, and execution-time budgets before scheduler
-submission and before adapter execution.
+Quote validates an exact configured adapter, requested resource upper bounds,
+and current admission. It creates no durable capacity claim. Invoke validates
+the quote binding and exact request digest, atomically claims the retained task
+identity, then reserves all committed RAM, VRAM, KV cache, context, batch,
+output, and execution-time budgets before scheduler submission and adapter
+execution.
 
 ```text
 Invoke
-  -> replay/conflict check
   -> quote binding check
+  -> durable task claim/replay/conflict check
+  -> runtime and resource recheck
   -> local reservation
   -> bounded priority queue
-  -> mark running
+  -> durable RUNNING transition
   -> adapter
   -> release reservation
-  -> bounded replay result
+  -> durable terminal result
+  -> exact Invoke replay or read-only GetTask
 ```
+
+The task database is mode 0600 under a mode-0700 non-symlink directory. Its
+count, request/result bytes, retention, expiry cleanup, and transition work are
+bounded. It stores no raw failure diagnostics. An exact retained success is
+replayed without executing the adapter; accepted/running state left by a
+process crash remains uncertain and is never automatically resubmitted.
+Cancellation must repeat the request ID, task ID, and request digest.
 
 The reservation release is idempotent and runs from both the work lifecycle
 and result cleanup. Queue cancellation, caller disconnect, deadline, adapter
@@ -415,7 +426,7 @@ bounded Unix transport and accepts at most 16 KiB of printable metrics text,
 so an unexpected local response cannot stream without limit or inject terminal
 control sequences.
 
-Metric storage has a fixed shape: five protocol methods multiplied by the
+Metric storage has a fixed shape: six protocol methods multiplied by the
 fixed Connect outcome enum, plus one in-flight gauge per method. Readiness,
 runtime counts, admission task state, configured limits, and the six fixed
 admission resource dimensions are rendered from bounded values. Counters use
@@ -462,10 +473,11 @@ Implemented:
 
 - exclusively owned private bounded Unix-socket worker and diagnostic CLI
 - fail-closed runtime selection with an explicit development mock mode
-- readiness/draining health summary without secret data
+- structured readiness plus a compact health summary without secret data
 - private bounded low-cardinality operational metrics on the existing Unix
   socket, with a bounded safe-text CLI diagnostic
-- bounded replay, scheduler, local admission, resource owner reserve, and
+- bounded durable task/replay state, read-only restart recovery, exact
+  cancellation, scheduler, local admission, resource owner reserve, and
   owner-reserved execution workers
 - graceful cancellation and shutdown resource cleanup
 - Linux host, cgroup v1/v2 effective-resource, and NVIDIA NVML probes with

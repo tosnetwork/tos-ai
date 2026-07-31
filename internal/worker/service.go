@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
+	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -41,6 +44,7 @@ const (
 var (
 	ErrShutdownIncomplete   = errors.New("worker shutdown is incomplete")
 	errResourcesUnavailable = errors.New("local resources are unavailable")
+	workerServiceIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{2,127}$`)
 )
 
 type Config struct {
@@ -59,6 +63,7 @@ type Config struct {
 	Now                 func() time.Time
 	GPUStatus           string
 	ResourceHealth      probe.ResourceHealthProvider
+	TaskStore           *localrpc.WorkerTaskStore
 }
 
 type Service struct {
@@ -71,12 +76,17 @@ type Service struct {
 	invocations    *invocationStore
 	admission      *admission.Controller
 	resourceHealth probe.ResourceHealthProvider
+	taskStore      *localrpc.WorkerTaskStore
+	lifecycleMu    sync.Mutex
 	draining       atomic.Bool
 	runtimeCtx     context.Context
 	runtimeStop    context.CancelFunc
 	runtimeWG      sync.WaitGroup
+	resultWG       sync.WaitGroup
 	stopOnce       sync.Once
+	resultWaitOnce sync.Once
 	runtimeDone    chan struct{}
+	resultDone     chan struct{}
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -101,6 +111,7 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		config.PreflightRefresh > MaxPreflightRefreshHard ||
 		config.PreflightWorkers <= 0 ||
 		config.PreflightWorkers > MaxPreflightWorkersHard ||
+		config.TaskStore == nil ||
 		!validInitialResourceHealth(config) {
 		return nil, errors.New("invalid worker configuration")
 	}
@@ -121,7 +132,9 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		invocations:    newInvocationStore(config.MaxInvocations),
 		admission:      admissionController,
 		resourceHealth: config.ResourceHealth,
+		taskStore:      config.TaskStore,
 		runtimeDone:    make(chan struct{}),
+		resultDone:     make(chan struct{}),
 	}
 	preflight := preflightConfig{
 		timeout: config.PreflightTimeout, successTTL: config.PreflightTTL,
@@ -138,6 +151,13 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		)
 		if err := airuntime.ValidateCapability(capability); err != nil {
 			return nil, errors.New("runtime adapter has invalid capability")
+		}
+		if err := validateSelector(
+			capability.ServiceID,
+			capability.Operation,
+			capability.Model,
+		); err != nil {
+			return nil, errors.New("runtime adapter capability is not protocol-safe")
 		}
 		for _, priority := range capability.AcceptedPriorities {
 			class, err := admissionClass(priority)
@@ -188,11 +208,18 @@ func preflightScanLimit(
 
 func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequest]) (*connect.Response[edgev1.HealthResponse], error) {
 	readiness := s.Readiness()
+	now := s.config.Now().UTC()
+	expires := now.Add(s.config.PreflightTTL)
 	status := fmt.Sprintf("%s;admission=%s;resources=%s;runtimes=%d/%d;binding=%s;gpu=%s;running=%d;reserved=%d",
 		readiness.Status, readiness.Admission, readiness.Resources, readiness.RuntimeReady,
 		readiness.RuntimeTotal, readiness.BindingEvidence, readiness.GPU,
 		readiness.Running, readiness.Reserved)
-	return connect.NewResponse(&edgev1.HealthResponse{Status: status, Version: s.config.Version}), nil
+	return connect.NewResponse(&edgev1.HealthResponse{
+		Status: status, Version: s.config.Version,
+		Readiness: wireReadiness(
+			readiness, s.capacityRevision(), now, expires, "tos-ai-worker",
+		),
+	}), nil
 }
 
 type Readiness struct {
@@ -343,23 +370,23 @@ func (s *Service) monitorRuntimes() {
 			return
 		case <-ticker.C:
 			s.refreshRuntimes(s.runtimeCtx, true)
+			_, _, _ = s.taskStore.Cleanup(
+				s.config.Now().UTC(), localrpc.DefaultWorkerMaxPrunePerWrite,
+			)
 		}
 	}
 }
 
 func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1.GetCapabilitiesRequest]) (*connect.Response[edgev1.GetCapabilitiesResponse], error) {
+	response := s.capabilitiesSnapshot()
 	if !s.currentResourceHealth().Ready {
-		return connect.NewResponse(&edgev1.GetCapabilitiesResponse{
-			CapacityRevision: s.capacityRevision(),
-		}), nil
+		return connect.NewResponse(response), nil
 	}
 	s.refreshRuntimes(ctx, false)
 	if !s.currentResourceHealth().Ready {
-		return connect.NewResponse(&edgev1.GetCapabilitiesResponse{
-			CapacityRevision: s.capacityRevision(),
-		}), nil
+		return connect.NewResponse(s.capabilitiesSnapshot()), nil
 	}
-	response := &edgev1.GetCapabilitiesResponse{CapacityRevision: s.capacityRevision()}
+	response = s.capabilitiesSnapshot()
 	for _, capability := range s.capabilities {
 		slot := s.runtimeSlots[adapterKey(capability.ServiceID, capability.Operation, capability.Model)]
 		if slot == nil || !slot.snapshot().ready {
@@ -374,6 +401,7 @@ func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1
 			RuntimeRevision: capability.RuntimeRevision,
 			MaxInputBytes:   capability.MaxInputBytes,
 			MaxOutputBytes:  capability.MaxOutputBytes,
+			AdmissionLimits: wireResourceLimits(capability.Admission),
 		}
 		for _, priority := range capability.AcceptedPriorities {
 			wire.AcceptedPriorities = append(wire.AcceptedPriorities, toWirePriority(priority))
@@ -381,6 +409,25 @@ func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1
 		response.Capabilities = append(response.Capabilities, wire)
 	}
 	return connect.NewResponse(response), nil
+}
+
+func (s *Service) capabilitiesSnapshot() *edgev1.GetCapabilitiesResponse {
+	now := s.config.Now().UTC()
+	expires := now.Add(s.config.PreflightTTL)
+	snapshot := s.admission.Snapshot()
+	if !s.currentResourceHealth().Ready {
+		snapshot.Accepting = false
+	}
+	revision := s.capacityRevisionFor(snapshot)
+	return &edgev1.GetCapabilitiesResponse{
+		CapacityRevision: revision,
+		Resources: wireResourceClaims(
+			snapshot, revision, now, expires, "tos-ai-worker",
+		),
+		TerminalRevision:    s.config.Version,
+		CollectedUnixMillis: now.UnixMilli(),
+		ExpiresUnixMillis:   expires.UnixMilli(),
+	}
 }
 
 func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.QuoteRequest]) (*connect.Response[edgev1.QuoteResponse], error) {
@@ -441,6 +488,9 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		return nil, invalidArgument(err)
 	}
 	resources := admissionResources(capability, input.MaxOutputBytes, deadline.Sub(now))
+	if err := validateRequestedLimits(input.RequestedLimits, resources); err != nil {
+		return nil, invalidArgument(err)
+	}
 	if err := s.admission.Check(admission.Request{
 		ID: input.RequestId, Fingerprint: fingerprint, Class: class, Resources: resources,
 	}); err != nil {
@@ -462,6 +512,7 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		CapacityRevision:  s.capacityRevision(),
 		ModelRevision:     capability.ModelDigest,
 		RuntimeRevision:   capability.RuntimeRevision,
+		CommittedLimits:   wireResourceLimits(resources),
 	}
 	s.quotes.add(quoteID, input.RequestId, quoteBinding{
 		response:       response,
@@ -472,6 +523,7 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		maxOutputBytes: input.MaxOutputBytes,
 		deadlineMillis: input.DeadlineUnixMillis,
 		priority:       input.Priority,
+		resources:      resources,
 		fingerprint:    fingerprint,
 	})
 	return connect.NewResponse(response), nil
@@ -479,6 +531,12 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 
 func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.InvokeRequest]) (*connect.Response[edgev1.InvokeResponse], error) {
 	input := request.Msg
+	bound, digest, err := localrpc.BindInvocationRequest(input)
+	if err != nil || input == nil || input.RequestDigest == "" ||
+		input.RequestDigest != digest {
+		return nil, invalidArgument(errors.New("invalid invocation request digest"))
+	}
+	input = bound
 	if err := validateID(input.RequestId); err != nil {
 		return nil, invalidArgument(err)
 	}
@@ -487,6 +545,9 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 	}
 	if err := validateID(input.QuoteId); err != nil {
 		return nil, invalidArgument(errors.New("invalid quote ID"))
+	}
+	if err := validateID(input.TaskId); err != nil {
+		return nil, invalidArgument(errors.New("invalid task ID"))
 	}
 	fingerprint, err := invocationFingerprint(input)
 	if err != nil {
@@ -518,7 +579,9 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 	if slot == nil {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("runtime is unavailable"))
 	}
-	call, owner, err := s.invocations.begin(input.RequestId, fingerprint)
+	call, owner, err := s.invocations.begin(
+		input.RequestId, input.TaskId, input.RequestDigest, fingerprint,
+	)
 	if err != nil {
 		if errors.Is(err, errInvocationConflict) {
 			return nil, connect.NewError(connect.CodeAlreadyExists, err)
@@ -526,31 +589,55 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 		return nil, connect.NewError(connect.CodeResourceExhausted, err)
 	}
 	if owner {
+		if !s.beginInvocationLifecycle() {
+			s.invocations.finish(call, nil, admission.ErrStopped)
+			return s.awaitInvocation(ctx, input.RequestId, call, true)
+		}
+		lifecycleOwned := true
+		defer func() {
+			if lifecycleOwned {
+				s.resultWG.Done()
+			}
+		}()
+		stored, disposition, claimErr := s.taskStore.ClaimTask(input, s.config.Now().UTC())
+		if claimErr != nil {
+			s.invocations.finish(call, nil, claimErr)
+			return s.awaitInvocation(ctx, input.RequestId, call, true)
+		}
+		identity, identityErr := stored.Identity()
+		if identityErr != nil {
+			s.invocations.finish(call, nil, identityErr)
+			return s.awaitInvocation(ctx, input.RequestId, call, true)
+		}
+		if disposition == localrpc.TaskReplay {
+			s.finishTaskReplay(call, stored)
+			return s.awaitInvocation(ctx, input.RequestId, call, true)
+		}
 		if _, err := slot.ensure(ctx, true); err != nil {
-			s.invocations.finish(call, nil, newPreflightFailure(err))
+			s.finishClaimedFailure(call, identity, input, newPreflightFailure(err))
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
 		if !s.currentResourceHealth().Ready {
-			s.invocations.finish(call, nil, errResourcesUnavailable)
+			s.finishClaimedFailure(call, identity, input, errResourcesUnavailable)
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
 		priority, _ := fromWirePriority(input.Priority)
 		class, classErr := admissionClass(priority)
 		if classErr != nil {
-			s.invocations.finish(call, nil, classErr)
+			s.finishClaimedFailure(call, identity, input, classErr)
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
 		capability := slot.capability
-		resources := admissionResources(capability, input.MaxOutputBytes, time.Until(time.UnixMilli(input.DeadlineUnixMillis)))
+		resources := binding.resources
 		reservation, reservationOwner, reserveErr := s.admission.Reserve(admission.Request{
 			ID: input.RequestId, Fingerprint: fingerprint, Class: class, Resources: resources,
 		})
 		if reserveErr != nil {
-			s.invocations.finish(call, nil, reserveErr)
+			s.finishClaimedFailure(call, identity, input, reserveErr)
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
 		if !reservationOwner {
-			s.invocations.finish(call, nil, admission.ErrConflict)
+			s.finishClaimedFailure(call, identity, input, admission.ErrConflict)
 			return s.awaitInvocation(ctx, input.RequestId, call, true)
 		}
 		result, submitErr := s.scheduler.Submit(scheduler.Item{
@@ -559,6 +646,11 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 			Deadline: time.UnixMilli(input.DeadlineUnixMillis),
 			Context:  ctx,
 			Work: func(runContext context.Context) (airuntime.Response, error) {
+				if _, _, err := s.taskStore.MarkTaskRunning(
+					identity, s.config.Now().UTC(),
+				); err != nil {
+					return airuntime.Response{}, err
+				}
 				if err := reservation.Start(); err != nil {
 					return airuntime.Response{}, err
 				}
@@ -574,13 +666,15 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 		})
 		if submitErr != nil {
 			reservation.Release()
-			s.invocations.finish(call, nil, submitErr)
+			s.finishClaimedFailure(call, identity, input, submitErr)
 		} else {
+			lifecycleOwned = false
 			go func() {
+				defer s.resultWG.Done()
 				defer reservation.Release()
 				outcome := <-result
 				if outcome.Err != nil {
-					s.invocations.finish(call, nil, outcome.Err)
+					s.finishClaimedFailure(call, identity, input, outcome.Err)
 					return
 				}
 				response := &edgev1.InvokeResponse{
@@ -596,11 +690,63 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 					ModelRevision:   outcome.Response.ModelRevision,
 					RuntimeRevision: outcome.Response.RuntimeRevision,
 				}
+				completedAt := s.config.Now().UTC()
+				if completedAt.After(time.UnixMilli(input.DeadlineUnixMillis)) {
+					s.finishClaimedFailure(
+						call, identity, input, context.DeadlineExceeded,
+					)
+					return
+				}
+				if _, _, err := s.taskStore.CompleteTaskSuccess(
+					identity, response, completedAt, completedAt,
+				); err != nil {
+					s.invocations.finish(call, nil, err)
+					return
+				}
 				s.invocations.finish(call, response, nil)
 			}()
 		}
 	}
 	return s.awaitInvocation(ctx, input.RequestId, call, owner)
+}
+
+func (s *Service) finishTaskReplay(call *invocation, task localrpc.StoredWorkerTask) {
+	switch task.Status {
+	case edgev1.TaskStatus_TASK_STATUS_SUCCEEDED:
+		s.invocations.finish(call, task.Result, nil)
+	case edgev1.TaskStatus_TASK_STATUS_CANCELED:
+		s.invocations.finish(call, nil, context.Canceled)
+	case edgev1.TaskStatus_TASK_STATUS_TIMED_OUT:
+		s.invocations.finish(call, nil, context.DeadlineExceeded)
+	case edgev1.TaskStatus_TASK_STATUS_FAILED:
+		s.invocations.finish(call, nil, airuntime.NewError(airuntime.ErrorInternal, nil))
+	default:
+		s.invocations.finish(call, nil, errors.New("task is already active; use GetTask"))
+	}
+}
+
+func (s *Service) finishClaimedFailure(
+	call *invocation,
+	identity localrpc.WorkerTaskIdentity,
+	request *edgev1.InvokeRequest,
+	cause error,
+) {
+	now := s.config.Now().UTC()
+	status := edgev1.TaskStatus_TASK_STATUS_FAILED
+	switch {
+	case errors.Is(cause, context.Canceled), errors.Is(cause, scheduler.ErrCanceled):
+		status = edgev1.TaskStatus_TASK_STATUS_CANCELED
+	case errors.Is(cause, context.DeadlineExceeded) &&
+		!now.Before(time.UnixMilli(request.DeadlineUnixMillis)):
+		status = edgev1.TaskStatus_TASK_STATUS_TIMED_OUT
+	}
+	if _, _, err := s.taskStore.CompleteTaskFailure(
+		identity, status, now, now,
+	); err != nil {
+		s.invocations.finish(call, nil, err)
+		return
+	}
+	s.invocations.finish(call, nil, cause)
 }
 
 func (s *Service) awaitInvocation(ctx context.Context, requestID string, call *invocation, owner bool) (*connect.Response[edgev1.InvokeResponse], error) {
@@ -638,12 +784,37 @@ func quoteFingerprint(request *edgev1.QuoteRequest) ([sha256.Size]byte, error) {
 	return sha256.Sum256(encoded), nil
 }
 
+func (s *Service) GetTask(
+	_ context.Context,
+	request *connect.Request[edgev1.GetTaskRequest],
+) (*connect.Response[edgev1.GetTaskResponse], error) {
+	response, err := s.taskStore.GetTask(request.Msg, s.config.Now().UTC())
+	if err != nil {
+		if errors.Is(err, localrpc.ErrTaskConflict) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		return nil, invalidArgument(err)
+	}
+	return connect.NewResponse(response), nil
+}
+
 func (s *Service) Cancel(_ context.Context, request *connect.Request[edgev1.CancelRequest]) (*connect.Response[edgev1.CancelResponse], error) {
+	if request.Msg == nil {
+		return nil, invalidArgument(errors.New("empty cancellation"))
+	}
 	if err := validateID(request.Msg.RequestId); err != nil {
 		return nil, invalidArgument(err)
 	}
+	if err := validateID(request.Msg.TaskId); err != nil ||
+		!validRequestDigest(request.Msg.RequestDigest) {
+		return nil, invalidArgument(errors.New("invalid cancellation identity"))
+	}
+	accepted := s.invocations.activeIdentity(
+		request.Msg.RequestId, request.Msg.TaskId, request.Msg.RequestDigest,
+	) && s.scheduler.Cancel(request.Msg.RequestId)
 	return connect.NewResponse(&edgev1.CancelResponse{
-		Accepted: s.scheduler.Cancel(request.Msg.RequestId),
+		RequestId: request.Msg.RequestId, TaskId: request.Msg.TaskId,
+		RequestDigest: request.Msg.RequestDigest, Accepted: accepted,
 	}), nil
 }
 
@@ -688,8 +859,20 @@ func validateID(id string) error {
 	return nil
 }
 
-func validateSelector(values ...string) error {
-	for _, value := range values {
+func validRequestDigest(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 ||
+		!strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil
+}
+
+func validateSelector(serviceID, operation, model string) error {
+	if !workerServiceIDPattern.MatchString(serviceID) {
+		return errors.New("invalid capability selector")
+	}
+	for _, value := range []string{operation, model} {
 		if value == "" || len(value) > airuntime.MaxCapabilityStringBytes ||
 			strings.IndexFunc(value, unicode.IsControl) >= 0 {
 			return errors.New("invalid capability selector")
@@ -763,7 +946,10 @@ func randomID() (string, error) {
 }
 
 func (s *Service) capacityRevision() string {
-	snapshot := s.admission.Snapshot()
+	return s.capacityRevisionFor(s.admission.Snapshot())
+}
+
+func (s *Service) capacityRevisionFor(snapshot admission.Snapshot) string {
 	ready := 0
 	for _, slot := range s.runtimeSlots {
 		if slot.snapshot().ready {
@@ -913,9 +1099,21 @@ func executeAdapter(
 }
 
 func (s *Service) BeginDrain() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if s.draining.CompareAndSwap(false, true) {
 		s.admission.BeginDrain()
 	}
+}
+
+func (s *Service) beginInvocationLifecycle() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.draining.Load() {
+		return false
+	}
+	s.resultWG.Add(1)
+	return true
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -926,23 +1124,46 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		resourceErr = s.resourceHealth.Shutdown(ctx)
 	}
 	schedulerErr := s.scheduler.Shutdown(ctx)
+	resultErr := s.waitInvocationResults(ctx)
 	runtimeErr := s.waitRuntimeStop(ctx)
 	s.admission.Shutdown()
-	if resourceErr != nil || schedulerErr != nil || runtimeErr != nil {
+	if resourceErr != nil || schedulerErr != nil || resultErr != nil ||
+		runtimeErr != nil {
 		return errors.Join(
-			ErrShutdownIncomplete, resourceErr, schedulerErr, runtimeErr,
+			ErrShutdownIncomplete, resourceErr, schedulerErr, resultErr,
+			runtimeErr,
 		)
 	}
 	s.closeOnce.Do(func() {
+		var closeErrors []error
 		for _, adapter := range s.adapters {
 			if closer, ok := adapter.(airuntime.AdapterCloser); ok {
 				if err := closer.Close(); err != nil {
-					s.closeErr = errors.New("close runtime adapter")
+					closeErrors = append(closeErrors, errors.New("close runtime adapter"))
 				}
 			}
 		}
+		if err := s.taskStore.Close(); err != nil {
+			closeErrors = append(closeErrors, errors.New("close Worker task store"))
+		}
+		s.closeErr = errors.Join(closeErrors...)
 	})
 	return s.closeErr
+}
+
+func (s *Service) waitInvocationResults(ctx context.Context) error {
+	s.resultWaitOnce.Do(func() {
+		go func() {
+			s.resultWG.Wait()
+			close(s.resultDone)
+		}()
+	})
+	select {
+	case <-s.resultDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) beginRuntimeStop() {

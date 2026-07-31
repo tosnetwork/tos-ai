@@ -33,24 +33,13 @@ func Listen(path string) (*Listener, error) {
 }
 
 func ListenLimited(path string, maxConnections int) (*Listener, error) {
-	if !filepath.IsAbs(path) {
-		return nil, errors.New("Unix socket path must be absolute")
-	}
 	if maxConnections <= 0 || maxConnections > MaxConnectionsHard {
 		return nil, errors.New("invalid Unix socket connection limit")
 	}
-	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return nil, fmt.Errorf("create socket directory: %w", err)
-	}
-	info, err := os.Lstat(parent)
-	if err != nil {
+	if err := PreparePrivateParent(path); err != nil {
 		return nil, err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode().Perm() != 0o700 {
-		return nil, errors.New("Unix socket directory must be a private non-symlink directory")
-	}
+	parent := filepath.Dir(path)
 	lockName, err := socketLockName(path)
 	if err != nil {
 		return nil, err
@@ -78,6 +67,50 @@ func ListenLimited(path string, maxConnections int) (*Listener, error) {
 		Listener: listener, path: path, sem: make(chan struct{}, maxConnections),
 		closed: make(chan struct{}), ownership: ownership,
 	}, nil
+}
+
+// PreparePrivateParent creates and validates the owner-private directory used
+// by a local control socket or its adjacent task database.
+func PreparePrivateParent(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("private local path must be absolute")
+	}
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create private directory: %w", err)
+	}
+	info, err := os.Lstat(parent)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm() != 0o700 || !ownedByCurrentUser(info) {
+		return errors.New("local directory must be a private non-symlink directory")
+	}
+	return nil
+}
+
+// PreparePrivateFileTarget validates an existing state-file target without
+// following a symlink. A missing target is safe for an atomic private create.
+func PreparePrivateFileTarget(path string) error {
+	if err := PreparePrivateParent(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() ||
+		info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 ||
+		!ownedByCurrentUser(info) {
+		return errors.New("local state file must be a private owned regular file")
+	}
+	return nil
+}
+
+func ownedByCurrentUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
 }
 
 func socketLockName(path string) (string, error) {

@@ -133,7 +133,7 @@ func TestForcedRuntimeRefreshConcurrencyIsBounded(t *testing.T) {
 		adapters = append(adapters, adapter)
 	}
 	taskScheduler, admissionController := newTestDependencies(t, adapterCount)
-	config := testServiceConfig()
+	config := testServiceConfig(t)
 	config.PreflightWorkers = 2
 	service, err := NewService(
 		config, taskScheduler, admissionController, adapters,
@@ -412,6 +412,8 @@ func TestInvokeAuthoritativelyRechecksBindingBeforeAdmission(t *testing.T) {
 		t.Fatalf("invoke binding change error = %v", err)
 	}
 	request.Payload = []byte("changed")
+	request.RequestDigest = ""
+	request = bindTestInvocation(t, request)
 	if _, err := service.Invoke(context.Background(), connect.NewRequest(request)); err == nil ||
 		connect.CodeOf(err) != connect.CodeAlreadyExists {
 		t.Fatalf("failed-preflight request ID conflict = %v", err)

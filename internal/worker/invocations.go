@@ -16,12 +16,14 @@ var (
 )
 
 type invocation struct {
-	id          string
-	done        chan struct{}
-	response    *edgev1.InvokeResponse
-	err         error
-	completed   bool
-	fingerprint [sha256.Size]byte
+	id            string
+	taskID        string
+	requestDigest string
+	done          chan struct{}
+	response      *edgev1.InvokeResponse
+	err           error
+	completed     bool
+	fingerprint   [sha256.Size]byte
 }
 
 type invocationStore struct {
@@ -39,7 +41,12 @@ func newInvocationStore(maximum int) *invocationStore {
 	}
 }
 
-func (s *invocationStore) begin(id string, fingerprint [sha256.Size]byte) (*invocation, bool, error) {
+func (s *invocationStore) begin(
+	id string,
+	taskID string,
+	requestDigest string,
+	fingerprint [sha256.Size]byte,
+) (*invocation, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if element := s.records[id]; element != nil {
@@ -63,9 +70,28 @@ func (s *invocationStore) begin(id string, fingerprint [sha256.Size]byte) (*invo
 		delete(s.records, victim.Value.(*invocation).id)
 		s.order.Remove(victim)
 	}
-	call := &invocation{id: id, done: make(chan struct{}), fingerprint: fingerprint}
+	call := &invocation{
+		id: id, taskID: taskID, requestDigest: requestDigest,
+		done: make(chan struct{}), fingerprint: fingerprint,
+	}
 	s.records[id] = s.order.PushBack(call)
 	return call, true, nil
+}
+
+func (s *invocationStore) activeIdentity(
+	id string,
+	taskID string,
+	requestDigest string,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	element := s.records[id]
+	if element == nil {
+		return false
+	}
+	call := element.Value.(*invocation)
+	return !call.completed && call.taskID == taskID &&
+		call.requestDigest == requestDigest
 }
 
 func (s *invocationStore) find(id string, fingerprint [sha256.Size]byte) (*invocation, bool, error) {
