@@ -70,6 +70,7 @@ func run() error {
 	var taskStorePath string
 	var taskStoreMaxTasks int
 	var taskStoreOwnerReserved int
+	var taskStoreMaxRetainedBytes uint64
 	var internalResourceProbe bool
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
@@ -109,6 +110,12 @@ func run() error {
 		"task-store-owner-reserved",
 		defaultTaskOwnerReserve,
 		"durable task slots reserved for owner-local work",
+	)
+	flag.Uint64Var(
+		&taskStoreMaxRetainedBytes,
+		"task-store-max-retained-bytes",
+		localrpc.DefaultWorkerMaxRetainedBytes,
+		"maximum conservative retained-byte reservations",
 	)
 	flag.BoolVar(
 		&internalResourceProbe, "internal-resource-probe", false,
@@ -182,6 +189,7 @@ func run() error {
 	taskStoreConfig := localrpc.DefaultWorkerTaskStoreConfig(taskStorePath)
 	taskStoreConfig.MaxTasks = taskStoreMaxTasks
 	taskStoreConfig.OwnerReservedTasks = taskStoreOwnerReserved
+	taskStoreConfig.MaxRetainedBytes = taskStoreMaxRetainedBytes
 	taskStoreConfig.MaxInvocationDuration = policy.MaxDeadline
 	taskStoreConfig.AllowedPriorities = []edgev1.Priority{
 		edgev1.Priority_PRIORITY_LOCAL_ASYNC,

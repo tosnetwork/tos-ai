@@ -238,23 +238,31 @@ func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequ
 }
 
 type Readiness struct {
-	Status                string
-	Admission             string
-	Resources             string
-	RuntimeReady          int
-	RuntimeTotal          int
-	BindingEvidence       string
-	GPU                   string
-	TaskStore             string
-	TaskStoreReason       string
-	TaskSlots             uint64
-	TaskCapacity          uint64
-	TaskOwnerReserved     uint64
-	TaskOwnerTasks        uint64
-	TaskExternalTasks     uint64
-	TaskAvailableExternal uint64
-	Running               int
-	Reserved              int
+	Status                     string
+	Admission                  string
+	Resources                  string
+	RuntimeReady               int
+	RuntimeTotal               int
+	BindingEvidence            string
+	GPU                        string
+	TaskStore                  string
+	TaskStoreReason            string
+	TaskSlots                  uint64
+	TaskCapacity               uint64
+	TaskOwnerReserved          uint64
+	TaskOwnerTasks             uint64
+	TaskExternalTasks          uint64
+	TaskAvailableExternal      uint64
+	TaskReservedBytes          uint64
+	TaskByteCapacity           uint64
+	TaskAvailableBytes         uint64
+	TaskMaximumBytes           uint64
+	TaskOwnerReservedBytes     uint64
+	TaskOwnerBytes             uint64
+	TaskExternalBytes          uint64
+	TaskAvailableExternalBytes uint64
+	Running                    int
+	Reserved                   int
 }
 
 func (s *Service) Readiness() Readiness {
@@ -323,25 +331,41 @@ func (s *Service) readiness(
 		RuntimeTotal: len(s.runtimeSlots), BindingEvidence: bindingEvidence,
 		GPU: gpu, TaskStore: tasks.Status, TaskStoreReason: tasks.Reason,
 		TaskSlots: tasks.Tasks, TaskCapacity: tasks.Capacity,
-		TaskOwnerReserved:     tasks.OwnerReserved,
-		TaskOwnerTasks:        tasks.OwnerTasks,
-		TaskExternalTasks:     tasks.ExternalTasks,
-		TaskAvailableExternal: tasks.AvailableExternal,
-		Running:               snapshot.Running, Reserved: snapshot.Reserved,
+		TaskOwnerReserved:          tasks.OwnerReserved,
+		TaskOwnerTasks:             tasks.OwnerTasks,
+		TaskExternalTasks:          tasks.ExternalTasks,
+		TaskAvailableExternal:      tasks.AvailableExternal,
+		TaskReservedBytes:          tasks.ReservedBytes,
+		TaskByteCapacity:           tasks.ByteCapacity,
+		TaskAvailableBytes:         tasks.AvailableBytes,
+		TaskMaximumBytes:           tasks.MaximumTaskBytes,
+		TaskOwnerReservedBytes:     tasks.OwnerReservedBytes,
+		TaskOwnerBytes:             tasks.OwnerBytes,
+		TaskExternalBytes:          tasks.ExternalBytes,
+		TaskAvailableExternalBytes: tasks.AvailableExternalBytes,
+		Running:                    snapshot.Running, Reserved: snapshot.Reserved,
 	}
 }
 
 type taskStoreCapacity struct {
-	Tasks             uint64
-	Capacity          uint64
-	Available         uint64
-	OwnerReserved     uint64
-	OwnerTasks        uint64
-	ExternalTasks     uint64
-	AvailableExternal uint64
-	Ready             bool
-	Status            string
-	Reason            string
+	Tasks                  uint64
+	Capacity               uint64
+	Available              uint64
+	OwnerReserved          uint64
+	OwnerTasks             uint64
+	ExternalTasks          uint64
+	AvailableExternal      uint64
+	ReservedBytes          uint64
+	ByteCapacity           uint64
+	AvailableBytes         uint64
+	MaximumTaskBytes       uint64
+	OwnerReservedBytes     uint64
+	OwnerBytes             uint64
+	ExternalBytes          uint64
+	AvailableExternalBytes uint64
+	Ready                  bool
+	Status                 string
+	Reason                 string
 }
 
 func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
@@ -367,7 +391,35 @@ func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
 		stats.OwnerReserved > stats.Capacity ||
 		stats.OwnerTasks > stats.Tasks ||
 		stats.ExternalTasks != stats.Tasks-stats.OwnerTasks ||
-		stats.AvailableExternal != expectedExternal {
+		stats.AvailableExternal != expectedExternal ||
+		stats.ByteCapacity == 0 ||
+		stats.ReservedBytes > stats.ByteCapacity ||
+		stats.AvailableBytes != stats.ByteCapacity-stats.ReservedBytes ||
+		stats.MaximumTaskBytes == 0 ||
+		stats.MaximumTaskBytes > stats.ByteCapacity ||
+		stats.OwnerReservedBytes > stats.ByteCapacity ||
+		stats.OwnerBytes > stats.ReservedBytes ||
+		stats.ExternalBytes != stats.ReservedBytes-stats.OwnerBytes ||
+		stats.AvailableExternalBytes > stats.AvailableBytes {
+		return output
+	}
+	if stats.OwnerReserved != 0 &&
+		stats.MaximumTaskBytes > ^uint64(0)/stats.OwnerReserved {
+		return output
+	}
+	if stats.OwnerReservedBytes != stats.OwnerReserved*stats.MaximumTaskBytes {
+		return output
+	}
+	externalByteCapacity := stats.ByteCapacity - stats.OwnerReservedBytes
+	expectedExternalBytes := uint64(0)
+	if stats.ExternalBytes < externalByteCapacity &&
+		stats.ReservedBytes < stats.ByteCapacity {
+		expectedExternalBytes = min(
+			externalByteCapacity-stats.ExternalBytes,
+			stats.ByteCapacity-stats.ReservedBytes,
+		)
+	}
+	if stats.AvailableExternalBytes != expectedExternalBytes {
 		return output
 	}
 	output.Tasks = stats.Tasks
@@ -377,7 +429,15 @@ func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
 	output.OwnerTasks = stats.OwnerTasks
 	output.ExternalTasks = stats.ExternalTasks
 	output.AvailableExternal = stats.AvailableExternal
-	if output.Available == 0 {
+	output.ReservedBytes = stats.ReservedBytes
+	output.ByteCapacity = stats.ByteCapacity
+	output.AvailableBytes = stats.AvailableBytes
+	output.MaximumTaskBytes = stats.MaximumTaskBytes
+	output.OwnerReservedBytes = stats.OwnerReservedBytes
+	output.OwnerBytes = stats.OwnerBytes
+	output.ExternalBytes = stats.ExternalBytes
+	output.AvailableExternalBytes = stats.AvailableExternalBytes
+	if output.Available == 0 || output.AvailableBytes < output.MaximumTaskBytes {
 		output.Status = "unavailable"
 		output.Reason = "capacity_exhausted"
 		return output
@@ -393,9 +453,11 @@ func (capacity taskStoreCapacity) availableFor(priority edgev1.Priority) bool {
 		return false
 	}
 	if priority == edgev1.Priority_PRIORITY_LOCAL_ASYNC {
-		return capacity.Available != 0
+		return capacity.Available != 0 &&
+			capacity.AvailableBytes >= capacity.MaximumTaskBytes
 	}
-	return capacity.AvailableExternal != 0
+	return capacity.AvailableExternal != 0 &&
+		capacity.AvailableExternalBytes >= capacity.MaximumTaskBytes
 }
 
 // RefreshRuntimes performs an explicitly bounded refresh. Failures update
@@ -489,6 +551,11 @@ func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1
 	if !accepting {
 		return connect.NewResponse(response), nil
 	}
+	taskCapacity := s.currentTaskStoreCapacity()
+	if !taskCapacity.availableFor(edgev1.Priority_PRIORITY_EXTERNAL_SERVICE) {
+		response.Capabilities = nil
+		return connect.NewResponse(response), nil
+	}
 	for _, capability := range s.capabilities {
 		slot := s.runtimeSlots[adapterKey(capability.ServiceID, capability.Operation, capability.Model)]
 		if slot == nil || !slot.snapshot().ready {
@@ -505,7 +572,9 @@ func (s *Service) GetCapabilities(ctx context.Context, _ *connect.Request[edgev1
 			RuntimeRevision: capability.RuntimeRevision,
 			MaxInputBytes:   capability.MaxInputBytes,
 			MaxOutputBytes:  capability.MaxOutputBytes,
-			AdmissionLimits: wireCommittedLimits(capabilityResources),
+			AdmissionLimits: wireCommittedLimits(
+				capabilityResources, taskCapacity.MaximumTaskBytes,
+			),
 		}
 		for _, priority := range capability.AcceptedPriorities {
 			wire.AcceptedPriorities = append(wire.AcceptedPriorities, toWirePriority(priority))
@@ -618,7 +687,9 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		return nil, invalidArgument(err)
 	}
 	resources := admissionResources(capability, input.MaxOutputBytes, deadline.Sub(now))
-	if err := validateRequestedLimits(input.RequestedLimits, resources); err != nil {
+	if err := validateRequestedLimits(
+		input.RequestedLimits, resources, taskCapacity.MaximumTaskBytes,
+	); err != nil {
 		return nil, invalidArgument(err)
 	}
 	if err := s.admission.Check(admission.Request{
@@ -642,7 +713,9 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		CapacityRevision:  s.capacityRevision(),
 		ModelRevision:     capability.ModelDigest,
 		RuntimeRevision:   capability.RuntimeRevision,
-		CommittedLimits:   wireCommittedLimits(resources),
+		CommittedLimits: wireCommittedLimits(
+			resources, taskCapacity.MaximumTaskBytes,
+		),
 	}
 	s.quotes.add(quoteID, input.RequestId, quoteBinding{
 		response:       response,
@@ -1097,10 +1170,11 @@ func (s *Service) capacityRevisionFor(
 		resourcesReady = 1
 	}
 	return fmt.Sprintf(
-		"tier1-%d-%d-%d-%d-%d-%d-%d-%d-%d",
+		"tier1-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d-%d",
 		resourcesReady, ready, snapshot.Running, snapshot.Reserved,
 		tasks.Tasks, tasks.Capacity, tasks.OwnerReserved,
-		tasks.OwnerTasks, tasks.AvailableExternal,
+		tasks.OwnerTasks, tasks.AvailableExternal, tasks.ReservedBytes,
+		tasks.OwnerBytes, tasks.AvailableExternalBytes,
 	)
 }
 

@@ -2,10 +2,11 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `c1d5f2518386`, which includes the
-priority-aware task-store statistics and atomic owner-reserved slot enforcement
-used below. Protobuf definitions remain owned by `tos-protocol`; this repository
-does not copy or fork them.
+`tos-ai` pins `tos-protocol` revision `9a4d35269eb3`, which includes the
+priority-aware task-store statistics, atomic owner-reserved slot enforcement,
+retained-byte counters, and `storage.task_bytes` contract used below. Protobuf
+definitions remain owned by `tos-protocol`; this repository does not copy or
+fork them.
 
 ## Implemented coverage
 
@@ -16,9 +17,11 @@ does not copy or fork them.
 - RAM, VRAM, KV cache, context, batch, output, execution time, and durable task
   slots use the exact identifiers and units defined by the protocol alignment
   contract.
-- `storage.task_slots` reports only bounded logical count/capacity. Every
-  capability and Quote commits one slot. Its owner-reserved subset is limited
-  to `LOCAL_ASYNC`; external routing stops at that boundary while owner-local
+- `storage.task_slots` reports bounded logical count/capacity, while
+  `storage.task_bytes` reports conservative retained-byte reservations. Every
+  capability and Quote commits one slot plus the maximum per-task byte charge.
+  Owner-reserved slots imply maximum-sized owner byte reservations limited to
+  `LOCAL_ASYNC`; external routing stops at either boundary while owner-local
   Quote/Invoke remains available and the atomic durable claim remains
   authoritative.
 - Quote treats `requested_limits` as caller-accepted upper bounds, rejects

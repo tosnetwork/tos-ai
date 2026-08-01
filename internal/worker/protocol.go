@@ -18,6 +18,7 @@ const (
 	resourceOutput    = "runtime.output"
 	resourceExecution = "runtime.execution"
 	resourceTaskSlots = "storage.task_slots"
+	resourceTaskBytes = "storage.task_bytes"
 )
 
 type resourceDimension struct {
@@ -84,13 +85,21 @@ func wireResourceLimits(resources admission.Resources) []*edgev1.ResourceLimit {
 	return limits
 }
 
-func wireCommittedLimits(resources admission.Resources) []*edgev1.ResourceLimit {
+func wireCommittedLimits(
+	resources admission.Resources,
+	maximumTaskBytes uint64,
+) []*edgev1.ResourceLimit {
 	limits := wireResourceLimits(resources)
-	return append(limits, &edgev1.ResourceLimit{
-		Id:       resourceTaskSlots,
-		Unit:     edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
-		Quantity: 1,
-	})
+	return append(limits,
+		&edgev1.ResourceLimit{
+			Id: resourceTaskSlots, Unit: edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
+			Quantity: 1,
+		},
+		&edgev1.ResourceLimit{
+			Id: resourceTaskBytes, Unit: edgev1.ResourceUnit_RESOURCE_UNIT_BYTES,
+			Quantity: maximumTaskBytes,
+		},
+	)
 }
 
 // validateRequestedLimits treats caller limits as upper bounds. The worker
@@ -99,11 +108,15 @@ func wireCommittedLimits(resources admission.Resources) []*edgev1.ResourceLimit 
 func validateRequestedLimits(
 	requested []*edgev1.ResourceLimit,
 	actual admission.Resources,
+	maximumTaskBytes uint64,
 ) error {
 	if len(requested) == 0 {
 		return nil
 	}
-	if len(requested) > len(aiResourceDimensions)+1 {
+	if maximumTaskBytes == 0 {
+		return errors.New("invalid durable task byte reservation")
+	}
+	if len(requested) > len(aiResourceDimensions)+2 {
 		return errors.New("too many requested resource limits")
 	}
 	actualLimits := make(map[string]*edgev1.ResourceLimit, len(aiResourceDimensions))
@@ -114,6 +127,10 @@ func validateRequestedLimits(
 		Id:       resourceTaskSlots,
 		Unit:     edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
 		Quantity: 1,
+	}
+	actualLimits[resourceTaskBytes] = &edgev1.ResourceLimit{
+		Id: resourceTaskBytes, Unit: edgev1.ResourceUnit_RESOURCE_UNIT_BYTES,
+		Quantity: maximumTaskBytes,
 	}
 	seen := make(map[string]struct{}, len(requested))
 	for _, limit := range requested {
@@ -143,7 +160,7 @@ func wireResourceClaims(
 	expires time.Time,
 	issuer string,
 ) []*edgev1.ResourceClaim {
-	claims := make([]*edgev1.ResourceClaim, 0, len(aiResourceDimensions)+1)
+	claims := make([]*edgev1.ResourceClaim, 0, len(aiResourceDimensions)+2)
 	for _, dimension := range aiResourceDimensions {
 		total := dimension.quantity(snapshot.Capacity)
 		if total == 0 {
@@ -172,6 +189,24 @@ func wireResourceClaims(
 		Unit:          edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
 		Total:         tasks.Capacity, OwnerReserved: tasks.OwnerReserved,
 		AvailableExternal: taskAvailability,
+		Revision:          revision,
+		Evidence: readinessEvidence(
+			edgev1.EvidenceLevel_EVIDENCE_LEVEL_DECLARED,
+			now,
+			expires,
+			issuer,
+		),
+	})
+	taskByteAvailability := tasks.AvailableExternalBytes
+	if !snapshot.Accepting {
+		taskByteAvailability = 0
+	}
+	claims = append(claims, &edgev1.ResourceClaim{
+		Id:            resourceTaskBytes,
+		ResourceClass: edgev1.ResourceClass_RESOURCE_CLASS_STORAGE,
+		Unit:          edgev1.ResourceUnit_RESOURCE_UNIT_BYTES,
+		Total:         tasks.ByteCapacity, OwnerReserved: tasks.OwnerReservedBytes,
+		AvailableExternal: taskByteAvailability,
 		Revision:          revision,
 		Evidence: readinessEvidence(
 			edgev1.EvidenceLevel_EVIDENCE_LEVEL_DECLARED,

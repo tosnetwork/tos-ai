@@ -207,6 +207,16 @@ func safeMetricsSnapshot(
 			readiness.TaskSlots-readiness.TaskOwnerTasks &&
 		readiness.TaskAvailableExternal <=
 			readiness.TaskCapacity-readiness.TaskSlots &&
+		readiness.TaskReservedBytes <= readiness.TaskByteCapacity &&
+		readiness.TaskAvailableBytes ==
+			readiness.TaskByteCapacity-readiness.TaskReservedBytes &&
+		readiness.TaskMaximumBytes > 0 &&
+		readiness.TaskMaximumBytes <= readiness.TaskByteCapacity &&
+		readiness.TaskOwnerReservedBytes <= readiness.TaskByteCapacity &&
+		readiness.TaskOwnerBytes <= readiness.TaskReservedBytes &&
+		readiness.TaskExternalBytes ==
+			readiness.TaskReservedBytes-readiness.TaskOwnerBytes &&
+		readiness.TaskAvailableExternalBytes <= readiness.TaskAvailableBytes &&
 		readiness.TaskCapacity > 0
 	return readiness, snapshot, recovery, valid
 }
@@ -316,6 +326,70 @@ func (m *OperationalMetrics) render(
 	encoded = appendMetric(
 		encoded, "tos_ai_worker_task_store_available_external",
 		readiness.TaskAvailableExternal,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_reserved_bytes", "gauge",
+		"Conservative retained bytes reserved by durable tasks.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_reserved_bytes",
+		readiness.TaskReservedBytes,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_byte_capacity", "gauge",
+		"Maximum conservative retained-byte reservations.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_byte_capacity",
+		readiness.TaskByteCapacity,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_available_bytes", "gauge",
+		"Retained-byte capacity currently available to all work.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_available_bytes",
+		readiness.TaskAvailableBytes,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_maximum_task_bytes", "gauge",
+		"Conservative maximum retained-byte reservation for one task.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_maximum_task_bytes",
+		readiness.TaskMaximumBytes,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_owner_reserved_bytes", "gauge",
+		"Retained-byte capacity reserved for owner-local work.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_owner_reserved_bytes",
+		readiness.TaskOwnerReservedBytes,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_owner_bytes", "gauge",
+		"Retained bytes reserved by owner-local durable tasks.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_owner_bytes",
+		readiness.TaskOwnerBytes,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_external_bytes", "gauge",
+		"Retained bytes reserved by non-owner durable tasks.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_external_bytes",
+		readiness.TaskExternalBytes,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_available_external_bytes", "gauge",
+		"Retained-byte capacity currently available to non-owner work.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_available_external_bytes",
+		readiness.TaskAvailableExternalBytes,
 	)
 	encoded = appendMetricHeader(
 		encoded, "tos_ai_worker_startup_interrupted_tasks_failed_total", "counter",

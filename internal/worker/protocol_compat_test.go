@@ -21,6 +21,7 @@ import (
 )
 
 func TestAIResourceDimensionsAndRequestedUpperBounds(t *testing.T) {
+	const maximumTaskBytes = 100
 	resources := admission.Resources{
 		RAMBytes: 1, VRAMBytes: 2, KVCacheBytes: 3,
 		ContextTokens: 4, BatchSize: 5, OutputBytes: 6,
@@ -40,14 +41,20 @@ func TestAIResourceDimensionsAndRequestedUpperBounds(t *testing.T) {
 	if err := validateRequestedLimits([]*edgev1.ResourceLimit{{
 		Id: resourceRAM, Unit: edgev1.ResourceUnit_RESOURCE_UNIT_BYTES,
 		Quantity: 2,
-	}}, resources); err != nil {
+	}}, resources, maximumTaskBytes); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateRequestedLimits([]*edgev1.ResourceLimit{{
 		Id:       resourceTaskSlots,
 		Unit:     edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
 		Quantity: 1,
-	}}, resources); err != nil {
+	}}, resources, maximumTaskBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequestedLimits([]*edgev1.ResourceLimit{{
+		Id: resourceTaskBytes, Unit: edgev1.ResourceUnit_RESOURCE_UNIT_BYTES,
+		Quantity: maximumTaskBytes,
+	}}, resources, maximumTaskBytes); err != nil {
 		t.Fatal(err)
 	}
 	for name, requested := range map[string][]*edgev1.ResourceLimit{
@@ -69,7 +76,9 @@ func TestAIResourceDimensionsAndRequestedUpperBounds(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateRequestedLimits(requested, resources); err == nil {
+			if err := validateRequestedLimits(
+				requested, resources, maximumTaskBytes,
+			); err == nil {
 				t.Fatal("invalid requested resource limits were accepted")
 			}
 		})
@@ -128,7 +137,7 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 		capabilities.Msg.CollectedUnixMillis <= 0 ||
 		capabilities.Msg.ExpiresUnixMillis <= capabilities.Msg.CollectedUnixMillis ||
 		len(capabilities.Msg.Capabilities) != 1 ||
-		len(capabilities.Msg.Resources) != len(aiResourceDimensions)+1 {
+		len(capabilities.Msg.Resources) != len(aiResourceDimensions)+2 {
 		t.Fatalf("capabilities=%v err=%v", capabilities, err)
 	}
 	for _, claim := range capabilities.Msg.Resources {
@@ -138,13 +147,21 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 		}
 	}
 	taskSlots := resourceClaimByID(capabilities.Msg.Resources, resourceTaskSlots)
+	taskBytes := resourceClaimByID(capabilities.Msg.Resources, resourceTaskBytes)
 	if taskSlots.Total != 64 || taskSlots.AvailableExternal != 64 ||
+		taskBytes.Total != localrpc.DefaultWorkerMaxRetainedBytes ||
+		taskBytes.AvailableExternal != localrpc.DefaultWorkerMaxRetainedBytes ||
+		taskBytes.Unit != edgev1.ResourceUnit_RESOURCE_UNIT_BYTES ||
 		taskSlots.Evidence.Level !=
 			edgev1.EvidenceLevel_EVIDENCE_LEVEL_DECLARED ||
 		limitByID(
 			capabilities.Msg.Capabilities[0].AdmissionLimits,
 			resourceTaskSlots,
 		).Quantity != 1 ||
+		limitByID(
+			capabilities.Msg.Capabilities[0].AdmissionLimits,
+			resourceTaskBytes,
+		).Quantity != taskBytesForTest(t) ||
 		limitByID(
 			capabilities.Msg.Capabilities[0].AdmissionLimits,
 			resourceOutput,
@@ -183,7 +200,9 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 	}
 	if limitByID(quote.Msg.CommittedLimits, resourceRAM).Quantity != 1<<20 ||
 		limitByID(quote.Msg.CommittedLimits, resourceOutput).Quantity != 16 ||
-		limitByID(quote.Msg.CommittedLimits, resourceTaskSlots).Quantity != 1 {
+		limitByID(quote.Msg.CommittedLimits, resourceTaskSlots).Quantity != 1 ||
+		limitByID(quote.Msg.CommittedLimits, resourceTaskBytes).Quantity !=
+			taskBytesForTest(t) {
 		t.Fatalf("committed limits=%v", quote.Msg.CommittedLimits)
 	}
 	invalid := &edgev1.QuoteRequest{
@@ -359,9 +378,12 @@ func TestTaskStoreOwnerReserveKeepsLocalQuoteAvailable(t *testing.T) {
 		context.Background(), connect.NewRequest(&edgev1.GetCapabilitiesRequest{}),
 	)
 	taskSlots := resourceClaimByID(capabilities.Msg.Resources, resourceTaskSlots)
+	taskBytes := resourceClaimByID(capabilities.Msg.Resources, resourceTaskBytes)
 	if err != nil || len(capabilities.Msg.Capabilities) != 0 ||
 		taskSlots.Total != 3 || taskSlots.OwnerReserved != 1 ||
-		taskSlots.AvailableExternal != 0 {
+		taskSlots.AvailableExternal != 0 ||
+		taskBytes.OwnerReserved != taskBytesForTest(t) ||
+		taskBytes.AvailableExternal != 0 {
 		t.Fatalf("owner-reserved capabilities=%v err=%v", capabilities, err)
 	}
 	if _, err := service.Quote(
@@ -406,6 +428,56 @@ func TestTaskStoreOwnerReserveKeepsLocalQuoteAvailable(t *testing.T) {
 	}
 }
 
+func TestTaskStoreByteBudgetSuppressesRoutingBeforeSlotCapacity(t *testing.T) {
+	maximumTaskBytes := taskBytesForTest(t)
+	service := newTestServiceAtStorageCapacity(
+		t,
+		filepath.Join(t.TempDir(), "worker-tasks.db"),
+		3,
+		0,
+		maximumTaskBytes,
+	)
+	service.RefreshRuntimes(context.Background())
+	deadline := time.Now().Add(time.Minute)
+	invocation := quotedInvocation(
+		t, service, "byte-budget-first", deadline,
+	)
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(invocation),
+	); err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := service.GetCapabilities(
+		context.Background(), connect.NewRequest(&edgev1.GetCapabilitiesRequest{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskSlots := resourceClaimByID(capabilities.Msg.Resources, resourceTaskSlots)
+	taskBytes := resourceClaimByID(capabilities.Msg.Resources, resourceTaskBytes)
+	if len(capabilities.Msg.Capabilities) != 0 || taskSlots.Total != 3 ||
+		taskSlots.AvailableExternal != 0 || taskBytes.Total != maximumTaskBytes ||
+		taskBytes.AvailableExternal != 0 {
+		t.Fatalf("byte-exhausted capabilities=%v", capabilities.Msg)
+	}
+	stats, err := service.taskStore.Stats()
+	if err != nil || stats.Tasks != 1 || stats.Available != 2 ||
+		stats.AvailableBytes >= stats.MaximumTaskBytes {
+		t.Fatalf("byte-exhausted stats=%#v err=%v", stats, err)
+	}
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "byte-budget-blocked", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo",
+			InputBytes: 5, MaxOutputBytes: 16,
+			DeadlineUnixMillis: deadline.UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		}),
+	); err == nil || connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("byte-exhausted Quote error=%v", err)
+	}
+}
+
 func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 	service := newTestService(t)
 	service.RefreshRuntimes(context.Background())
@@ -442,7 +514,7 @@ func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 	}
 	capabilities, err := client.GetCapabilities(context.Background())
 	if err != nil || len(capabilities.Capabilities) != 1 ||
-		len(capabilities.Resources) != len(aiResourceDimensions)+1 {
+		len(capabilities.Resources) != len(aiResourceDimensions)+2 {
 		t.Fatalf("validated capabilities=%v err=%v", capabilities, err)
 	}
 	now := time.Now().UTC()
@@ -550,6 +622,34 @@ func newTestServiceAtTaskCapacity(
 	return service
 }
 
+func newTestServiceAtStorageCapacity(
+	t *testing.T,
+	path string,
+	maxTasks int,
+	ownerReserved int,
+	maxRetainedBytes uint64,
+) *Service {
+	t.Helper()
+	scheduler, controller := newTestDependencies(t, 4)
+	service, err := NewService(
+		testServiceConfigAtStorageCapacity(
+			t, path, maxTasks, ownerReserved, maxRetainedBytes,
+		),
+		scheduler,
+		controller,
+		[]airuntime.Adapter{mock.New(0)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = service.Shutdown(ctx)
+	})
+	return service
+}
+
 func resourceClaimByID(
 	claims []*edgev1.ResourceClaim,
 	id string,
@@ -572,4 +672,15 @@ func limitByID(
 		}
 	}
 	return &edgev1.ResourceLimit{}
+}
+
+func taskBytesForTest(t *testing.T) uint64 {
+	t.Helper()
+	value, err := localrpc.WorkerTaskMaximumReservationBytes(
+		localrpc.DefaultWorkerMaxMessageBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
 }

@@ -16,6 +16,7 @@ import (
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	edgev1connect "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
+	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 )
 
 func TestOperationalMetricsAreBoundedAndLowCardinality(t *testing.T) {
@@ -61,6 +62,12 @@ func TestOperationalMetricsAreBoundedAndLowCardinality(t *testing.T) {
 		t.Fatalf("invalid bounded metrics response: headers=%v bytes=%d",
 			response.Header(), len(body))
 	}
+	maximumTaskBytes, err := localrpc.WorkerTaskMaximumReservationBytes(
+		localrpc.DefaultWorkerMaxMessageBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, expected := range []string{
 		"tos_ai_worker_ready 1\n",
 		"tos_ai_worker_task_store_ready 1\n",
@@ -71,6 +78,18 @@ func TestOperationalMetricsAreBoundedAndLowCardinality(t *testing.T) {
 		"tos_ai_worker_task_store_owner_tasks 0\n",
 		"tos_ai_worker_task_store_external_tasks 0\n",
 		"tos_ai_worker_task_store_available_external 64\n",
+		"tos_ai_worker_task_store_reserved_bytes 0\n",
+		"tos_ai_worker_task_store_byte_capacity " +
+			strconv.FormatUint(localrpc.DefaultWorkerMaxRetainedBytes, 10) + "\n",
+		"tos_ai_worker_task_store_available_bytes " +
+			strconv.FormatUint(localrpc.DefaultWorkerMaxRetainedBytes, 10) + "\n",
+		"tos_ai_worker_task_store_maximum_task_bytes " +
+			strconv.FormatUint(maximumTaskBytes, 10) + "\n",
+		"tos_ai_worker_task_store_owner_reserved_bytes 0\n",
+		"tos_ai_worker_task_store_owner_bytes 0\n",
+		"tos_ai_worker_task_store_external_bytes 0\n",
+		"tos_ai_worker_task_store_available_external_bytes " +
+			strconv.FormatUint(localrpc.DefaultWorkerMaxRetainedBytes, 10) + "\n",
 		"tos_ai_worker_startup_interrupted_tasks_failed_total 0\n",
 		"tos_ai_worker_startup_expired_tasks_removed_total 0\n",
 		`tos_ai_worker_runtimes{state="ready"} 1` + "\n",

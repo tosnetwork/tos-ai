@@ -168,16 +168,20 @@ socket as `worker-tasks.db`. It uses the protocol default of 10,000 retained
 tasks; `-task-store-max-tasks` may select a stricter positive bound up to the
 one-million hard ceiling. `-task-store-owner-reserved` defaults to 64 and
 reserves those durable identities for `LOCAL_ASYNC`; external-service and
-background work cannot consume them. The reserve must not exceed total task
-capacity. Request/result bytes, retention, execution duration, priority, and
-cleanup work retain independent protocol hard limits. The store
+background work cannot consume them. `-task-store-max-retained-bytes` defaults
+to 8 GiB and bounds conservative live reservations. Claim atomically charges
+the encoded request, a maximum result, maximum metadata, and fixed logical
+key/index bytes until retention cleanup. Owner-reserved slots imply the same
+number of maximum-sized owner byte reservations. The reserves must fit their
+total capacities. Request/result bytes, retention, execution duration,
+priority, and cleanup work retain independent protocol hard limits. The store
 contains invocation payloads and successful outputs until retention expiry,
 so production deployments should use owner-controlled encrypted storage and
 exclude it from backups that outlive task retention.
-The current count and per-message bounds are not an exact bbolt file-size
-ceiling because deleted pages remain allocated. Production deployments must
-also use a dedicated filesystem/project quota and free-space alerting until
-the planned transactional logical-byte budget and compaction policy land.
+The retained-byte budget is not an exact bbolt file-size ceiling because page
+and freelist overhead is additional and deleted pages remain allocated.
+Production deployments must also use a dedicated filesystem/project quota,
+free-space alerting, and a separately reviewed offline compaction procedure.
 
 Startup first removes expired records through bounded cleanup pages, then
 scans every retained task through bounded payload-free pages. Because the
@@ -346,10 +350,11 @@ thresholds from one through ten.
   read-only, cancellation is bound to request ID, task ID, and request digest,
   and an accepted/running task stranded by process failure is failed closed
   before the listener reopens; it is never silently resubmitted.
-- Durable task capacity is advertised as `storage.task_slots`, included in
-  every capability and Quote commitment, and exposed through fixed private
-  metrics. A full or unavailable store removes routable capabilities and
-  rejects new Quote owners; exact Quote replay and atomic `ClaimTask` retain
+- Durable task capacity is advertised as `storage.task_slots` and conservative
+  `storage.task_bytes`, included in every capability and Quote commitment, and
+  exposed through fixed private metrics. Exhausting either bound removes
+  routable capabilities and rejects new Quote owners; exact Quote replay and
+  atomic `ClaimTask` retain
   their existing semantics.
 - Production admission and process-capacity values come only from a private
   startup policy and are checked against effective observed RAM/free VRAM

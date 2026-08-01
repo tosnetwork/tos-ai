@@ -50,11 +50,15 @@ Invoke
 ```
 
 The task database is mode 0600 under a mode-0700 non-symlink directory. Its
-count, request/result bytes, retention, expiry cleanup, and transition work are
-bounded. A configured subset of task identities is atomically reserved for
+count, conservative retained-byte reservations, per-message bytes, retention,
+expiry cleanup, and transition work are bounded. Claim reserves request bytes,
+a maximum result, maximum metadata, and fixed logical keys until cleanup, so a
+terminal write cannot lose a capacity race. A configured subset of task
+identities and maximum-sized byte reservations is atomically reserved for
 `LOCAL_ASYNC`; external-service and background claims cannot consume it, and
-resource discovery reports the reduced external availability. It stores no
-raw failure diagnostics. An exact retained success is
+resource discovery reports the reduced external availability. Physical bbolt
+page allocation still requires a filesystem quota. The store contains no raw
+failure diagnostics. An exact retained success is
 replayed without executing the adapter. Before the private listener opens,
 startup removes expired tasks and scans retained state through bounded pages
 that contain only active identities. Since synchronous adapters have no
@@ -487,9 +491,10 @@ Implemented:
 - bounded durable task/replay state, read-only restart recovery, exact
   cancellation, scheduler, local admission, resource owner reserve, and
   owner-reserved execution workers
-- task-store capacity readiness, `storage.task_slots` capability/Quote
-  commitments, atomic owner-local reserve, priority-aware routing suppression,
-  and fixed private capacity metrics
+- task-store capacity readiness, `storage.task_slots` and
+  `storage.task_bytes` capability/Quote commitments, atomic owner-local
+  slot/byte reserves, priority-aware routing suppression, and fixed private
+  capacity metrics
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission
