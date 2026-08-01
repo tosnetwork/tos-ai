@@ -532,5 +532,4 @@ The non-streaming WorkerService v0.1 alignment and the deliberately separate
 streaming gap are recorded in
 [docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).
 
-No license has been selected for this new repository yet. Add one before the
-first public release.
+Licensed under the [GNU General Public License v3.0](LICENSE).
