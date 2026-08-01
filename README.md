@@ -60,13 +60,14 @@ The Go 1.24 module currently contains:
   to recovered, signed local cache artifacts, retain bounded leases, and
   rehash them before every runtime preflight;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
-- an immutable `tos.ai.text-generation` v0.1.0 profile mapper that strictly
-  decodes the paid JSON intent, rejects duplicate/unknown fields and trailing
-  data, and selects only operator-reviewed `serviceId + model` routes; loaded
-  operator configuration captures a private immutable capability snapshot and
-  can construct a fail-closed Edge deployment plan from only externally
-  callable `generate` capabilities, atomically binding the installed mapper
-  to the exact selector intended for advertisement;
+- an immutable `tos.ai.text-generation` v0.1.0 profile mapper that accepts
+  only the profile's RFC 8785 canonical JSON bytes, rejects ambiguous Unicode,
+  duplicate/unknown fields and trailing data, and selects only
+  operator-reviewed `serviceId + model` routes; loaded operator configuration
+  captures a private immutable capability snapshot and production worker
+  startup retains a fail-closed Edge deployment plan built only from
+  externally callable `generate` capabilities, atomically binding the
+  installed mapper to the exact selector intended for advertisement;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
   with a single process monitor, bounded refresh concurrency, fixed-size
   singleflight state, expiring success/failure caches, and stable redacted
@@ -83,8 +84,10 @@ The Go 1.24 module currently contains:
   error categories;
 - a fail-closed container execution policy and narrow containerd client
   contract, plus an immutable policy-enforcing adapter that defensively copies
-  requests and inputs, contains backend panics/errors, and rejects oversized
-  or invalid results. No containerd backend is enabled;
+  requests and inputs, supplies the task deadline, preserves cancellation,
+  contains backend panics/errors, requires an exact operator-owned network
+  destination allowlist, and rejects oversized or invalid results. No
+  containerd backend is enabled;
 - Ed25519-signed update manifest verification, SHA-256 artifact verification,
   expiry checks, target binding, and security-revision anti-rollback.
 

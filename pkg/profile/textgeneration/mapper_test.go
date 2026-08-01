@@ -17,6 +17,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-protocol/pkg/edge"
+	"github.com/tosnetwork/tos-protocol/pkg/protocol"
 )
 
 func TestMapperRegistersAndMapsNormativeVector(t *testing.T) {
@@ -45,6 +46,19 @@ func TestMapperRegistersAndMapsNormativeVector(t *testing.T) {
 	}
 	for _, vector := range vectors.Valid {
 		t.Run(vector.Name, func(t *testing.T) {
+			intentDigest, err := protocol.RequestIntentDigest(
+				ProfileID, ProfileVersion, nil, Operation,
+				[]byte(vector.Intent),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if intentDigest != vector.ExpectedIntentDigest {
+				t.Fatalf(
+					"intent digest = %q, want %q",
+					intentDigest, vector.ExpectedIntentDigest,
+				)
+			}
 			output, err := mapper.MapInvocation(context.Background(), edge.ProfileInvocationInput{
 				ProfileID: ProfileID, ProfileVersion: ProfileVersion,
 				Operation: Operation, ServiceID: vector.ServiceID,
@@ -85,8 +99,98 @@ func TestNormativeIntentSchemaIsValidJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	if schema["$schema"] != "https://json-schema.org/draft/2020-12/schema" ||
-		schema["type"] != "object" {
+		schema["type"] != "object" || schema["additionalProperties"] != false {
 		t.Fatalf("unexpected normative schema header: %#v", schema)
+	}
+	required, ok := schema["required"].([]any)
+	if !ok || len(required) != 2 || required[0] != "model" || required[1] != "prompt" {
+		t.Fatalf("unexpected normative required fields: %#v", schema["required"])
+	}
+}
+
+func TestCanonicalIntentEncodingAndRejection(t *testing.T) {
+	tests := []struct {
+		name   string
+		intent Intent
+		want   string
+	}{
+		{
+			name:   "minimal",
+			intent: Intent{Model: "m", Prompt: "p"},
+			want:   `{"model":"m","prompt":"p"}`,
+		},
+		{
+			name: "RFC 8785 string escapes",
+			intent: Intent{
+				Model:  "edge-model",
+				Prompt: "quote=\" slash=\\ controls=\b\t\n\f\r\u0001",
+			},
+			want: `{"model":"edge-model","prompt":"quote=\" slash=\\ controls=\b\t\n\f\r\u0001"}`,
+		},
+		{
+			name:   "Unicode and HTML remain literal",
+			intent: Intent{Model: "模型", Prompt: "边缘 AI <safe> ✓"},
+			want:   `{"model":"模型","prompt":"边缘 AI <safe> ✓"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := canonicalIntent(test.intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != test.want {
+				t.Fatalf("canonical intent = %q, want %q", got, test.want)
+			}
+			decoded, err := decodeIntent(got)
+			if err != nil || decoded != test.intent {
+				t.Fatalf("canonical round trip = %#v, %v", decoded, err)
+			}
+		})
+	}
+
+	nonCanonical := []string{
+		` {"model":"m","prompt":"p"}`,
+		`{"prompt":"p","model":"m"}`,
+		`{"model":"m","prompt":"\u0070"}`,
+		`{"model":"m","prompt":"\ud800"}`,
+		"{\"model\":\"m\",\"prompt\":\"line\\u000A\"}",
+	}
+	for index, intent := range nonCanonical {
+		if _, err := decodeIntent([]byte(intent)); err == nil {
+			t.Fatalf("non-canonical intent %d was accepted: %q", index, intent)
+		}
+	}
+	if _, err := canonicalIntent(Intent{Model: "m", Prompt: string([]byte{0xff})}); err == nil {
+		t.Fatal("invalid UTF-8 was canonically encoded")
+	}
+}
+
+func TestIntentSemanticByteBoundaries(t *testing.T) {
+	modelAtLimit := strings.Repeat("é", MaxModelBytes/2)
+	canonical, err := canonicalIntent(Intent{Model: modelAtLimit, Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeIntent(canonical); err != nil {
+		t.Fatalf("model at byte limit rejected: %v", err)
+	}
+	modelOverLimit := modelAtLimit + "é"
+	canonical, err = canonicalIntent(Intent{Model: modelOverLimit, Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeIntent(canonical); err == nil {
+		t.Fatal("model over UTF-8 byte limit accepted")
+	}
+	for _, prompt := range []string{"", "contains\x00nul"} {
+		canonical, err = canonicalIntent(Intent{Model: "m", Prompt: prompt})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeIntent(canonical); err == nil {
+			t.Fatalf("invalid prompt accepted: %q", prompt)
+		}
 	}
 }
 
@@ -292,6 +396,7 @@ type vectorFile struct {
 		ExpectedModel         string `json:"expectedModel"`
 		ExpectedPayload       string `json:"expectedPayload"`
 		ExpectedPayloadDigest string `json:"expectedPayloadDigest"`
+		ExpectedIntentDigest  string `json:"expectedIntentDigest"`
 	} `json:"valid"`
 	Invalid []struct {
 		Name   string `json:"name"`
@@ -312,6 +417,30 @@ func loadVectors(t *testing.T) vectorFile {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&vectors); err != nil {
 		t.Fatal(err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]struct{}, len(vectors.Valid)+len(vectors.Invalid))
+	for _, vector := range vectors.Valid {
+		if vector.Name == "" || vector.ServiceID == "" || vector.Intent == "" ||
+			vector.ExpectedModel == "" || vector.ExpectedPayload == "" ||
+			vector.ExpectedPayloadDigest == "" || vector.ExpectedIntentDigest == "" {
+			t.Fatalf("incomplete valid normative vector: %#v", vector)
+		}
+		if _, duplicate := seen[vector.Name]; duplicate {
+			t.Fatalf("duplicate normative vector name %q", vector.Name)
+		}
+		seen[vector.Name] = struct{}{}
+	}
+	for _, vector := range vectors.Invalid {
+		if vector.Name == "" || vector.Intent == "" {
+			t.Fatalf("incomplete invalid normative vector: %#v", vector)
+		}
+		if _, duplicate := seen[vector.Name]; duplicate {
+			t.Fatalf("duplicate normative vector name %q", vector.Name)
+		}
+		seen[vector.Name] = struct{}{}
 	}
 	return vectors
 }

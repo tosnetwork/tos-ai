@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/tosnetwork/tos-ai/spec/profiles/text-generation/v0.1/intent.schema.json",
   "title": "TOS AI text-generation intent v0.1",
+  "$comment": "The mapper additionally requires RFC 8785 canonical JSON and enforces all limits in UTF-8 bytes.",
   "type": "object",
   "additionalProperties": false,
   "required": ["model", "prompt"],
@@ -10,7 +11,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^[^\\x00-\\x1f\\x7f]+$"
+      "pattern": "^[^\\p{Cc}]+$"
     },
     "prompt": {
       "type": "string",

@@ -462,15 +462,22 @@ the Unix identity boundary.
 production containerd backend. `PolicyExecutor` is the mandatory adapter for a
 future audited client: it clones the operator policy at construction,
 revalidates every request, defensively copies the runtime request and input,
-contains backend errors and panics, rechecks context cancellation, validates
-exit status and reported CPU/RAM/disk/time/output bounds, and defensively copies
-the accepted result. The client contract accepts only a request with a
+derives a backend deadline from the task limit, preserves standard cancellation
+errors, rejects a late result even from a noncompliant backend, contains other
+backend errors and panics, validates exit status and reported
+CPU/RAM/disk/time/output bounds, and defensively copies the accepted result. It
+does not create a goroutine to emulate cancellation for a broken synchronous
+backend. The client contract accepts only a request with a
 digest-pinned allowlisted image, non-root user/group, read-only root filesystem,
 no-new-privileges, PID/CPU/RAM/disk/output/time limits, and explicitly
-authorized GPU/network access. Policy rejects privileged mode, host mounts,
-writable root, runtime sockets, root identity, unpinned images, and resource
-overflow. The adapter is a safety boundary around a runtime client; it does not
-claim to implement kernel or container isolation itself.
+authorized GPU/network access. Network access requires every exact DNS/IP
+authority to appear in the bounded operator-owned destination allowlist.
+Policy rejects privileged mode, host mounts, writable root, runtime sockets,
+root identity, unpinned images, ambiguous container strings, and resource
+overflow. A concrete backend must honor cancellation and prevent DNS rebinding
+while applying the validated destination set. The adapter is a safety boundary
+around a runtime client; it does not claim to implement kernel or container
+isolation itself.
 
 ## Process ownership
 
@@ -510,12 +517,13 @@ Implemented:
   is found through the bounded Registry HTTP search handler, extension index,
   and exact service, operation, model, and runtime filters
 - the first immutable vertical mapper candidate for
-  `tos.ai.text-generation` v0.1.0, with strict duplicate/unknown-field
-  rejection, exact profile selection, operator-reviewed service/model routes,
-  normative schema and fixed vectors; configuration loading captures a
-  private capability snapshot and constructs a fail-closed deployment plan so
-  later mutation of the exported adapter slice cannot change mapper routing
-  or enable an installed but undeclared selector
+  `tos.ai.text-generation` v0.1.0, with RFC 8785 canonical intent decoding,
+  strict duplicate/unknown-field and ambiguous-Unicode rejection, exact
+  profile selection, operator-reviewed service/model routes, normative schema,
+  and fixed intent/payload digests; configuration loading captures a private
+  capability snapshot and production startup retains a fail-closed deployment
+  plan so later mutation of the exported adapter slice cannot change mapper
+  routing or enable an installed but undeclared selector
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission
@@ -541,7 +549,8 @@ Implemented:
 - opt-in signed-cache GGUF activation for fixed Ollama endpoints, including
   startup recovery and synchronous shutdown cleanup
 - container isolation contract, immutable policy-enforcing client adapter,
-  adversarial result validation, and fail-closed `DenyAll` default
+  task deadline/cancellation semantics, bounded exact network destination
+  allowlists, adversarial result validation, and fail-closed `DenyAll` default
 
 Planned, not claimed by this release:
 

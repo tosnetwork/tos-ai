@@ -2,7 +2,7 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `c6977aaca800`, which includes the
+`tos-ai` pins `tos-protocol` revision `f104414655ef`, which includes the
 priority-aware task-store statistics, atomic owner-reserved slot enforcement,
 retained-byte counters, the `storage.task_bytes` contract, and the
 privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
@@ -94,6 +94,8 @@ only `generate` routes that explicitly accept `EXTERNAL_SERVICE` priority.
 The operator configuration loader snapshots those capabilities at successful
 load time; `TextGenerationProfilePlan` later constructs an immutable,
 constructor-validated deployment plan from that private copy rather than from
-the caller-mutable adapter slice. The plan binds its advertised exact selector
-set to the installed mapper before composition can open public
-ingress. Public ingress itself remains disabled in the current binaries.
+the caller-mutable adapter slice. Production worker startup constructs and
+retains that plan before serving its private socket. The plan binds its
+advertised exact selector set to the installed mapper before composition can
+open public ingress. Public ingress itself remains disabled in the current
+binaries.

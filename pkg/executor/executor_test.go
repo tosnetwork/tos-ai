@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -121,6 +122,298 @@ func TestPolicyRejectsUnsafeContainerCapabilities(t *testing.T) {
 				t.Fatal("unsafe spec accepted")
 			}
 		})
+	}
+}
+
+func TestPolicyRejectsMalformedContainerStringsAndInvalidCeilings(t *testing.T) {
+	policy, spec := validExecutionPolicyAndSpec("f")
+	tests := []struct {
+		name string
+		edit func(*Spec)
+	}{
+		{"argument NUL", func(value *Spec) { value.Entrypoint = []string{"/worker\x00arg"} }},
+		{"environment key NUL", func(value *Spec) { value.Environment = map[string]string{"BAD\x00KEY": "value"} }},
+		{"environment key equals", func(value *Spec) { value.Environment = map[string]string{"BAD=KEY": "value"} }},
+		{"environment value NUL", func(value *Spec) { value.Environment = map[string]string{"KEY": "bad\x00value"} }},
+		{"allowed host NUL", func(value *Spec) {
+			value.Network = NetworkAllowlist
+			value.AllowedHosts = []string{"example.com\x00.invalid"}
+		}},
+	}
+	policy.PermitNetwork = true
+	policy.AllowedNetworkHosts = []string{"example.com"}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := spec
+			test.edit(&value)
+			if err := policy.Validate(value); err == nil {
+				t.Fatal("malformed container string accepted")
+			}
+		})
+	}
+
+	invalidPolicies := []Policy{
+		func() Policy { value := policy; value.Ceiling.ExecutionTime = 0; return value }(),
+		func() Policy { value := policy; value.Ceiling.ExecutionTime = -time.Second; return value }(),
+		func() Policy { value := policy; value.Ceiling.MemoryBytes = 0; return value }(),
+		func() Policy { value := policy; value.PermitGPU = true; value.Ceiling.GPUDeviceCount = 0; return value }(),
+		func() Policy { value := policy; value.PermitNetwork = true; value.MaxAllowedHosts = 0; return value }(),
+	}
+	client := containerdClientFunc(func(
+		context.Context,
+		ContainerRequest,
+		[]byte,
+	) (Result, error) {
+		return Result{}, nil
+	})
+	for index, invalid := range invalidPolicies {
+		if _, err := NewPolicyExecutor(invalid, client); err == nil {
+			t.Fatalf("invalid policy %d accepted", index)
+		}
+	}
+}
+
+func TestPolicyNetworkHostsUseExactOperatorAllowlist(t *testing.T) {
+	policy, spec := validExecutionPolicyAndSpec("3")
+	policy.PermitNetwork = true
+	policy.AllowedNetworkHosts = []string{
+		"api.example.com:443",
+		"10.0.0.8",
+	}
+	spec.Network = NetworkAllowlist
+	spec.AllowedHosts = []string{"api.example.com:443"}
+	if err := policy.Validate(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	unauthorized := spec
+	unauthorized.AllowedHosts = []string{"API.example.com:443"}
+	if err := policy.Validate(unauthorized); err == nil {
+		t.Fatal("non-exact host variant accepted")
+	}
+	unauthorized.AllowedHosts = []string{"attacker.example:443"}
+	if err := policy.Validate(unauthorized); err == nil {
+		t.Fatal("host absent from operator allowlist accepted")
+	}
+
+	duplicate := spec
+	duplicate.AllowedHosts = []string{
+		"api.example.com:443",
+		"api.example.com:443",
+	}
+	if err := policy.Validate(duplicate); err == nil {
+		t.Fatal("duplicate requested host accepted")
+	}
+
+	invalidOperatorPolicies := []Policy{
+		func() Policy {
+			value := policy
+			value.AllowedNetworkHosts = []string{"api.example.com:443", "api.example.com:443"}
+			return value
+		}(),
+		func() Policy {
+			value := policy
+			value.AllowedNetworkHosts = []string{"https://api.example.com"}
+			return value
+		}(),
+		func() Policy {
+			value := policy
+			value.AllowedNetworkHosts = []string{"*.example.com"}
+			return value
+		}(),
+		func() Policy {
+			value := policy
+			value.AllowedNetworkHosts = []string{"api.example.com:70000"}
+			return value
+		}(),
+		func() Policy {
+			value := policy
+			value.AllowedNetworkHosts = nil
+			return value
+		}(),
+		func() Policy {
+			value := policy
+			value.PermitNetwork = false
+			return value
+		}(),
+	}
+	client := containerdClientFunc(func(
+		context.Context,
+		ContainerRequest,
+		[]byte,
+	) (Result, error) {
+		return Result{}, nil
+	})
+	for index, invalid := range invalidOperatorPolicies {
+		if _, err := NewPolicyExecutor(invalid, client); err == nil {
+			t.Fatalf("invalid network policy %d accepted", index)
+		}
+	}
+
+	overBound := policy
+	overBound.AllowedNetworkHosts = make(
+		[]string,
+		MaxAllowedNetworkHostsHard+1,
+	)
+	for index := range overBound.AllowedNetworkHosts {
+		overBound.AllowedNetworkHosts[index] = fmt.Sprintf("host-%d.example", index)
+	}
+	if _, err := NewPolicyExecutor(overBound, client); err == nil {
+		t.Fatal("operator network allowlist above hard bound accepted")
+	}
+}
+
+func TestPolicyExecutorClonesNetworkAllowlistAndSupportsConcurrency(t *testing.T) {
+	policy, spec := validExecutionPolicyAndSpec("4")
+	operatorHosts := []string{"api.example.com:443", "10.0.0.8"}
+	policy.PermitNetwork = true
+	policy.AllowedNetworkHosts = operatorHosts
+	spec.Network = NetworkAllowlist
+	spec.AllowedHosts = []string{"api.example.com:443"}
+
+	var calls atomic.Int32
+	var malformed atomic.Int32
+	executor, err := NewPolicyExecutor(
+		policy,
+		containerdClientFunc(func(
+			_ context.Context,
+			request ContainerRequest,
+			_ []byte,
+		) (Result, error) {
+			calls.Add(1)
+			if len(request.AllowedHosts) != 1 ||
+				request.AllowedHosts[0] != "api.example.com:443" {
+				malformed.Add(1)
+			}
+			return Result{ExitCode: 0}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutating caller-owned policy storage after construction must not change
+	// the executor's operator-owned authorization snapshot.
+	operatorHosts[0] = "attacker.example:443"
+	policy.AllowedNetworkHosts[1] = "other.example:443"
+
+	const workers = 64
+	var wait sync.WaitGroup
+	failures := make(chan error, workers)
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := executor.Execute(
+				context.Background(),
+				spec,
+				nil,
+			); err != nil {
+				failures <- err
+			}
+		}()
+	}
+	wait.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+	if calls.Load() != workers || malformed.Load() != 0 {
+		t.Fatalf(
+			"network backend calls=%d malformed=%d",
+			calls.Load(),
+			malformed.Load(),
+		)
+	}
+
+	attacker := spec
+	attacker.AllowedHosts = []string{"attacker.example:443"}
+	if _, err := executor.Execute(
+		context.Background(),
+		attacker,
+		nil,
+	); err == nil || calls.Load() != workers {
+		t.Fatal("post-construction policy mutation changed authorization")
+	}
+}
+
+func TestPolicyExecutorAppliesExecutionDeadlineAndPreservesCancellation(t *testing.T) {
+	policy, spec := validExecutionPolicyAndSpec("1")
+	policy.Ceiling.ExecutionTime = 40 * time.Millisecond
+	spec.Limits.ExecutionTime = policy.Ceiling.ExecutionTime
+
+	deadlineSeen := make(chan time.Time, 1)
+	executor, err := NewPolicyExecutor(
+		policy,
+		containerdClientFunc(func(
+			ctx context.Context,
+			_ ContainerRequest,
+			_ []byte,
+		) (Result, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return Result{}, errors.New("missing execution deadline")
+			}
+			deadlineSeen <- deadline
+			<-ctx.Done()
+			return Result{}, errors.New("backend wrapped cancellation")
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := executor.Execute(context.Background(), spec, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("execution error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("execution deadline took too long: %v", elapsed)
+	}
+	if deadline := <-deadlineSeen; deadline.Sub(started) > spec.Limits.ExecutionTime+10*time.Millisecond {
+		t.Fatalf("backend deadline exceeds execution limit: %v", deadline.Sub(started))
+	}
+
+	parent, cancel := context.WithCancel(context.Background())
+	cancelExecutor, err := NewPolicyExecutor(
+		policy,
+		containerdClientFunc(func(
+			ctx context.Context,
+			_ ContainerRequest,
+			_ []byte,
+		) (Result, error) {
+			cancel()
+			<-ctx.Done()
+			return Result{}, errors.New("backend cancellation detail")
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cancelExecutor.Execute(parent, spec, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("execution error = %v, want canceled", err)
+	}
+}
+
+func TestPolicyExecutorRejectsLateResultFromCancellationIgnoringBackend(t *testing.T) {
+	policy, spec := validExecutionPolicyAndSpec("2")
+	policy.Ceiling.ExecutionTime = 10 * time.Millisecond
+	spec.Limits.ExecutionTime = policy.Ceiling.ExecutionTime
+	executor, err := NewPolicyExecutor(
+		policy,
+		containerdClientFunc(func(
+			context.Context,
+			ContainerRequest,
+			[]byte,
+		) (Result, error) {
+			time.Sleep(30 * time.Millisecond)
+			return Result{ExitCode: 0}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := executor.Execute(context.Background(), spec, nil); !errors.Is(err, context.DeadlineExceeded) || len(result.Output) != 0 {
+		t.Fatalf("late backend result escaped boundary: %#v, %v", result, err)
 	}
 }
 

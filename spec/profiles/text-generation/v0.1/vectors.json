@@ -9,7 +9,17 @@
       "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"Explain edge inference in one sentence.\"}",
       "expectedModel": "deterministic-echo",
       "expectedPayload": "Explain edge inference in one sentence.",
-      "expectedPayloadDigest": "sha256:59b8ed925ecdbf2010602eb748a7df157219c7290801d7ec76fb75f94bb9f0f0"
+      "expectedPayloadDigest": "sha256:59b8ed925ecdbf2010602eb748a7df157219c7290801d7ec76fb75f94bb9f0f0",
+      "expectedIntentDigest": "sha256:1a591caa62a5616767e0f170acd61f04710726657fc7eedb3a7b8c3b1b9b580d"
+    },
+    {
+      "name": "canonical-escapes-and-unicode",
+      "serviceId": "tos.ai.mock",
+      "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"Line 1\\n边缘 AI <safe> ✓\"}",
+      "expectedModel": "deterministic-echo",
+      "expectedPayload": "Line 1\n边缘 AI <safe> ✓",
+      "expectedPayloadDigest": "sha256:39877f88c462b876fcbbc62244591d2369121ead1435c328a38de64e828392a4",
+      "expectedIntentDigest": "sha256:fe9299a6207378270412d50f93e457c345978c10d11fac2cf2036e1b91c924e8"
     }
   ],
   "invalid": [
@@ -32,6 +42,22 @@
     {
       "name": "unregistered-model",
       "intent": "{\"model\":\"other\",\"prompt\":\"hello\"}"
+    },
+    {
+      "name": "noncanonical-whitespace",
+      "intent": "{ \"model\":\"deterministic-echo\",\"prompt\":\"hello\"}"
+    },
+    {
+      "name": "noncanonical-member-order",
+      "intent": "{\"prompt\":\"hello\",\"model\":\"deterministic-echo\"}"
+    },
+    {
+      "name": "noncanonical-character-escape",
+      "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"\\u0068ello\"}"
+    },
+    {
+      "name": "unpaired-surrogate",
+      "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"\\ud800\"}"
     }
   ]
 }

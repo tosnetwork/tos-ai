@@ -29,6 +29,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/modelapproval"
 	"github.com/tosnetwork/tos-ai/pkg/modelmanager"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
+	"github.com/tosnetwork/tos-ai/pkg/profile/textgeneration"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-ai/pkg/update"
 )
@@ -130,6 +131,15 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 	}
 	if len(runtimes.adapters) != 1 {
 		t.Fatalf("approved adapter count=%d", len(runtimes.adapters))
+	}
+	if runtimes.profilePlan == nil || runtimes.profilePlan.Len() != 1 ||
+		!runtimes.profilePlan.Supports(
+			textgeneration.ProfileID,
+			textgeneration.ProfileVersion,
+			nil,
+			textgeneration.Operation,
+		) {
+		t.Fatal("production runtime did not retain its validated profile plan")
 	}
 	if _, ok := runtimes.adapters[0].(*modelapproval.Adapter); !ok {
 		t.Fatalf(

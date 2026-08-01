@@ -197,7 +197,62 @@ func decodeIntent(data []byte) (Intent, error) {
 		len(output.Prompt) > MaxIntentBytesHard {
 		return Intent{}, errors.New("invalid text-generation intent fields")
 	}
+	canonical, err := canonicalIntent(output)
+	if err != nil || !bytes.Equal(data, canonical) {
+		return Intent{}, errors.New("text-generation intent is not canonical JSON")
+	}
 	return output, nil
+}
+
+// canonicalIntent implements the RFC 8785 JSON Canonicalization Scheme for
+// this profile's deliberately tiny value domain: one object containing two
+// strings in lexicographic member order. Keeping the encoder local makes the
+// exact accepted bytes reviewable and prevents permissive JSON decoding (for
+// example, lone UTF-16 surrogates replaced with U+FFFD) from changing the
+// paid intent after it was committed.
+func canonicalIntent(intent Intent) ([]byte, error) {
+	if !utf8.ValidString(intent.Model) || !utf8.ValidString(intent.Prompt) {
+		return nil, errors.New("text-generation intent contains invalid UTF-8")
+	}
+	output := make([]byte, 0, len(intent.Model)+len(intent.Prompt)+24)
+	output = append(output, `{"model":`...)
+	output = appendCanonicalJSONString(output, intent.Model)
+	output = append(output, `,"prompt":`...)
+	output = appendCanonicalJSONString(output, intent.Prompt)
+	output = append(output, '}')
+	return output, nil
+}
+
+func appendCanonicalJSONString(output []byte, value string) []byte {
+	const hexadecimal = "0123456789abcdef"
+	output = append(output, '"')
+	for _, character := range value {
+		switch character {
+		case '"', '\\':
+			output = append(output, '\\', byte(character))
+		case '\b':
+			output = append(output, `\b`...)
+		case '\t':
+			output = append(output, `\t`...)
+		case '\n':
+			output = append(output, `\n`...)
+		case '\f':
+			output = append(output, `\f`...)
+		case '\r':
+			output = append(output, `\r`...)
+		default:
+			if character < 0x20 {
+				output = append(
+					output, '\\', 'u', '0', '0',
+					hexadecimal[byte(character)>>4],
+					hexadecimal[byte(character)&0x0f],
+				)
+				continue
+			}
+			output = utf8.AppendRune(output, character)
+		}
+	}
+	return append(output, '"')
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {

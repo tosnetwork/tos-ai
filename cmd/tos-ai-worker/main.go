@@ -33,6 +33,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/scheduler"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
+	"github.com/tosnetwork/tos-protocol/pkg/edge"
 	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 )
 
@@ -425,6 +426,7 @@ type runtimeResources struct {
 	activation    *modelactivation.Controller
 	configuration *operatorconfig.Configuration
 	modelManager  *modelmanager.Manager
+	profilePlan   *edge.ProfileInvocationPlan
 }
 
 func configuredRuntimes(
@@ -461,6 +463,12 @@ func configuredRuntimes(
 	if err != nil {
 		return nil, err
 	}
+	profilePlan, err := configuration.TextGenerationProfilePlan()
+	if err != nil {
+		closeRuntimeAdapters(configuration.Adapters)
+		_ = configuration.CloseBackends()
+		return nil, fmt.Errorf("configure text-generation profile plan")
+	}
 	if modelTrustPath == "" {
 		if configuration.Activation != nil {
 			closeRuntimeAdapters(configuration.Adapters)
@@ -469,6 +477,7 @@ func configuredRuntimes(
 		}
 		return &runtimeResources{
 			adapters: configuration.Adapters, configuration: &configuration,
+			profilePlan: profilePlan,
 		}, nil
 	}
 	trust, err := operatorconfig.LoadModelTrust(modelTrustPath)
@@ -479,7 +488,7 @@ func configuredRuntimes(
 	}
 	resources := &runtimeResources{
 		adapters: configuration.Adapters, configuration: &configuration,
-		modelManager: trust.Manager,
+		modelManager: trust.Manager, profilePlan: profilePlan,
 	}
 	if configuration.Activation != nil {
 		if directoriesOverlap(

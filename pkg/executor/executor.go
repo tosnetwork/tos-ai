@@ -6,14 +6,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
-const MaxAllowedImagesHard = 1024
+const (
+	MaxAllowedImagesHard       = 1024
+	MaxAllowedNetworkHostsHard = 1024
+)
 
 type NetworkMode string
 
@@ -72,8 +78,10 @@ type Executor interface {
 }
 
 // ContainerdClient is the narrow client a future audited backend must
-// implement. This package intentionally does not provide a concrete
-// containerd implementation yet.
+// implement. Implementations must honor context cancellation by stopping and
+// cleaning up the workload before returning. Result and Usage are treated as
+// untrusted input and validated by PolicyExecutor. This package intentionally
+// does not provide a concrete containerd implementation yet.
 type ContainerdClient interface {
 	RunIsolated(context.Context, ContainerRequest, []byte) (Result, error)
 }
@@ -96,6 +104,7 @@ type ContainerRequest struct {
 // more, and may not enable capabilities absent from this policy.
 type Policy struct {
 	AllowedImages       map[string]struct{}
+	AllowedNetworkHosts []string
 	MaxAllowedImages    int
 	MaxEnvironment      int
 	MaxArguments        int
@@ -111,9 +120,27 @@ type Policy struct {
 func (p Policy) validate() error {
 	if p.MaxAllowedImages <= 0 || p.MaxAllowedImages > MaxAllowedImagesHard ||
 		len(p.AllowedImages) > p.MaxAllowedImages ||
+		len(p.AllowedNetworkHosts) > MaxAllowedNetworkHostsHard ||
 		p.MaxEnvironment < 0 || p.MaxArguments <= 0 || p.MaxAllowedHosts < 0 ||
+		p.MaxAllowedHosts > MaxAllowedNetworkHostsHard ||
 		p.MaxStringBytes <= 0 || p.MaxInputBytes == 0 {
 		return errors.New("invalid executor policy")
+	}
+	if err := validatePolicyCeiling(p.Ceiling, p.PermitGPU); err != nil {
+		return err
+	}
+	if p.PermitNetwork {
+		if p.MaxAllowedHosts == 0 || len(p.AllowedNetworkHosts) == 0 {
+			return errors.New("network policy requires an operator host allowlist")
+		}
+	} else if len(p.AllowedNetworkHosts) != 0 {
+		return errors.New("network host allowlist requires network permission")
+	}
+	if err := validateNetworkHosts(
+		p.AllowedNetworkHosts,
+		p.MaxStringBytes,
+	); err != nil {
+		return fmt.Errorf("invalid executor network policy: %w", err)
 	}
 	for digest := range p.AllowedImages {
 		if !digestPattern.MatchString(digest) {
@@ -139,19 +166,19 @@ func (p Policy) Validate(spec Spec) error {
 		return errors.New("executor argument or environment bounds exceeded")
 	}
 	for _, argument := range spec.Entrypoint {
-		if len(argument) == 0 || len(argument) > p.MaxStringBytes {
+		if invalidContainerString(argument, p.MaxStringBytes, false) {
 			return errors.New("executor argument is invalid")
 		}
 	}
 	for key, value := range spec.Environment {
-		if len(key) == 0 || len(key) > p.MaxStringBytes || len(value) > p.MaxStringBytes {
+		if invalidContainerString(key, p.MaxStringBytes, false) ||
+			strings.Contains(key, "=") ||
+			invalidContainerString(value, p.MaxStringBytes, true) {
 			return errors.New("executor environment is invalid")
 		}
 	}
-	for _, host := range spec.AllowedHosts {
-		if len(host) == 0 || len(host) > p.MaxStringBytes {
-			return errors.New("executor allowed host is invalid")
-		}
+	if err := validateNetworkHosts(spec.AllowedHosts, p.MaxStringBytes); err != nil {
+		return fmt.Errorf("executor allowed host is invalid: %w", err)
 	}
 	if spec.Privileged {
 		return errors.New("privileged execution is forbidden")
@@ -176,6 +203,11 @@ func (p Policy) Validate(spec Spec) error {
 	case NetworkAllowlist:
 		if !p.PermitNetwork || len(spec.AllowedHosts) == 0 {
 			return errors.New("network access is not authorized")
+		}
+		for _, host := range spec.AllowedHosts {
+			if !containsExactString(p.AllowedNetworkHosts, host) {
+				return errors.New("network host is not authorized")
+			}
 		}
 	default:
 		return errors.New("invalid network mode")
@@ -254,23 +286,43 @@ func (e *PolicyExecutor) Execute(
 		AllowGPU:        spec.AllowGPU,
 		Limits:          spec.Limits,
 	}
+	// The runtime client receives a deadline even when the caller did not set
+	// one. A concrete backend must honor context cancellation while stopping
+	// and cleaning up the isolated workload; this boundary deliberately does
+	// not launch an unbounded goroutine to emulate cancellation for a broken
+	// backend.
+	executionCtx, cancel := context.WithTimeout(ctx, spec.Limits.ExecutionTime)
+	defer cancel()
 	result, err := callContainerdClient(
-		ctx,
+		executionCtx,
 		e.client,
 		request,
 		append([]byte(nil), input...),
 	)
+	if contextErr := executionContextError(executionCtx); contextErr != nil {
+		return Result{}, contextErr
+	}
 	if err != nil {
 		return Result{}, errors.New("isolated execution backend failed")
-	}
-	if err := ctx.Err(); err != nil {
-		return Result{}, err
 	}
 	if err := validateResult(spec.Limits, result); err != nil {
 		return Result{}, err
 	}
 	result.Output = append([]byte(nil), result.Output...)
 	return result, nil
+}
+
+func executionContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A backend may return just after the deadline before the context timer's
+	// goroutine has published DeadlineExceeded. Check the absolute deadline so
+	// such a result cannot be accepted due to scheduler timing.
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func callContainerdClient(
@@ -303,6 +355,10 @@ func validateResult(limits Limits, result Result) error {
 
 func clonePolicy(policy Policy) Policy {
 	cloned := policy
+	cloned.AllowedNetworkHosts = append(
+		[]string(nil),
+		policy.AllowedNetworkHosts...,
+	)
 	cloned.AllowedImages = make(
 		map[string]struct{},
 		len(policy.AllowedImages),
@@ -322,6 +378,100 @@ func cloneStringsMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func invalidContainerString(value string, maximum int, allowEmpty bool) bool {
+	return (!allowEmpty && len(value) == 0) ||
+		len(value) > maximum || strings.IndexByte(value, 0) >= 0
+}
+
+func validateNetworkHosts(hosts []string, maximum int) error {
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		if invalidNetworkHost(host, maximum) {
+			return errors.New("host is empty, malformed, or exceeds the string bound")
+		}
+		if _, duplicate := seen[host]; duplicate {
+			return errors.New("duplicate host")
+		}
+		seen[host] = struct{}{}
+	}
+	return nil
+}
+
+func invalidNetworkHost(host string, maximum int) bool {
+	if invalidContainerString(host, maximum, false) {
+		return true
+	}
+	if net.ParseIP(host) != nil {
+		return false
+	}
+
+	hostname := host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return net.ParseIP(host[1:len(host)-1]) == nil
+	}
+	if strings.Contains(host, ":") {
+		var port string
+		var err error
+		hostname, port, err = net.SplitHostPort(host)
+		if err != nil || invalidNetworkPort(port) {
+			return true
+		}
+		if net.ParseIP(hostname) != nil {
+			return false
+		}
+	}
+	return invalidDNSHostname(hostname)
+}
+
+func invalidNetworkPort(port string) bool {
+	parsed, err := strconv.ParseUint(port, 10, 16)
+	return err != nil || parsed == 0
+}
+
+func invalidDNSHostname(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 253 {
+		return true
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 ||
+			label[0] == '-' || label[len(label)-1] == '-' {
+			return true
+		}
+		for index := 0; index < len(label); index++ {
+			character := label[index]
+			if character >= 'a' && character <= 'z' ||
+				character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' ||
+				character == '-' {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func containsExactString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func validatePolicyCeiling(ceiling Limits, permitGPU bool) error {
+	if ceiling.CPUMillis == 0 || ceiling.MemoryBytes == 0 ||
+		ceiling.DiskBytes == 0 || ceiling.PIDs == 0 ||
+		ceiling.ExecutionTime <= 0 || ceiling.OutputBytes == 0 {
+		return errors.New("executor policy contains a zero or invalid resource ceiling")
+	}
+	if permitGPU && ceiling.GPUDeviceCount == 0 {
+		return errors.New("GPU policy requires a positive device ceiling")
+	}
+	return nil
 }
 
 func nilContainerdClient(client ContainerdClient) bool {
@@ -346,6 +496,9 @@ func (p Policy) ValidateInput(input []byte) error {
 }
 
 func withinCeiling(request, ceiling Limits) error {
+	if request.ExecutionTime <= 0 || ceiling.ExecutionTime <= 0 {
+		return errors.New("execution time limit is zero or exceeds policy")
+	}
 	checks := []struct {
 		name      string
 		requested uint64
