@@ -60,6 +60,9 @@ The Go 1.24 module currently contains:
   to recovered, signed local cache artifacts, retain bounded leases, and
   rehash them before every runtime preflight;
 - deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
+- an immutable `tos.ai.text-generation` v0.1.0 profile mapper that strictly
+  decodes the paid JSON intent, rejects duplicate/unknown fields and trailing
+  data, and selects only operator-reviewed `serviceId + model` routes;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
   with a single process monitor, bounded refresh concurrency, fixed-size
   singleflight state, expiring success/failure caches, and stable redacted
@@ -344,6 +347,10 @@ thresholds from one through ten.
 
 - `tos-edge` in `tos-protocol` remains the future authentication, payment,
   receipt, and settlement control plane.
+- The text-generation mapper accepts only the exact v0.1.0 profile selector
+  with no extensions. It cannot set Worker identity, payment, priority,
+  deadline, output, retention, endpoint, credential, or runtime fields; Edge
+  Core continues to derive and durably bind all of them.
 - The worker has no wallet owner key, public TCP listener, arbitrary model
   upload, arbitrary downloader, shell, host mount, privileged container, or
   raw accelerator API.
@@ -440,7 +447,8 @@ supported through bounded inventory preflight. Generic OpenAI-compatible
 model-list APIs expose an ID but do not attest their configured content
 digest.
 
-This repository also does not yet provide public ingress, TOS payment
+This repository also does not yet provide public ingress or the deployment
+composition that installs its reviewed mapper into `tos-edge`, TOS payment
 authorization, receipts, settlement, ARD publication/Registry hosting, fleet
 management, an offline journal, a remote metrics collector/exporter, streaming
 RPC, a production containerd backend, physical-I/O control, or audited NVIDIA

@@ -2,7 +2,7 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `4a2ece17f75a`, which includes the
+`tos-ai` pins `tos-protocol` revision `f9de14fd79cc`, which includes the
 priority-aware task-store statistics, atomic owner-reserved slot enforcement,
 retained-byte counters, the `storage.task_bytes` contract, and the
 privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
@@ -70,3 +70,20 @@ partial-result semantics, bounded buffering and backpressure, cancellation,
 terminal state, retry/resume, idempotency, total output, usage, and receipt
 binding are specified as a separate `tos-protocol` streaming RFC targeted at
 v0.2 unless explicitly accepted before the v0.1 release tag.
+
+## First vertical profile mapper
+
+`pkg/profile/textgeneration` now implements the externally maintained
+`tos.ai.text-generation` profile v0.1.0 for operation `generate`. It parses
+only the normative `{model, prompt}` intent and maps it to the Worker's model
+selector and prompt payload. Its immutable route set binds each accepted
+model to an operator-reviewed Worker service ID.
+
+The mapper cannot provide any security-owned Worker field. Edge retains the
+request, quote, payment, task, priority, deadline, output and retention
+bindings and validates the mapped request before changing durable state.
+The exact registration is introspectable through
+`ProfileInvocationRegistry.Supports`, allowing future deployment composition
+to fail before advertising a profile without its reviewed mapper. The schema,
+semantic limits, privacy rules and fixed vectors live under
+`spec/profiles/text-generation/v0.1/` in this repository.

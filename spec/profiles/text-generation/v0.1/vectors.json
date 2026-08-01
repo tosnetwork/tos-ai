@@ -1,0 +1,37 @@
+{
+  "profileId": "tos.ai.text-generation",
+  "profileVersion": "0.1.0",
+  "operation": "generate",
+  "valid": [
+    {
+      "name": "basic-prompt",
+      "serviceId": "tos.ai.mock",
+      "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"Explain edge inference in one sentence.\"}",
+      "expectedModel": "deterministic-echo",
+      "expectedPayload": "Explain edge inference in one sentence.",
+      "expectedPayloadDigest": "sha256:59b8ed925ecdbf2010602eb748a7df157219c7290801d7ec76fb75f94bb9f0f0"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-field",
+      "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"hello\",\"temperature\":1}"
+    },
+    {
+      "name": "duplicate-model",
+      "intent": "{\"model\":\"deterministic-echo\",\"model\":\"other\",\"prompt\":\"hello\"}"
+    },
+    {
+      "name": "missing-prompt",
+      "intent": "{\"model\":\"deterministic-echo\"}"
+    },
+    {
+      "name": "trailing-value",
+      "intent": "{\"model\":\"deterministic-echo\",\"prompt\":\"hello\"}{}"
+    },
+    {
+      "name": "unregistered-model",
+      "intent": "{\"model\":\"other\",\"prompt\":\"hello\"}"
+    }
+  ]
+}

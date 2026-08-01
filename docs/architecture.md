@@ -503,6 +503,10 @@ Implemented:
 - cross-repository discovery coverage proving the real Worker model selector
   is found through the bounded Registry HTTP search handler, extension index,
   and exact service, operation, model, and runtime filters
+- the first immutable vertical mapper candidate for
+  `tos.ai.text-generation` v0.1.0, with strict duplicate/unknown-field
+  rejection, exact profile selection, operator-reviewed service/model routes,
+  normative schema and fixed vectors
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission
@@ -537,7 +541,8 @@ Planned, not claimed by this release:
   cross-process host coordination
 - audited containerd execution backend and packaging
 - signed benchmark runner and external evidence issuers
-- public authentication, payment, receipts, and settlement through Edge Core
+- public authentication, payment, receipts, settlement, and explicit mapper
+  installation through Edge Core
 - real streaming after a `tos-protocol` streaming RPC exists
 - active/known-good software update slots and crash recovery
 - ARD publication/Registry hosting, relay, offline journal, fleet, and
