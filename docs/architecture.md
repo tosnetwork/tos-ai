@@ -51,7 +51,10 @@ Invoke
 
 The task database is mode 0600 under a mode-0700 non-symlink directory. Its
 count, request/result bytes, retention, expiry cleanup, and transition work are
-bounded. It stores no raw failure diagnostics. An exact retained success is
+bounded. A configured subset of task identities is atomically reserved for
+`LOCAL_ASYNC`; external-service and background claims cannot consume it, and
+resource discovery reports the reduced external availability. It stores no
+raw failure diagnostics. An exact retained success is
 replayed without executing the adapter. Before the private listener opens,
 startup removes expired tasks and scans retained state through bounded pages
 that contain only active identities. Since synchronous adapters have no
@@ -485,8 +488,8 @@ Implemented:
   cancellation, scheduler, local admission, resource owner reserve, and
   owner-reserved execution workers
 - task-store capacity readiness, `storage.task_slots` capability/Quote
-  commitments, full-store routing suppression, and fixed private capacity
-  metrics
+  commitments, atomic owner-local reserve, priority-aware routing suppression,
+  and fixed private capacity metrics
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission

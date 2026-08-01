@@ -201,6 +201,12 @@ func safeMetricsSnapshot(
 		metricResourcesFit(snapshot.Used, snapshot.Capacity) &&
 		metricResourcesFit(snapshot.OwnerReserved, snapshot.Capacity) &&
 		readiness.TaskSlots <= readiness.TaskCapacity &&
+		readiness.TaskOwnerReserved <= readiness.TaskCapacity &&
+		readiness.TaskOwnerTasks <= readiness.TaskSlots &&
+		readiness.TaskExternalTasks ==
+			readiness.TaskSlots-readiness.TaskOwnerTasks &&
+		readiness.TaskAvailableExternal <=
+			readiness.TaskCapacity-readiness.TaskSlots &&
 		readiness.TaskCapacity > 0
 	return readiness, snapshot, recovery, valid
 }
@@ -278,6 +284,38 @@ func (m *OperationalMetrics) render(
 		encoded,
 		"tos_ai_worker_task_store_available",
 		readiness.TaskCapacity-readiness.TaskSlots,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_owner_reserved", "gauge",
+		"Durable task slots reserved for owner-local work.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_owner_reserved",
+		readiness.TaskOwnerReserved,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_owner_tasks", "gauge",
+		"Retained owner-local durable task identities.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_owner_tasks",
+		readiness.TaskOwnerTasks,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_external_tasks", "gauge",
+		"Retained non-owner durable task identities.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_external_tasks",
+		readiness.TaskExternalTasks,
+	)
+	encoded = appendMetricHeader(
+		encoded, "tos_ai_worker_task_store_available_external", "gauge",
+		"Durable task slots currently available to non-owner work.",
+	)
+	encoded = appendMetric(
+		encoded, "tos_ai_worker_task_store_available_external",
+		readiness.TaskAvailableExternal,
 	)
 	encoded = appendMetricHeader(
 		encoded, "tos_ai_worker_startup_interrupted_tasks_failed_total", "counter",

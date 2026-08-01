@@ -2,10 +2,10 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `eda7e61915cf`, which contains the
-WorkerService contract, durable capacity snapshot, and bounded
-`ScanActiveTasks` interface required by this runtime. Protobuf definitions
-remain owned by `tos-protocol`; this repository does not copy or fork them.
+`tos-ai` pins `tos-protocol` revision `c1d5f2518386`, which includes the
+priority-aware task-store statistics and atomic owner-reserved slot enforcement
+used below. Protobuf definitions remain owned by `tos-protocol`; this repository
+does not copy or fork them.
 
 ## Implemented coverage
 
@@ -17,8 +17,10 @@ remain owned by `tos-protocol`; this repository does not copy or fork them.
   slots use the exact identifiers and units defined by the protocol alignment
   contract.
 - `storage.task_slots` reports only bounded logical count/capacity. Every
-  capability and Quote commits one slot; saturation suppresses routing before
-  Invoke while the atomic durable claim remains authoritative.
+  capability and Quote commits one slot. Its owner-reserved subset is limited
+  to `LOCAL_ASYNC`; external routing stops at that boundary while owner-local
+  Quote/Invoke remains available and the atomic durable claim remains
+  authoritative.
 - Quote treats `requested_limits` as caller-accepted upper bounds, rejects
   unknown or undersized dimensions, and returns the actual locally checked
   `committed_limits`.

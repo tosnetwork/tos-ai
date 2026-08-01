@@ -42,6 +42,7 @@ const (
 	defaultMaxConnections   = 128
 	defaultPreflightRefresh = 5 * time.Second
 	defaultPreflightWorkers = 4
+	defaultTaskOwnerReserve = 64
 	initialResourceTimeout  = 30 * time.Second
 	maxResourceProbeOutput  = 64 << 10
 	resourceProbeWaitDelay  = time.Second
@@ -68,6 +69,7 @@ func run() error {
 	var terminalPolicyPath string
 	var taskStorePath string
 	var taskStoreMaxTasks int
+	var taskStoreOwnerReserved int
 	var internalResourceProbe bool
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
@@ -101,6 +103,12 @@ func run() error {
 		"task-store-max-tasks",
 		localrpc.DefaultWorkerMaxTasks,
 		"maximum retained durable Worker tasks",
+	)
+	flag.IntVar(
+		&taskStoreOwnerReserved,
+		"task-store-owner-reserved",
+		defaultTaskOwnerReserve,
+		"durable task slots reserved for owner-local work",
 	)
 	flag.BoolVar(
 		&internalResourceProbe, "internal-resource-probe", false,
@@ -173,6 +181,7 @@ func run() error {
 	}
 	taskStoreConfig := localrpc.DefaultWorkerTaskStoreConfig(taskStorePath)
 	taskStoreConfig.MaxTasks = taskStoreMaxTasks
+	taskStoreConfig.OwnerReservedTasks = taskStoreOwnerReserved
 	taskStoreConfig.MaxInvocationDuration = policy.MaxDeadline
 	taskStoreConfig.AllowedPriorities = []edgev1.Priority{
 		edgev1.Priority_PRIORITY_LOCAL_ASYNC,

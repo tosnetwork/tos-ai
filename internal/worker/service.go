@@ -238,19 +238,23 @@ func (s *Service) Health(_ context.Context, _ *connect.Request[edgev1.HealthRequ
 }
 
 type Readiness struct {
-	Status          string
-	Admission       string
-	Resources       string
-	RuntimeReady    int
-	RuntimeTotal    int
-	BindingEvidence string
-	GPU             string
-	TaskStore       string
-	TaskStoreReason string
-	TaskSlots       uint64
-	TaskCapacity    uint64
-	Running         int
-	Reserved        int
+	Status                string
+	Admission             string
+	Resources             string
+	RuntimeReady          int
+	RuntimeTotal          int
+	BindingEvidence       string
+	GPU                   string
+	TaskStore             string
+	TaskStoreReason       string
+	TaskSlots             uint64
+	TaskCapacity          uint64
+	TaskOwnerReserved     uint64
+	TaskOwnerTasks        uint64
+	TaskExternalTasks     uint64
+	TaskAvailableExternal uint64
+	Running               int
+	Reserved              int
 }
 
 func (s *Service) Readiness() Readiness {
@@ -319,17 +323,25 @@ func (s *Service) readiness(
 		RuntimeTotal: len(s.runtimeSlots), BindingEvidence: bindingEvidence,
 		GPU: gpu, TaskStore: tasks.Status, TaskStoreReason: tasks.Reason,
 		TaskSlots: tasks.Tasks, TaskCapacity: tasks.Capacity,
-		Running: snapshot.Running, Reserved: snapshot.Reserved,
+		TaskOwnerReserved:     tasks.OwnerReserved,
+		TaskOwnerTasks:        tasks.OwnerTasks,
+		TaskExternalTasks:     tasks.ExternalTasks,
+		TaskAvailableExternal: tasks.AvailableExternal,
+		Running:               snapshot.Running, Reserved: snapshot.Reserved,
 	}
 }
 
 type taskStoreCapacity struct {
-	Tasks     uint64
-	Capacity  uint64
-	Available uint64
-	Ready     bool
-	Status    string
-	Reason    string
+	Tasks             uint64
+	Capacity          uint64
+	Available         uint64
+	OwnerReserved     uint64
+	OwnerTasks        uint64
+	ExternalTasks     uint64
+	AvailableExternal uint64
+	Ready             bool
+	Status            string
+	Reason            string
 }
 
 func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
@@ -337,14 +349,34 @@ func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
 		Status: "unavailable", Reason: "store_unavailable",
 	}
 	stats, err := s.taskStore.Stats()
+	expectedExternal := uint64(0)
+	if err == nil && stats.OwnerReserved <= stats.Capacity &&
+		stats.OwnerTasks <= stats.Tasks {
+		externalCapacity := stats.Capacity - stats.OwnerReserved
+		externalTasks := stats.Tasks - stats.OwnerTasks
+		if stats.Tasks < stats.Capacity && externalTasks < externalCapacity {
+			expectedExternal = min(
+				stats.Capacity-stats.Tasks,
+				externalCapacity-externalTasks,
+			)
+		}
+	}
 	if err != nil || stats.Capacity == 0 ||
 		stats.Tasks > stats.Capacity ||
-		stats.Available != stats.Capacity-stats.Tasks {
+		stats.Available != stats.Capacity-stats.Tasks ||
+		stats.OwnerReserved > stats.Capacity ||
+		stats.OwnerTasks > stats.Tasks ||
+		stats.ExternalTasks != stats.Tasks-stats.OwnerTasks ||
+		stats.AvailableExternal != expectedExternal {
 		return output
 	}
 	output.Tasks = stats.Tasks
 	output.Capacity = stats.Capacity
 	output.Available = stats.Available
+	output.OwnerReserved = stats.OwnerReserved
+	output.OwnerTasks = stats.OwnerTasks
+	output.ExternalTasks = stats.ExternalTasks
+	output.AvailableExternal = stats.AvailableExternal
 	if output.Available == 0 {
 		output.Status = "unavailable"
 		output.Reason = "capacity_exhausted"
@@ -354,6 +386,16 @@ func (s *Service) currentTaskStoreCapacity() taskStoreCapacity {
 	output.Status = "ready"
 	output.Reason = "capacity_available"
 	return output
+}
+
+func (capacity taskStoreCapacity) availableFor(priority edgev1.Priority) bool {
+	if !capacity.Ready {
+		return false
+	}
+	if priority == edgev1.Priority_PRIORITY_LOCAL_ASYNC {
+		return capacity.Available != 0
+	}
+	return capacity.AvailableExternal != 0
 }
 
 // RefreshRuntimes performs an explicitly bounded refresh. Failures update
@@ -482,19 +524,23 @@ func (s *Service) capabilitiesSnapshot() (
 	snapshot := s.admission.Snapshot()
 	tasks := s.currentTaskStoreCapacity()
 	resourcesReady := s.currentResourceHealth().Ready
-	if !resourcesReady || !tasks.Ready {
+	if !resourcesReady || !tasks.availableFor(
+		edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+	) {
 		snapshot.Accepting = false
 	}
 	revision := s.capacityRevisionFor(snapshot, tasks)
 	return &edgev1.GetCapabilitiesResponse{
-		CapacityRevision: revision,
-		Resources: wireResourceClaims(
-			snapshot, tasks, revision, now, expires, "tos-ai-worker",
-		),
-		TerminalRevision:    s.config.Version,
-		CollectedUnixMillis: now.UnixMilli(),
-		ExpiresUnixMillis:   expires.UnixMilli(),
-	}, resourcesReady && tasks.Ready && snapshot.Accepting
+			CapacityRevision: revision,
+			Resources: wireResourceClaims(
+				snapshot, tasks, revision, now, expires, "tos-ai-worker",
+			),
+			TerminalRevision:    s.config.Version,
+			CollectedUnixMillis: now.UnixMilli(),
+			ExpiresUnixMillis:   expires.UnixMilli(),
+		}, resourcesReady && tasks.availableFor(
+			edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		) && snapshot.Accepting
 }
 
 func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.QuoteRequest]) (*connect.Response[edgev1.QuoteResponse], error) {
@@ -543,17 +589,21 @@ func (s *Service) Quote(ctx context.Context, request *connect.Request[edgev1.Quo
 		)
 	}
 	taskCapacity := s.currentTaskStoreCapacity()
-	if !taskCapacity.Ready {
+	if !taskCapacity.availableFor(input.Priority) {
 		if taskCapacity.Reason == "capacity_exhausted" {
 			return nil, connect.NewError(
 				connect.CodeResourceExhausted,
 				errors.New("durable task capacity unavailable"),
 			)
 		}
-		return nil, connect.NewError(
-			connect.CodeUnavailable,
-			errors.New("durable task store unavailable"),
-		)
+		if taskCapacity.Ready {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New("durable task capacity reserved for owner-local work"),
+			)
+		}
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("durable task store unavailable"))
 	}
 	if _, err := slot.ensure(ctx, false); err != nil {
 		return nil, normalizePreflightError(err)
@@ -1047,9 +1097,10 @@ func (s *Service) capacityRevisionFor(
 		resourcesReady = 1
 	}
 	return fmt.Sprintf(
-		"tier1-%d-%d-%d-%d-%d-%d",
+		"tier1-%d-%d-%d-%d-%d-%d-%d-%d-%d",
 		resourcesReady, ready, snapshot.Running, snapshot.Reserved,
-		tasks.Tasks, tasks.Capacity,
+		tasks.Tasks, tasks.Capacity, tasks.OwnerReserved,
+		tasks.OwnerTasks, tasks.AvailableExternal,
 	)
 }
 

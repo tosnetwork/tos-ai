@@ -162,7 +162,7 @@ func wireResourceClaims(
 			Evidence: declaredEvidence(now, expires, issuer),
 		})
 	}
-	taskAvailability := tasks.Available
+	taskAvailability := tasks.AvailableExternal
 	if !snapshot.Accepting {
 		taskAvailability = 0
 	}
@@ -170,8 +170,9 @@ func wireResourceClaims(
 		Id:            resourceTaskSlots,
 		ResourceClass: edgev1.ResourceClass_RESOURCE_CLASS_STORAGE,
 		Unit:          edgev1.ResourceUnit_RESOURCE_UNIT_COUNT,
-		Total:         tasks.Capacity, AvailableExternal: taskAvailability,
-		Revision: revision,
+		Total:         tasks.Capacity, OwnerReserved: tasks.OwnerReserved,
+		AvailableExternal: taskAvailability,
+		Revision:          revision,
 		Evidence: readinessEvidence(
 			edgev1.EvidenceLevel_EVIDENCE_LEVEL_DECLARED,
 			now,

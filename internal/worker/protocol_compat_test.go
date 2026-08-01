@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -335,6 +336,76 @@ func TestTaskStoreSaturationBlocksRoutingAndRecoversAfterCleanup(t *testing.T) {
 	}
 }
 
+func TestTaskStoreOwnerReserveKeepsLocalQuoteAvailable(t *testing.T) {
+	service := newTestServiceAtTaskCapacity(
+		t,
+		filepath.Join(t.TempDir(), "worker-tasks.db"),
+		3,
+		1,
+	)
+	service.RefreshRuntimes(context.Background())
+	deadline := time.Now().Add(time.Minute)
+	for index := range 2 {
+		invocation := quotedInvocation(
+			t, service, fmt.Sprintf("owner-reserve-external-%d", index), deadline,
+		)
+		if _, err := service.Invoke(
+			context.Background(), connect.NewRequest(invocation),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capabilities, err := service.GetCapabilities(
+		context.Background(), connect.NewRequest(&edgev1.GetCapabilitiesRequest{}),
+	)
+	taskSlots := resourceClaimByID(capabilities.Msg.Resources, resourceTaskSlots)
+	if err != nil || len(capabilities.Msg.Capabilities) != 0 ||
+		taskSlots.Total != 3 || taskSlots.OwnerReserved != 1 ||
+		taskSlots.AvailableExternal != 0 {
+		t.Fatalf("owner-reserved capabilities=%v err=%v", capabilities, err)
+	}
+	if _, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "owner-reserve-external-blocked", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo",
+			InputBytes: 5, MaxOutputBytes: 16,
+			DeadlineUnixMillis: deadline.UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		}),
+	); err == nil || connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("external Quote consumed owner reserve: %v", err)
+	}
+	localQuote, err := service.Quote(
+		context.Background(), connect.NewRequest(&edgev1.QuoteRequest{
+			RequestId: "owner-reserve-local", ServiceId: "tos.ai.mock",
+			Operation: "generate", Model: "deterministic-echo",
+			InputBytes: 5, MaxOutputBytes: 16,
+			DeadlineUnixMillis: deadline.UnixMilli(),
+			Priority:           edgev1.Priority_PRIORITY_LOCAL_ASYNC,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("owner-local Quote was blocked: %v", err)
+	}
+	localInvocation := bindTestInvocation(t, &edgev1.InvokeRequest{
+		RequestId: "owner-reserve-local", QuoteId: localQuote.Msg.QuoteId,
+		ServiceId: "tos.ai.mock", Operation: "generate",
+		Model: "deterministic-echo", Payload: []byte("hello"),
+		MaxOutputBytes: 16, DeadlineUnixMillis: deadline.UnixMilli(),
+		Priority: edgev1.Priority_PRIORITY_LOCAL_ASYNC,
+	})
+	if _, err := service.Invoke(
+		context.Background(), connect.NewRequest(localInvocation),
+	); err != nil {
+		t.Fatalf("owner-local Invoke was blocked: %v", err)
+	}
+	stats, err := service.taskStore.Stats()
+	if err != nil || stats.Tasks != 3 || stats.OwnerTasks != 1 ||
+		stats.ExternalTasks != 2 || stats.Available != 0 {
+		t.Fatalf("owner-local store stats=%#v err=%v", stats, err)
+	}
+}
+
 func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 	service := newTestService(t)
 	service.RefreshRuntimes(context.Background())
@@ -439,6 +510,33 @@ func newTestServiceAtWithCapacity(
 	scheduler, controller := newTestDependencies(t, 4)
 	service, err := NewService(
 		testServiceConfigAtLimit(t, path, maxTasks), scheduler, controller,
+		[]airuntime.Adapter{mock.New(0)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = service.Shutdown(ctx)
+	})
+	return service
+}
+
+func newTestServiceAtTaskCapacity(
+	t *testing.T,
+	path string,
+	maxTasks int,
+	ownerReserved int,
+) *Service {
+	t.Helper()
+	scheduler, controller := newTestDependencies(t, 4)
+	service, err := NewService(
+		testServiceConfigAtTaskCapacity(
+			t, path, maxTasks, ownerReserved,
+		),
+		scheduler,
+		controller,
 		[]airuntime.Adapter{mock.New(0)},
 	)
 	if err != nil {

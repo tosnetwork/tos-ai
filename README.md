@@ -166,11 +166,18 @@ The worker also opens `-task-store`, a separate mode-0600 bbolt database in a
 mode-0700 non-symlink directory. When omitted it is placed beside the private
 socket as `worker-tasks.db`. It uses the protocol default of 10,000 retained
 tasks; `-task-store-max-tasks` may select a stricter positive bound up to the
-one-million hard ceiling. Request/result bytes, retention, execution duration,
-priority, and cleanup work retain independent protocol hard limits. The store
+one-million hard ceiling. `-task-store-owner-reserved` defaults to 64 and
+reserves those durable identities for `LOCAL_ASYNC`; external-service and
+background work cannot consume them. The reserve must not exceed total task
+capacity. Request/result bytes, retention, execution duration, priority, and
+cleanup work retain independent protocol hard limits. The store
 contains invocation payloads and successful outputs until retention expiry,
 so production deployments should use owner-controlled encrypted storage and
 exclude it from backups that outlive task retention.
+The current count and per-message bounds are not an exact bbolt file-size
+ceiling because deleted pages remain allocated. Production deployments must
+also use a dedicated filesystem/project quota and free-space alerting until
+the planned transactional logical-byte budget and compaction policy land.
 
 Startup first removes expired records through bounded cleanup pages, then
 scans every retained task through bounded payload-free pages. Because the

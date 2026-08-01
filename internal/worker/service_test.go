@@ -134,6 +134,15 @@ func testServiceConfigAtLimit(
 	path string,
 	maxTasks int,
 ) Config {
+	return testServiceConfigAtTaskCapacity(t, path, maxTasks, 0)
+}
+
+func testServiceConfigAtTaskCapacity(
+	t *testing.T,
+	path string,
+	maxTasks int,
+	ownerReserved int,
+) Config {
 	t.Helper()
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -142,6 +151,7 @@ func testServiceConfigAtLimit(
 		path,
 	)
 	storeConfig.MaxTasks = maxTasks
+	storeConfig.OwnerReservedTasks = ownerReserved
 	storeConfig.MaxInvocationDuration = time.Hour
 	storeConfig.AllowedPriorities = []edgev1.Priority{
 		edgev1.Priority_PRIORITY_LOCAL_ASYNC,
