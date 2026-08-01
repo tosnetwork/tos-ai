@@ -126,8 +126,8 @@ workspace with `go work init ./tos-protocol ./tos-ai`.
 
 The code-complete candidate boundary and the real-chain, key-custody,
 container-isolation, model-supply-chain, load/RSS and public-perimeter evidence
-still required for a production claim are tracked in the pinned protocol's
-`docs/non-streaming-v0.1-production-gates.md`.
+still required for a production claim are tracked only in the
+[canonical production-gate ledger](https://github.com/tosnetwork/tos-protocol/blob/main/docs/non-streaming-v0.1-production-gates.md).
 
 ## Run the development worker
 

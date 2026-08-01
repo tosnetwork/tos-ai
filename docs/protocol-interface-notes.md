@@ -3,8 +3,8 @@
 Status: non-streaming v0.1 M1 interface implemented and immutably pinned
 
 Deployment certification is tracked separately in
-`tos-protocol/docs/non-streaming-v0.1-production-gates.md`; it is not implied
-by interface completion or unit-test coverage.
+the [canonical production-gate ledger](https://github.com/tosnetwork/tos-protocol/blob/main/docs/non-streaming-v0.1-production-gates.md);
+it is not implied by interface completion or unit-test coverage.
 
 The immutable `tos-ai` pin is `tos-protocol` revision `c1e33bc6208e`. It
 includes the priority-aware task-store statistics, atomic owner-reserved slot

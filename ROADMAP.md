@@ -105,36 +105,16 @@ The active milestone is A2, the Tier 1 production candidate:
 
 ## External Certification
 
-The following require target hardware and deployment evidence:
+External certification covers the selected Tier 1 hardware, GPU/container
+isolation, model/update supply chain, live TOS authority and settlement, key
+custody, public perimeter, long-duration availability and memory, and release
+operations. Offline physical-control and fleet claims remain deferred until
+their later milestone and must not be inferred from A1.
 
-- **Tier 1 hardware:** supported NVIDIA driver/runtime matrix, cold start,
-  thermal behavior, power behavior, model load, sustained inference, and
-  owner-priority operation on the selected terminal class.
-- **Isolation:** exact kernel, cgroup v2, containerd, runc, seccomp, namespaces,
-  filesystem, network-none, and any NVIDIA device configuration; prove zero
-  residual runtime objects after success, failure, cancellation, and restart.
-- **Model supply chain:** real trust roots and signed artifacts; corruption,
-  incompatible runtime, interrupted activation, disk full, rollback,
-  anti-rollback, power loss, and offline rehearsal.
-- **Live TOS integration:** real controller/client authority, payment finality,
-  key rotation/revocation, reorganization, settlement policy, and restart
-  reconciliation on the local/test network.
-- **Key custody and public perimeter:** production Quote/Receipt custody,
-  private socket ownership, TLS ingress, authentication policy, rate limits,
-  firewall, redaction, and no public runtime endpoint.
-- **Availability and memory:** long-duration anonymous-load and fault-injection
-  tests recording RSS, heap, goroutines, file descriptors, bbolt/task-store,
-  disk, RAM, VRAM, queues, model cache, and container objects until steady
-  state is demonstrated.
-- **Offline/physical/fleet claims:** disconnected soak, bounded journal,
-  reconnect idempotency, real-time deadline priority, safe update rollout,
-  independent actuator safety, delegation/revocation, and bounded fleet fan-out
-  before those product classes are advertised.
-- **Release operations:** signed reproducible artifacts, rollback procedure,
-  upgrade compatibility, independent security review, and testnet observation.
-
-The shared deployment evidence requirements are maintained in
+The only mutable gate status, required evidence, evidence links and
+last-verification dates are maintained in
 [`tos-protocol/docs/non-streaming-v0.1-production-gates.md`](https://github.com/tosnetwork/tos-protocol/blob/main/docs/non-streaming-v0.1-production-gates.md).
+This ROADMAP intentionally does not duplicate that ledger.
 
 ## Release milestones
 
@@ -151,4 +131,5 @@ The shared deployment evidence requirements are maintained in
 Update this file in the same pull request whenever an implementation changes
 category. Automated tests close code items; they do not certify target hardware,
 privileged isolation, key custody, public networking, or long-duration memory
-behavior.
+behavior. External gate status changes only in the canonical production-gate
+ledger.
