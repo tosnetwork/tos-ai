@@ -61,10 +61,16 @@ consumer execution, a public shell, validator work, or token issuance.
 - Production config/systemd templates plus local one-node quorum tolerance,
   two-node fail-closed startup, signer/Worker outage readiness and bounded
   anonymous malformed-input evidence.
+- Independent-module, non-cached race/static gates; byte-identical command
+  builds; mock NVIDIA telemetry and GPU admission degradation/recovery; signer
+  rotation coverage; and concurrent TLS malformed-input rejection without
+  durable-store growth.
 
 ## In Progress
 
-The active milestone is A2, the Tier 1 production candidate:
+The active milestone is A2, the Tier 1 production candidate. All identified
+locally executable engineering and MOCK sub-gates are complete; the remaining
+work is target-deployment evidence and operator policy:
 
 - keep the exact immutable protocol pin, run independent CI for the compatible
   repository pair, and prepare release tagging;

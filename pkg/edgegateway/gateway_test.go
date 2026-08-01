@@ -1,13 +1,19 @@
 package edgegateway
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -121,6 +127,123 @@ func TestOpenRequiresCompleteTrustComposition(t *testing.T) {
 	wrongReference.Reference.ServiceID = "different.service"
 	if _, err := Open(context.Background(), wrongReference, dependencies); err == nil {
 		t.Fatal("descriptor/reference mismatch was accepted")
+	}
+}
+
+// TestLocalGateTLSMalformedInputSoak exercises the complete public gateway
+// composition over TLS with a bounded concurrent anonymous-input sample. It
+// deliberately uses malformed requests so no chain, payment, signer, or
+// Worker mock can turn the test into a false successful-service claim. The
+// important invariant is that every request is rejected before durable state
+// is created and the gateway remains live after the load subsides. Full
+// readiness is dependency-sensitive and is covered separately.
+func TestLocalGateTLSMalformedInputSoak(t *testing.T) {
+	client, closeWorker := newCapabilityWorkerClient(t)
+	defer closeWorker()
+	config := validGatewayConfig(t)
+	journalPath := config.CoreConfig.RequestJournalPath
+	observer, err := payment.NewObserver(inertPaymentResolver{}, payment.DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := Open(context.Background(), config, Dependencies{
+		AuthorityResolver: inertAuthorityResolver{},
+		ClientKeyResolver: inertClientKeyResolver{},
+		PaymentObserver:   observer, ChainReadiness: readyDependency{},
+		Worker: client, ReceiptSigner: inertReceiptSigner{},
+		ReceiptReadiness: readyDependency{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	handler, err := gateway.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	server.StartTLS()
+	defer server.Close()
+
+	const requestCount = 2_048
+	const concurrency = 32
+	jobs := make(chan struct{})
+	errorsSeen := make(chan error, requestCount)
+	var workers sync.WaitGroup
+	var rejected atomic.Uint64
+	var saturated atomic.Uint64
+	for range concurrency {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range jobs {
+				request, requestErr := http.NewRequest(
+					http.MethodPost, server.URL+"/tos/v1/actions",
+					bytes.NewBufferString("{"),
+				)
+				if requestErr != nil {
+					errorsSeen <- requestErr
+					continue
+				}
+				request.Header.Set("Content-Type", "application/json")
+				response, requestErr := server.Client().Do(request)
+				if requestErr != nil {
+					errorsSeen <- requestErr
+					continue
+				}
+				if response.TLS == nil || response.TLS.Version != tls.VersionTLS13 {
+					errorsSeen <- errors.New("request did not use TLS 1.3")
+				}
+				switch response.StatusCode {
+				case http.StatusUnauthorized:
+					rejected.Add(1)
+				case http.StatusServiceUnavailable:
+					// The paid-action admission bound is intentionally lower
+					// than this test's concurrency. Saturation must shed load
+					// without allocating durable request state.
+					saturated.Add(1)
+				default:
+					errorsSeen <- fmt.Errorf(
+						"malformed request returned unexpected HTTP %d",
+						response.StatusCode,
+					)
+				}
+				_ = response.Body.Close()
+			}
+		}()
+	}
+	for range requestCount {
+		jobs <- struct{}{}
+	}
+	close(jobs)
+	workers.Wait()
+	close(errorsSeen)
+	for requestErr := range errorsSeen {
+		t.Fatal(requestErr)
+	}
+	if rejected.Load() == 0 || rejected.Load()+saturated.Load() != requestCount {
+		t.Fatalf(
+			"malformed-input outcomes rejected=%d saturated=%d total=%d",
+			rejected.Load(), saturated.Load(), requestCount,
+		)
+	}
+
+	live, err := server.Client().Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = live.Body.Close()
+	if live.StatusCode != http.StatusOK {
+		t.Fatalf("gateway not live after malformed-input soak: %s", live.Status)
+	}
+	info, err := os.Stat(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 64<<10 {
+		t.Fatalf("malformed input unexpectedly grew journal to %d bytes", info.Size())
 	}
 }
 

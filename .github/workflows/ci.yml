@@ -18,3 +18,4 @@ jobs:
           cache: true
       - run: make all
       - run: make test-race
+      - run: make reproducible-builds
