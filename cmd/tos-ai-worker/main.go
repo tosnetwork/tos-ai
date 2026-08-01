@@ -66,6 +66,7 @@ func run() error {
 	var devMock bool
 	var mockDelay time.Duration
 	var runtimeConfigPath string
+	var isolatedRuntimeConfigPath string
 	var modelTrustConfigPath string
 	var terminalPolicyPath string
 	var taskStorePath string
@@ -88,6 +89,10 @@ func run() error {
 	flag.BoolVar(&devMock, "dev-mock", false, "explicitly enable the development-only mock runtime")
 	flag.DurationVar(&mockDelay, "mock-delay", 0, "development mock execution delay")
 	flag.StringVar(&runtimeConfigPath, "runtime-config", "", "private administrator runtime configuration")
+	flag.StringVar(
+		&isolatedRuntimeConfigPath, "isolated-runtime-config", "",
+		"private administrator CPU-only containerd runtime configuration",
+	)
 	flag.StringVar(
 		&modelTrustConfigPath, "model-trust-config", "",
 		"private signed-model trust configuration",
@@ -177,7 +182,8 @@ func run() error {
 		return err
 	}
 	runtimes, err := configuredRuntimes(
-		runtimeConfigPath, modelTrustConfigPath, devMock, mockDelay,
+		runtimeConfigPath, isolatedRuntimeConfigPath, modelTrustConfigPath,
+		devMock, mockDelay,
 	)
 	if err != nil {
 		resourceContext, cancelResources := context.WithTimeout(
@@ -425,21 +431,37 @@ type runtimeResources struct {
 	adapters      []airuntime.Adapter
 	activation    *modelactivation.Controller
 	configuration *operatorconfig.Configuration
+	isolated      *operatorconfig.IsolatedRuntime
 	modelManager  *modelmanager.Manager
 	profilePlan   *edge.ProfileInvocationPlan
 }
 
 func configuredRuntimes(
 	configPath string,
+	isolatedConfigPath string,
 	modelTrustPath string,
 	devMock bool,
 	mockDelay time.Duration,
+) (*runtimeResources, error) {
+	return configuredRuntimesWithFactory(
+		configPath, isolatedConfigPath, modelTrustPath, devMock, mockDelay,
+		operatorconfig.ContainerdBackendFactory{},
+	)
+}
+
+func configuredRuntimesWithFactory(
+	configPath string,
+	isolatedConfigPath string,
+	modelTrustPath string,
+	devMock bool,
+	mockDelay time.Duration,
+	isolatedFactory operatorconfig.IsolatedBackendFactory,
 ) (*runtimeResources, error) {
 	if mockDelay < 0 || mockDelay > time.Minute {
 		return nil, fmt.Errorf("mock delay exceeds hard limits")
 	}
 	if devMock {
-		if configPath != "" || modelTrustPath != "" {
+		if configPath != "" || isolatedConfigPath != "" || modelTrustPath != "" {
 			return nil, fmt.Errorf(
 				"development mock cannot be mixed with production configuration",
 			)
@@ -450,6 +472,39 @@ func configuredRuntimes(
 	}
 	if mockDelay != 0 {
 		return nil, fmt.Errorf("mock delay requires explicit development mock")
+	}
+	if configPath != "" && isolatedConfigPath != "" {
+		return nil, fmt.Errorf(
+			"HTTP and isolated runtime configurations are mutually exclusive",
+		)
+	}
+	if isolatedConfigPath != "" {
+		if modelTrustPath != "" {
+			return nil, fmt.Errorf(
+				"isolated runtime cannot use HTTP model trust configuration",
+			)
+		}
+		startupContext, cancelStartup := context.WithTimeout(
+			context.Background(), initialResourceTimeout,
+		)
+		isolated, err := operatorconfig.LoadIsolatedRuntime(
+			startupContext, isolatedConfigPath, isolatedFactory,
+		)
+		cancelStartup()
+		if err != nil {
+			return nil, fmt.Errorf("configure isolated runtime")
+		}
+		profilePlan, err := operatorconfig.TextGenerationProfilePlanForCapabilities(
+			[]airuntime.Capability{isolated.Adapter.Capability()},
+		)
+		if err != nil {
+			_ = isolated.Close()
+			return nil, fmt.Errorf("configure text-generation profile plan")
+		}
+		return &runtimeResources{
+			adapters: []airuntime.Adapter{isolated.Adapter},
+			isolated: isolated, profilePlan: profilePlan,
+		}, nil
 	}
 	if configPath == "" {
 		if modelTrustPath != "" {
@@ -573,11 +628,15 @@ func (r *runtimeResources) closeRuntimeState(ctx context.Context) error {
 	if r.configuration != nil {
 		backendErr = r.configuration.CloseBackends()
 	}
+	var isolatedErr error
+	if r.isolated != nil {
+		isolatedErr = r.isolated.Close()
+	}
 	var managerErr error
 	if r.modelManager != nil {
 		managerErr = r.modelManager.Close()
 	}
-	return errors.Join(activationErr, backendErr, managerErr)
+	return errors.Join(activationErr, backendErr, isolatedErr, managerErr)
 }
 
 func (r *runtimeResources) activationCleanupTimeout() time.Duration {

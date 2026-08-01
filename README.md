@@ -86,8 +86,9 @@ The Go 1.24 module currently contains:
   contract, plus an immutable policy-enforcing adapter that defensively copies
   requests and inputs, supplies the task deadline, preserves cancellation,
   contains backend panics/errors, requires an exact operator-owned network
-  destination allowlist, and rejects oversized or invalid results. No
-  containerd backend is enabled;
+  destination allowlist, and rejects oversized or invalid results. A bounded
+  CPU-only containerd driver exists, but no containerd backend is enabled by
+  default;
 - Ed25519-signed update manifest verification, SHA-256 artifact verification,
   expiry checks, target binding, and security-revision anti-rollback.
 
@@ -196,15 +197,42 @@ and hashed into a fixed `sha256:` execution digest before crossing the backend
 boundary; raw caller IDs never become container, snapshot, task, or filesystem
 names. A backend must reject a second live workload using the same digest.
 JSON cannot instantiate a backend by itself: the worker binary must inject an
-audited `IsolatedBackendFactory`, and
-the current production binary intentionally injects none because a concrete
-containerd backend has not yet passed review. See
+audited `IsolatedBackendFactory`. `ContainerdBackendFactory` now opens a real
+containerd 2.x SDK client only through an owner-private mode-0600 Unix socket,
+an exclusive private namespace/FIFO ownership lock, fixed `overlayfs`, and
+`io.containerd.runc.v2`. Its v0.1 execution subset is deliberately CPU-only,
+`network=none`, digest-qualified-reference and preloaded-image-only. The exact
+reference is loaded as one object and its target digest is rechecked, avoiding
+an unbounded image-list operation. It constructs a
+read-only, non-root, no-new-privileges OCI process with no capabilities,
+containerd's non-empty default seccomp allowlist, and bounded CPU, RAM, PIDs,
+tmpfs and combined output. Spec construction fails if that seccomp profile is
+unavailable. Successful execution also requires bounded cgroup v2 metrics:
+CPU microseconds are rounded up to milliseconds, memory uses the greater of
+current and peak usage, and block-device write bytes are summed with overflow
+and device-count checks. Unknown, cgroup v1, missing, or malformed metrics fail
+closed instead of becoming zero usage. Startup fails closed on
+managed container, snapshot or FIFO residue. The worker binary compiles in
+this one CPU-only factory and opens it only when the operator explicitly sets
+`-isolated-runtime-config`. That flag is mutually exclusive with `-dev-mock`,
+`-runtime-config`, and `-model-trust-config`; startup opens and validates the
+private daemon before the Worker socket begins serving. This is an integration
+path for certification and controlled deployments, not a claim that the
+privileged isolation launch gate has passed. See
 [docs/isolated-runtime-config.example.json](docs/isolated-runtime-config.example.json).
 An isolated backend must also provide a bounded, cancellation-aware readiness
 probe. Every Worker preflight calls it before advertising the configured
 binding; backend errors and panics become a stable unavailable result and
 cannot leak runtime details. Static JSON alone therefore cannot make a dead
 backend appear ready.
+Every factory result is wrapped in a process-local `SupervisedBackend` before
+it reaches the policy executor. Its mandatory `backend.maxActive` setting is
+bounded to 256, fixes both the semaphore and active-digest map capacity at
+startup, rejects excess work without creating internal waiters, and rejects a
+duplicate live digest before the driver. Shutdown atomically stops admission,
+closes the driver, and waits for registered executions to finish cleanup. The
+supervisor creates no goroutine and is not a substitute for inspecting
+containerd residue after process restart.
 Future backend implementations must also pass the reusable lifecycle suite in
 `pkg/executor/backendtest`, which checks bounded readiness, success,
 cancellation, duplicate-identity rejection, concurrency, and zero
@@ -487,7 +515,7 @@ This repository also does not yet provide public ingress or the deployment
 composition that installs its reviewed mapper into `tos-edge`, TOS payment
 authorization, receipts, settlement, ARD publication/Registry hosting, fleet
 management, an offline journal, a remote metrics collector/exporter, streaming
-RPC, a production containerd backend,
+RPC, privileged containerd isolation certification,
 physical-I/O control, or audited NVIDIA runtime packaging. It does not support
 arbitrary consumer containers/programs/models, unrestricted fine-tuning,
 training, token issuance, or bare GPU rental.

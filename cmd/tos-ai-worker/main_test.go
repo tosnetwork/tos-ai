@@ -25,6 +25,7 @@ import (
 	"github.com/tosnetwork/tos-ai/internal/operatorconfig"
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/executor"
 	"github.com/tosnetwork/tos-ai/pkg/modelactivation"
 	"github.com/tosnetwork/tos-ai/pkg/modelapproval"
 	"github.com/tosnetwork/tos-ai/pkg/modelmanager"
@@ -35,38 +36,165 @@ import (
 )
 
 func TestConfiguredAdaptersRequireExplicitModeAndRejectMixing(t *testing.T) {
-	if _, err := configuredRuntimes("", "", false, 0); err == nil {
+	if _, err := configuredRuntimes("", "", "", false, 0); err == nil {
 		t.Fatal("missing production configuration failed open to mock")
 	}
-	runtimes, err := configuredRuntimes("", "", true, 0)
+	runtimes, err := configuredRuntimes("", "", "", true, 0)
 	if err != nil || len(runtimes.adapters) != 1 ||
 		runtimes.adapters[0].Capability().Runtime != "mock" {
 		t.Fatalf("explicit development runtimes=%v err=%v", runtimes, err)
 	}
 	if _, err := configuredRuntimes(
-		"/private/runtime.json", "", true, 0,
+		"/private/runtime.json", "", "", true, 0,
 	); err == nil {
 		t.Fatal("mock and production runtime configuration accepted together")
 	}
 	if _, err := configuredRuntimes(
-		"", "/private/trust.json", false, 0,
+		"", "/private/isolated.json", "", true, 0,
+	); err == nil {
+		t.Fatal("isolated runtime was mixed with development mock")
+	}
+	if _, err := configuredRuntimes(
+		"/private/runtime.json", "/private/isolated.json", "", false, 0,
+	); err == nil {
+		t.Fatal("HTTP and isolated runtime configurations were mixed")
+	}
+	if _, err := configuredRuntimes(
+		"", "/private/isolated.json", "/private/trust.json", false, 0,
+	); err == nil {
+		t.Fatal("HTTP model trust was mixed with isolated runtime")
+	}
+	if _, err := configuredRuntimes(
+		"", "", "/private/trust.json", false, 0,
 	); err == nil {
 		t.Fatal("model trust without a production runtime was accepted")
 	}
 	if _, err := configuredRuntimes(
-		"", "", false, time.Millisecond,
+		"", "", "", false, time.Millisecond,
 	); err == nil {
 		t.Fatal("mock delay enabled the development runtime implicitly")
 	}
 	if _, err := configuredRuntimes(
-		"/private/runtime.json", "", false, time.Millisecond,
+		"/private/runtime.json", "", "", false, time.Millisecond,
 	); err == nil {
 		t.Fatal("mock delay was mixed with production configuration")
 	}
 	for _, delay := range []time.Duration{-time.Nanosecond, time.Minute + 1} {
-		if _, err := configuredRuntimes("", "", true, delay); err == nil {
+		if _, err := configuredRuntimes("", "", "", true, delay); err == nil {
 			t.Fatalf("out-of-bounds development mock delay accepted: %v", delay)
 		}
+	}
+}
+
+type workerIsolatedBackend struct {
+	mutex  sync.Mutex
+	closes int
+}
+
+func (*workerIsolatedBackend) CheckReady(context.Context) error { return nil }
+
+func (*workerIsolatedBackend) RunIsolated(
+	context.Context,
+	executor.ContainerRequest,
+	[]byte,
+) (executor.Result, error) {
+	return executor.Result{Output: []byte("ok")}, nil
+}
+
+func (b *workerIsolatedBackend) Close() error {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.closes++
+	return nil
+}
+
+type workerIsolatedFactory struct {
+	backend *workerIsolatedBackend
+	calls   int
+}
+
+func (f *workerIsolatedFactory) Open(
+	context.Context,
+	operatorconfig.IsolatedBackendConfig,
+) (operatorconfig.IsolatedBackend, error) {
+	f.calls++
+	return f.backend, nil
+}
+
+func workerIsolatedRuntimeJSON(operation string) string {
+	modelDigest := "sha256:" + strings.Repeat("1", 64)
+	imageDigest := "sha256:" + strings.Repeat("2", 64)
+	return fmt.Sprintf(`{
+		"version":1,
+		"backend":{
+			"type":"containerd","socketPath":"/run/tos-ai/containerd.sock",
+			"namespace":"tos-ai","snapshotter":"overlayfs",
+			"runtime":"io.containerd.runc.v2",
+			"fifoDir":"/run/tos-ai/containerd-fifos","maxActive":2
+		},
+		"capability":{
+			"serviceId":"tos.ai.isolated","operation":%q,"model":"fixed-model",
+			"modelDigest":%q,"runtime":"containerd","runtimeRevision":"containerd-2",
+			"maxInputBytes":1024,"maxOutputBytes":2048,"acceptedPriorities":[4,5],
+			"admission":{"ramBytes":1048576,"contextTokens":4096,
+				"batchSize":1,"executionMillis":5000}
+		},
+		"container":{
+			"imageReference":"registry.example/tos/infer@%s",
+			"imageDigest":%q,"entrypoint":["/opt/tos/infer","--stdio"],
+			"userId":65532,"groupId":65532,"network":"none",
+			"cpuMillis":2000,"diskBytes":1048576,"pids":32
+		}
+	}`, operation, modelDigest, imageDigest, imageDigest)
+}
+
+func TestConfiguredRuntimesExplicitlyComposesIsolatedBackend(t *testing.T) {
+	backend := &workerIsolatedBackend{}
+	factory := &workerIsolatedFactory{backend: backend}
+	path := writeWorkerPrivate(
+		t, "isolated.json", workerIsolatedRuntimeJSON("generate"),
+	)
+	resources, err := configuredRuntimesWithFactory(
+		"", path, "", false, 0, factory,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.calls != 1 || len(resources.adapters) != 1 ||
+		resources.isolated == nil || resources.profilePlan == nil ||
+		resources.profilePlan.Len() != 1 {
+		t.Fatalf("isolated resources=%#v factory=%#v", resources, factory)
+	}
+	if err := resources.closeRuntimeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.closeRuntimeState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	backend.mutex.Lock()
+	closes := backend.closes
+	backend.mutex.Unlock()
+	if closes != 1 {
+		t.Fatalf("isolated backend closes=%d", closes)
+	}
+}
+
+func TestConfiguredRuntimesRejectsUnroutableIsolatedCapability(t *testing.T) {
+	backend := &workerIsolatedBackend{}
+	factory := &workerIsolatedFactory{backend: backend}
+	path := writeWorkerPrivate(
+		t, "isolated.json", workerIsolatedRuntimeJSON("infer"),
+	)
+	if resources, err := configuredRuntimesWithFactory(
+		"", path, "", false, 0, factory,
+	); err == nil || resources != nil {
+		t.Fatal("unroutable isolated capability was accepted")
+	}
+	backend.mutex.Lock()
+	closes := backend.closes
+	backend.mutex.Unlock()
+	if closes != 1 {
+		t.Fatalf("failed composition backend closes=%d", closes)
 	}
 }
 
@@ -125,7 +253,7 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 		"verifyTimeoutMillis":1000,
 		"signers":[{"keyId":"models","publicKey":%q}]
 	}`, cacheDir, base64.StdEncoding.EncodeToString(publicKey)))
-	runtimes, err := configuredRuntimes(runtimePath, trustPath, false, 0)
+	runtimes, err := configuredRuntimes(runtimePath, "", trustPath, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +286,7 @@ func TestConfiguredAdaptersCanRequireSignedCachedModel(t *testing.T) {
 	)
 	missingPath := writeWorkerPrivate(t, "missing-runtime.json", missingRuntime)
 	if _, err := configuredRuntimes(
-		missingPath, trustPath, false, 0,
+		missingPath, "", trustPath, false, 0,
 	); err == nil || strings.Contains(err.Error(), cacheDir) {
 		t.Fatalf("missing approved digest error=%v", err)
 	}
@@ -238,7 +366,7 @@ func TestConfiguredRuntimesActivatesRecoversAndCleansApprovedOllamaModel(
 	start := func() *runtimeResources {
 		t.Helper()
 		resources, err := configuredRuntimes(
-			runtimePath, trustPath, false, 0,
+			runtimePath, "", trustPath, false, 0,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -304,7 +432,7 @@ func TestConfiguredRuntimesRequiresTrustAndSeparateActivationState(t *testing.T)
 		}]
 	}`, stateDir, digest))
 	if _, err := configuredRuntimes(
-		runtimePath, "", false, 0,
+		runtimePath, "", "", false, 0,
 	); err == nil {
 		t.Fatal("activation without signed model trust succeeded")
 	}
@@ -319,7 +447,7 @@ func TestConfiguredRuntimesRequiresTrustAndSeparateActivationState(t *testing.T)
 		"signers":[{"keyId":"models","publicKey":%q}]
 	}`, cacheDir, base64.StdEncoding.EncodeToString(publicKey)))
 	if _, err := configuredRuntimes(
-		runtimePath, trustPath, false, 0,
+		runtimePath, "", trustPath, false, 0,
 	); err == nil {
 		t.Fatal("overlapping model cache and activation state succeeded")
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,12 +35,21 @@ const (
 	MaxIsolatedPIDs              = uint32(1 << 20)
 )
 
-var namespacePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
+var namespacePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,75}$`)
 
 type IsolatedBackendConfig struct {
-	Type       string
-	SocketPath string
-	Namespace  string
+	Type           string
+	SocketPath     string
+	Namespace      string
+	Snapshotter    string
+	Runtime        string
+	FIFODir        string
+	MaxActive      int
+	PermitGPU      bool
+	PermitNetwork  bool
+	Limits         executor.Limits
+	ImageReference string
+	ImageDigest    string
 }
 
 // IsolatedBackend is the narrow lifecycle owned by a future audited backend.
@@ -82,9 +92,13 @@ type isolatedRuntimeFile struct {
 }
 
 type isolatedBackendFile struct {
-	Type       string `json:"type"`
-	SocketPath string `json:"socketPath"`
-	Namespace  string `json:"namespace"`
+	Type        string `json:"type"`
+	SocketPath  string `json:"socketPath"`
+	Namespace   string `json:"namespace"`
+	Snapshotter string `json:"snapshotter"`
+	Runtime     string `json:"runtime"`
+	FIFODir     string `json:"fifoDir"`
+	MaxActive   int    `json:"maxActive"`
 }
 
 type isolatedCapabilityFile struct {
@@ -110,18 +124,19 @@ type isolatedAdmissionFile struct {
 }
 
 type isolatedContainerFile struct {
-	ImageDigest  string               `json:"imageDigest"`
-	Entrypoint   []string             `json:"entrypoint"`
-	Environment  map[string]string    `json:"environment,omitempty"`
-	UserID       uint32               `json:"userId"`
-	GroupID      uint32               `json:"groupId"`
-	Network      executor.NetworkMode `json:"network"`
-	AllowedHosts []string             `json:"allowedHosts,omitempty"`
-	AllowGPU     bool                 `json:"allowGpu,omitempty"`
-	CPUMillis    uint64               `json:"cpuMillis"`
-	DiskBytes    uint64               `json:"diskBytes"`
-	PIDs         uint32               `json:"pids"`
-	GPUDevices   uint32               `json:"gpuDevices,omitempty"`
+	ImageReference string               `json:"imageReference"`
+	ImageDigest    string               `json:"imageDigest"`
+	Entrypoint     []string             `json:"entrypoint"`
+	Environment    map[string]string    `json:"environment,omitempty"`
+	UserID         uint32               `json:"userId"`
+	GroupID        uint32               `json:"groupId"`
+	Network        executor.NetworkMode `json:"network"`
+	AllowedHosts   []string             `json:"allowedHosts,omitempty"`
+	AllowGPU       bool                 `json:"allowGpu,omitempty"`
+	CPUMillis      uint64               `json:"cpuMillis"`
+	DiskBytes      uint64               `json:"diskBytes"`
+	PIDs           uint32               `json:"pids"`
+	GPUDevices     uint32               `json:"gpuDevices,omitempty"`
 }
 
 // LoadIsolatedRuntime parses a private, strict operator file and asks only the
@@ -152,13 +167,18 @@ func LoadIsolatedRuntime(
 	if err != nil {
 		return nil, err
 	}
-	backend, err := openIsolatedBackend(ctx, factory, backendConfig)
-	if err != nil || nilIsolatedBackend(backend) {
+	driver, err := openIsolatedBackend(ctx, factory, backendConfig)
+	if err != nil || nilIsolatedBackend(driver) {
 		return nil, errors.New("open isolated runtime backend")
 	}
 	if err := ctx.Err(); err != nil {
-		_ = closeIsolatedBackend(backend)
+		_ = closeIsolatedBackend(driver)
 		return nil, err
+	}
+	backend, err := executor.NewSupervisedBackend(driver, backendConfig.MaxActive)
+	if err != nil {
+		_ = closeIsolatedBackend(driver)
+		return nil, errors.New("configure isolated runtime supervisor")
 	}
 	execution, err := executor.NewPolicyExecutor(policy, backend)
 	if err != nil {
@@ -187,7 +207,13 @@ func buildIsolatedConfiguration(file isolatedRuntimeFile) (
 		file.Backend.Type != "containerd" ||
 		!filepath.IsAbs(file.Backend.SocketPath) ||
 		filepath.Clean(file.Backend.SocketPath) != file.Backend.SocketPath ||
+		!filepath.IsAbs(file.Backend.FIFODir) ||
+		filepath.Clean(file.Backend.FIFODir) != file.Backend.FIFODir ||
+		file.Backend.Snapshotter != "overlayfs" ||
+		file.Backend.Runtime != "io.containerd.runc.v2" ||
 		!namespacePattern.MatchString(file.Backend.Namespace) ||
+		file.Backend.MaxActive <= 0 ||
+		file.Backend.MaxActive > executor.MaxSupervisedActiveHard ||
 		file.Capability.Runtime != file.Backend.Type ||
 		file.Capability.Admission.ExecutionMilli <= 0 ||
 		file.Capability.Admission.ExecutionMilli > MaxIsolatedExecutionMillis ||
@@ -199,6 +225,12 @@ func buildIsolatedConfiguration(file isolatedRuntimeFile) (
 		file.Container.CPUMillis > MaxIsolatedCPUMillis ||
 		file.Container.DiskBytes > MaxIsolatedDiskBytes ||
 		file.Container.PIDs > MaxIsolatedPIDs ||
+		len(file.Container.ImageReference) == 0 ||
+		len(file.Container.ImageReference) > MaxIsolatedStringBytes ||
+		strings.IndexByte(file.Container.ImageReference, 0) >= 0 ||
+		!strings.HasSuffix(
+			file.Container.ImageReference, "@"+file.Container.ImageDigest,
+		) ||
 		len(file.Container.Entrypoint) == 0 ||
 		len(file.Container.Entrypoint) > MaxIsolatedArguments ||
 		len(file.Container.Environment) > MaxIsolatedEnvironment ||
@@ -264,7 +296,12 @@ func buildIsolatedConfiguration(file isolatedRuntimeFile) (
 	}
 	return IsolatedBackendConfig{
 		Type: file.Backend.Type, SocketPath: file.Backend.SocketPath,
-		Namespace: file.Backend.Namespace,
+		Namespace: file.Backend.Namespace, Snapshotter: file.Backend.Snapshotter,
+		Runtime: file.Backend.Runtime, FIFODir: file.Backend.FIFODir,
+		MaxActive: file.Backend.MaxActive, PermitGPU: file.Container.AllowGPU,
+		PermitNetwork: file.Container.Network != executor.NetworkNone,
+		Limits:        limits, ImageReference: file.Container.ImageReference,
+		ImageDigest: file.Container.ImageDigest,
 	}, capability, spec, policy, nil
 }
 

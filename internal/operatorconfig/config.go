@@ -149,8 +149,20 @@ func (c *Configuration) TextGenerationProfilePlan() (
 		len(c.profileCapabilities) > MaxAdapters {
 		return nil, errors.New("invalid runtime configuration for profile routing")
 	}
+	return TextGenerationProfilePlanForCapabilities(c.profileCapabilities)
+}
+
+// TextGenerationProfilePlanForCapabilities constructs the same immutable Edge
+// routing plan for an explicitly composed runtime, including the isolated
+// containerd adapter. Invocation payloads cannot add routes to this plan.
+func TextGenerationProfilePlanForCapabilities(
+	capabilities []airuntime.Capability,
+) (*edge.ProfileInvocationPlan, error) {
+	if len(capabilities) == 0 || len(capabilities) > MaxAdapters {
+		return nil, errors.New("invalid capabilities for profile routing")
+	}
 	mapper, err := textgeneration.NewMapperFromCapabilities(
-		cloneCapabilities(c.profileCapabilities),
+		cloneCapabilities(capabilities),
 	)
 	if err != nil {
 		return nil, err

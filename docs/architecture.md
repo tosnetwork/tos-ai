@@ -458,9 +458,9 @@ the Unix identity boundary.
 
 ## Execution isolation
 
-`pkg/executor` remains fail closed. `DenyAll` is the default and there is no
-production containerd backend. `PolicyExecutor` is the mandatory adapter for a
-future audited client: it clones the operator policy at construction,
+`pkg/executor` remains fail closed by default and `DenyAll` is still available.
+`PolicyExecutor` is the mandatory adapter for an isolated client: it clones the
+operator policy at construction,
 revalidates every request, defensively copies the runtime request and input,
 derives a backend deadline from the task limit, preserves standard cancellation
 errors, rejects a late result even from a noncompliant backend, contains other
@@ -509,10 +509,60 @@ derives a single-image `Policy` whose arguments, environment, network hosts,
 GPU permission, input and resource ceilings exactly match the immutable spec;
 read-only root, non-root UID/GID and no-new-privileges are mandatory, while
 privilege, host mounts and runtime-socket exposure are not expressible. Its
-owned backend is closed exactly once. The current worker does not inject a
-factory, so configuration text alone cannot turn this reviewed contract into
-an unaudited execution path. The schema is illustrated in
+owned backend is closed exactly once. The worker injects exactly the compiled-in
+CPU-only containerd factory when `-isolated-runtime-config` is explicitly
+present. It rejects any attempt to combine that mode with the development mock,
+the HTTP runtime configuration, or HTTP model-trust configuration. Configuration
+text cannot select a different factory or expand the compiled-in authority. The
+schema is illustrated in
 `docs/isolated-runtime-config.example.json`.
+
+The factory result is always wrapped in `executor.SupervisedBackend` with the
+explicit startup-only `backend.maxActive` limit (hard maximum 256). Admission,
+duplicate-digest detection, and the active map share that fixed ceiling;
+capacity exhaustion is rejected immediately, so the supervisor owns no
+unbounded waiter queue. Close first prevents new registration, then closes the
+driver and synchronously waits for all registered calls to leave. It creates no
+goroutine. A concrete driver must still inspect its private containerd
+namespace and fail closed on pre-existing crash residue.
+
+`pkg/executor/containerdbackend` now supplies the first real SDK-backed driver
+candidate. It pins the containerd Go client to v2.0.11, opens only a private
+owned mode-0600 Unix socket, exclusively owns a mode-0700 FIFO directory, and
+uses one fixed private namespace, `overlayfs`, and
+`io.containerd.runc.v2`. Runtime IDs are the 64 lowercase hexadecimal bytes of
+the already domain-separated execution digest; raw task or payload data never
+becomes an object name. Startup rejects matching container/snapshot or FIFO
+residue rather than deleting uncertain state. The driver accepts only
+one preloaded digest-qualified image reference whose returned target digest is
+rechecked without listing tags, and CPU-only
+`network=none` requests. Its OCI override enforces non-root UID/GID, read-only
+root, no-new-privileges, empty capability sets, a non-empty default seccomp
+allowlist, a private network namespace, CPU CFS, RAM, PID and bounded
+non-executable tmpfs mounts. Stdout and stderr
+share one fixed output budget. Cancellation and shutdown synchronously kill
+and delete the task, container and snapshot using a separately bounded cleanup
+context. The driver and supervisor both have the same fixed active ceiling and
+own no admission wait queue.
+
+Before cleanup, every successful task must return cgroup v2 metrics with CPU
+and memory records. CPU microseconds round upward to whole milliseconds,
+peak-memory accounting never falls below current usage, and block-device write
+bytes are accumulated across at most 4,096 entries with checked arithmetic.
+Unsupported cgroup versions, missing records, identity mismatches, malformed
+protobuf data, or metric overflow reject the result. Writable tmpfs capacity is
+still enforced independently by mount size; cgroup block-write bytes do not
+measure tmpfs write volume.
+
+This is implementation, not isolation certification. The worker binary exposes
+the candidate only through an explicit mutually exclusive startup flag and
+fails before listening if backend composition fails. Network allowlists and GPU
+assignment are rejected, not partially implemented. CPU, memory and block-write
+metrics are enforced internally but are not yet exposed as billable Worker v0.1
+usage, and block writes are not writable-tmpfs volume. Usage-dependent charging
+therefore remains unavailable. LSM policy and privileged seccomp enforcement, a private daemon fixture,
+adversarial privileged tests, crash/reboot residue rehearsal, and packaging
+remain launch gates.
 
 The backend also implements a side-effect-free `CheckReady` operation. The
 runtime adapter invokes it on every existing bounded/coalesced Worker
@@ -609,7 +659,10 @@ Implemented:
 - fixed-profile `PolicyExecutor`-backed runtime adapter with immutable
   operator-owned workload identity and declared-only model evidence
 - strict private isolated-runtime configuration plus compiled-in backend
-  factory gate and exact single-profile policy derivation
+  factory gate, explicit production-binary composition and exact single-profile
+  policy derivation
+- fixed-capacity, duplicate-safe workload supervisor with synchronous driver
+  shutdown and no internal goroutine or waiter queue
 - reusable isolated-backend lifecycle conformance harness covering readiness,
   success, cancellation, duplicate execution identity, concurrency and zero
   runtime-object residue
@@ -620,8 +673,8 @@ Planned, not claimed by this release:
 - live administrator lifecycle controls for fixed activation slots
 - authenticated policy rollout, hot reload, and dynamic capacity resizing or
   cross-process host coordination
-- audited containerd execution backend, production-binary factory wiring and
-  packaging
+- privileged certification, production-binary wiring and packaging for the
+  CPU-only containerd driver; later reviewed GPU and network policy backends
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, settlement, and explicit mapper
   installation through Edge Core

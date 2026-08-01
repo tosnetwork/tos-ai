@@ -1,7 +1,8 @@
 # Isolated backend conformance
 
-Status: reusable black-box lifecycle harness implemented; no production
-containerd backend or privileged isolation certification is claimed.
+Status: reusable black-box lifecycle harness and CPU-only SDK driver candidate
+implemented with explicit production-binary composition; no privileged
+isolation certification is claimed.
 
 `pkg/executor/backendtest` gives every future isolated-execution backend one
 common minimum lifecycle test. A backend test supplies a `Factory`, an
@@ -88,3 +89,65 @@ privileged platform tests that independently verify at least:
 Passing this suite is therefore a required launch gate for a backend, not an
 isolation attestation. The production Worker remains fail closed until an
 audited backend is explicitly compiled in through `IsolatedBackendFactory`.
+Factory results are wrapped by the fixed-capacity `executor.SupervisedBackend`
+before use; conformance tests for a driver must still exercise the driver
+directly so the wrapper cannot hide driver cleanup or collision defects.
+
+`pkg/executor/containerdbackend` currently passes its non-privileged lifecycle,
+configuration, bounded-output and generated-OCI-spec tests with a fake engine.
+Those tests verify fixed-capacity cancellation/close behavior, panic
+containment, digest-only identity, private socket/FIFO validation, capability
+removal, non-root/read-only/no-new-privileges policy, non-empty default seccomp
+generation, private networking and resource fields. They do not prove that the
+host runtime enforces seccomp and do not replace the private-daemon privileged
+suite above.
+
+The SDK driver accepts only cgroup v2 task metrics. CPU and memory records are
+mandatory; IO records have a 4,096-device ceiling and checked write-byte
+addition. Unknown metric types, missing records, malformed payloads and
+overflow fail closed. Privileged fixtures must additionally show that the
+daemon reports final metrics after process exit and before task deletion, and
+that the observed values cannot exceed policy without rejecting the result.
+
+`tos-ai-worker -isolated-runtime-config <private-file>` is the only production
+binary entry point for this driver. It is mutually exclusive with the HTTP
+runtime, HTTP model-trust and development-mock modes. The binary opens and
+validates the private socket, namespace, image binding and residue state before
+starting its Worker listener, and closes the owned backend synchronously during
+shutdown. Operators must not describe this composition as certified until the
+privileged suite in this document passes on every supported deployment image.
+
+## Live lifecycle suite
+
+`TestContainerdBackendLiveConformance` connects the SDK driver to a real
+private daemon and runs the reusable lifecycle harness. It is skipped unless
+all five variables below are set; a partial environment fails instead of
+silently skipping:
+
+```text
+TOS_AI_CONTAINERD_TEST_SOCKET
+TOS_AI_CONTAINERD_TEST_NAMESPACE
+TOS_AI_CONTAINERD_TEST_FIFO_DIR
+TOS_AI_CONTAINERD_TEST_IMAGE_REFERENCE
+TOS_AI_CONTAINERD_TEST_IMAGE_DIGEST
+```
+
+The socket and its parent must satisfy the production owner/mode checks. The
+namespace must already contain the exact digest-qualified image record and the
+image must be unpacked for `overlayfs`. The fixture image must provide
+`/bin/sh`, `read`, `printf`, and `sleep` to an unprivileged numeric user with a
+read-only root filesystem. The namespace must contain no managed 64-hex
+container or snapshot identity before the run. The suite neither pulls an image
+nor deletes uncertain pre-existing residue.
+
+Run it explicitly with:
+
+```sh
+go test -race -count=1 \
+  ./pkg/executor/containerdbackend \
+  -run TestContainerdBackendLiveConformance -v
+```
+
+This closes the live lifecycle gate only. Independent privileged tests must
+still verify namespace/cgroup/seccomp/LSM enforcement and adversarial resource
+limits from outside the workload.

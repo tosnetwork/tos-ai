@@ -89,7 +89,7 @@ func validIsolatedConfig() string {
 	image := "sha256:" + strings.Repeat("2", 64)
 	return `{
   "version": 1,
-  "backend": {"type":"containerd","socketPath":"/run/tos-ai/containerd.sock","namespace":"tos-ai"},
+  "backend": {"type":"containerd","socketPath":"/run/tos-ai/containerd.sock","namespace":"tos-ai","snapshotter":"overlayfs","runtime":"io.containerd.runc.v2","fifoDir":"/run/tos-ai/containerd-fifos","maxActive":8},
   "capability": {
     "serviceId":"tos.ai.isolated","operation":"infer","model":"fixed-model",
     "modelDigest":"` + digest + `","runtime":"containerd","runtimeRevision":"containerd-2",
@@ -97,6 +97,7 @@ func validIsolatedConfig() string {
     "admission":{"ramBytes":1048576,"contextTokens":4096,"batchSize":1,"executionMillis":5000}
   },
   "container": {
+    "imageReference":"registry.example/tos/infer@` + image + `",
     "imageDigest":"` + image + `","entrypoint":["/opt/tos/infer","--stdio"],
     "environment":{"MODEL_PATH":"/models/fixed"},"userId":65532,"groupId":65532,
     "network":"none","cpuMillis":2000,"diskBytes":1048576,"pids":32
@@ -114,6 +115,7 @@ func writeIsolatedConfig(t *testing.T, data string) string {
 }
 
 func TestLoadIsolatedRuntimeBindsFixedPolicy(t *testing.T) {
+	image := "sha256:" + strings.Repeat("2", 64)
 	backend := &testIsolatedBackend{result: executor.Result{
 		Output: []byte("result"),
 		Usage:  executor.Usage{CPUMillis: 10, PeakMemory: 100, Duration: time.Millisecond},
@@ -127,7 +129,13 @@ func TestLoadIsolatedRuntimeBindsFixedPolicy(t *testing.T) {
 	}
 	if factory.calls != 1 || factory.config.Type != "containerd" ||
 		factory.config.SocketPath != "/run/tos-ai/containerd.sock" ||
-		factory.config.Namespace != "tos-ai" {
+		factory.config.Namespace != "tos-ai" ||
+		factory.config.Snapshotter != "overlayfs" ||
+		factory.config.Runtime != "io.containerd.runc.v2" ||
+		factory.config.FIFODir != "/run/tos-ai/containerd-fifos" ||
+		factory.config.ImageReference != "registry.example/tos/infer@"+image ||
+		factory.config.ImageDigest != image ||
+		factory.config.MaxActive != 8 {
 		t.Fatalf("unexpected backend factory call: %#v", factory)
 	}
 	capability := runtime.Adapter.Capability()
@@ -172,7 +180,13 @@ func TestLoadIsolatedRuntimeRejectsAuthorityExpansion(t *testing.T) {
 		"unknown":               strings.Replace(valid, `"version": 1`, `"version": 1,"domain":"evil"`, 1),
 		"duplicate":             strings.Replace(valid, `"version": 1`, `"version": 1,"version":1`, 1),
 		"remote socket":         strings.Replace(valid, "/run/tos-ai/containerd.sock", "tcp://host:1", 1),
+		"relative fifo":         strings.Replace(valid, "/run/tos-ai/containerd-fifos", "relative-fifos", 1),
+		"unknown snapshotter":   strings.Replace(valid, `"snapshotter":"overlayfs"`, `"snapshotter":"native"`, 1),
+		"unknown OCI runtime":   strings.Replace(valid, `"runtime":"io.containerd.runc.v2"`, `"runtime":"io.containerd.kata.v2"`, 1),
+		"unpinned image ref":    strings.Replace(valid, "registry.example/tos/infer@sha256:", "registry.example/tos/infer:latest#sha256:", 1),
 		"unknown backend":       strings.Replace(valid, `"type":"containerd"`, `"type":"shell"`, 1),
+		"zero active limit":     strings.Replace(valid, `"maxActive":8`, `"maxActive":0`, 1),
+		"excess active limit":   strings.Replace(valid, `"maxActive":8`, `"maxActive":257`, 1),
 		"runtime mismatch":      strings.Replace(valid, `"runtime":"containerd"`, `"runtime":"other"`, 1),
 		"root user":             strings.Replace(valid, `"userId":65532`, `"userId":0`, 1),
 		"network without hosts": strings.Replace(valid, `"network":"none"`, `"network":"allowlist"`, 1),

@@ -1,5 +1,5 @@
-// Package executor defines the isolation contract for future containerd-backed
-// execution. No arbitrary workload executor is enabled by the bootstrap.
+// Package executor defines the isolation contract for containerd-backed
+// execution. No arbitrary workload executor is enabled by default.
 package executor
 
 import (
@@ -80,14 +80,14 @@ type Executor interface {
 	Execute(context.Context, string, Spec, []byte) (Result, error)
 }
 
-// ContainerdClient is the narrow client a future audited backend must
+// ContainerdClient is the narrow client an isolated backend must
 // implement. ExecutionDigest is the only permitted runtime-object identity;
 // implementations must reject a second live workload with the same digest and
 // must never derive paths or runtime names from caller payloads. They must also
 // honor context cancellation by stopping and cleaning up the workload before
 // returning. Result and Usage are treated as untrusted input and validated by
-// PolicyExecutor. This package intentionally does not provide a concrete
-// containerd implementation yet.
+// PolicyExecutor. The CPU-only implementation lives in the separate
+// executor/containerdbackend package and remains an explicit operator choice.
 type ContainerdClient interface {
 	RunIsolated(context.Context, ContainerRequest, []byte) (Result, error)
 }
