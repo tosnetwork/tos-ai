@@ -1,6 +1,6 @@
 # tos-ai Roadmap
 
-Status: private Worker and non-streaming profile foundation implemented  
+Status: non-streaming M1 composition and local integration complete candidate
 Last reviewed: 2026-08-01
 
 This is the repository-level delivery roadmap for the TOS AI Edge Computing
@@ -49,26 +49,34 @@ consumer execution, a public shell, validator work, or token issuance.
   retained GetTask, Cancel, ARD search, and profile-plan readiness.
 - Independent full race tests, static analysis, repeated concurrency tests, CI,
   exact `tos-protocol` pinning, and GPL-3.0 licensing.
+- Strict `tos-ai-edge` production composition and mode-`0600` configuration:
+  descriptor/ARD publication, current TOS authority/client/payment adapters,
+  private Worker and Receipt signer, bounded HTTP server, startup preflight,
+  graceful shutdown and server-side redacted diagnostics.
+- Real local three-node discovery-to-Receipt flow using service and client
+  Agent Accounts and an exact finalized native payment, including same-process
+  exact replay and byte-identical replay after both Worker and Edge restart.
+- Durable Worker completion timestamps shared by Invoke and GetTask, closing a
+  live replay conflict found by the deployment rehearsal.
+- Production config/systemd templates plus local one-node quorum tolerance,
+  two-node fail-closed startup, signer/Worker outage readiness and bounded
+  anonymous malformed-input evidence.
 
 ## In Progress
 
-The active milestone is the first deployable non-streaming AI Edge service:
+The active milestone is A2, the Tier 1 production candidate:
 
-- build `tos-ai-edge`, the public production composition that combines the
-  implemented protocol Action server, text-generation profile, private Worker,
-  current TOS chain adapters, Quote/Receipt custody, ARD catalog publication,
-  and deployment-owned authentication policy;
-- define one strict production configuration that cannot partially enable
-  payment, signing, profile, readiness, or public ingress dependencies;
-- package and exercise one Tier 1 Linux/NVIDIA terminal while keeping model
-  runtime endpoints, credentials, hardware identity, and raw errors private;
-- complete the local three-node flow from ARD discovery and TOS authority
-  resolution through Quote, payment, execution/recovery, and signed Receipt;
-- turn failure cases into repeatable acceptance tests: Worker/signer/chain
-  outage, cancellation, adapter crash, timeout, restart, disk quota, payment
-  reorganization, and route/model drift;
-- prepare an immutable compatible release with `tos-protocol` after the
-  deployment gates are evidenced.
+- keep the exact immutable protocol pin, run independent CI for the compatible
+  repository pair, and prepare release tagging;
+- install the supplied service/config templates on one selected Linux/NVIDIA
+  terminal without exposing runtime endpoints, credentials, hardware identity
+  or raw errors;
+- select the deployment-owned authentication/read policy and production
+  session/Quote/Receipt custody;
+- complete GPU/container isolation, model supply-chain, long-duration memory,
+  public perimeter, controller/key rotation, revocation and settlement
+  evidence on the actual target deployment;
+- produce signed reproducible artifacts and an audited rollback procedure.
 
 ## Next
 
@@ -133,8 +141,8 @@ The shared deployment evidence requirements are maintained in
 | Milestone | Exit condition | State |
 |---|---|---|
 | A0: private terminal foundation | Worker, admission, persistence, runtime adapters, model trust, text profile, isolation foundation, protocol compatibility and race tests | Completed |
-| A1: public non-streaming composition | `tos-ai-edge` completes the local discovery-to-receipt flow with complete fail-closed dependencies | In Progress |
-| A2: Tier 1 production candidate | Packaging plus required chain, key, isolation, model, memory, and network evidence | Next |
+| A1: public non-streaming composition | `tos-ai-edge` completes the local discovery-to-receipt flow with complete fail-closed dependencies | Completed |
+| A2: Tier 1 production candidate | Packaging plus required chain, key, isolation, model, memory, and network evidence | In Progress |
 | A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Next |
 | A4: physical terminal and fleet | Offline, real-time, update, device-safety, reconnect, and fleet acceptance | Next |
 

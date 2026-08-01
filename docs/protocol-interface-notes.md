@@ -1,22 +1,26 @@
 # `tos-protocol` WorkerService alignment
 
-Status: non-streaming v0.1 interface implemented
+Status: non-streaming v0.1 M1 interface implemented and immutably pinned
 
 Deployment certification is tracked separately in
 `tos-protocol/docs/non-streaming-v0.1-production-gates.md`; it is not implied
 by interface completion or unit-test coverage.
 
-`tos-ai` pins `tos-protocol` revision `306d7b3bf421`, which includes the
-priority-aware task-store statistics, atomic owner-reserved slot enforcement,
-retained-byte counters, the `storage.task_bytes` contract, and the
-privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
-used below. That revision also provides the strict Worker extension decoder,
-bounded Registry search/filter projection, strict local catalog reader, atomic
-complete-catalog-set reload, bounded Registry request admission, exact profile
-invocation plans, receipt charge policy, the isolated receipt-signer boundary,
-and opt-in authenticated receipt delivery. Protobuf definitions remain owned
-by `tos-protocol`; this repository does not copy or fork them. Those later Edge
-changes do not change WorkerService v0.1 protobuf fields.
+The immutable `tos-ai` pin is `tos-protocol` revision `c1e33bc6208e`. It
+includes the priority-aware task-store statistics, atomic owner-reserved slot
+enforcement, retained-byte counters, the `storage.task_bytes` contract, the
+privacy-minimized Worker-to-ARD projection, strict extension/catalog decoders,
+bounded Registry admission, exact profile invocation and receipt-charge
+policy, purpose-fixed signing boundaries, session issuance, and the durable
+Worker completion timestamp required by the M1 restart rehearsal. Protobuf
+definitions remain owned by `tos-protocol`; this repository does not copy or
+fork them.
+
+The M1 rehearsal added one required v0.1 field before release freeze:
+`InvokeResponse.completed_unix_millis`. The Worker persists that exact
+millisecond and repeats it in retained `GetTask`; Edge rejects missing or
+inconsistent values. Using the Edge RPC receive time caused false conflicts on
+otherwise exact terminal replay and is no longer permitted.
 
 ## Implemented coverage
 

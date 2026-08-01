@@ -880,6 +880,7 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 					s.finishClaimedFailure(call, identity, input, outcome.Err)
 					return
 				}
+				completedAt := s.config.Now().UTC().Truncate(time.Millisecond)
 				response := &edgev1.InvokeResponse{
 					RequestId: input.RequestId,
 					Output:    append([]byte(nil), outcome.Response.Output...),
@@ -890,10 +891,10 @@ func (s *Service) Invoke(ctx context.Context, request *connect.Request[edgev1.In
 						OutputTokens:    outcome.Response.Usage.OutputTokens,
 						ExecutionMillis: outcome.Response.Usage.ExecutionMillis,
 					},
-					ModelRevision:   outcome.Response.ModelRevision,
-					RuntimeRevision: outcome.Response.RuntimeRevision,
+					ModelRevision:       outcome.Response.ModelRevision,
+					RuntimeRevision:     outcome.Response.RuntimeRevision,
+					CompletedUnixMillis: completedAt.UnixMilli(),
 				}
-				completedAt := s.config.Now().UTC()
 				if completedAt.After(time.UnixMilli(input.DeadlineUnixMillis)) {
 					s.finishClaimedFailure(
 						call, identity, input, context.DeadlineExceeded,

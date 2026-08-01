@@ -1,0 +1,34 @@
+[Unit]
+Description=TOS AI private Worker
+After=network-online.target containerd.service
+Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tos-ai
+Group=tos-ai
+UMask=0077
+RuntimeDirectory=tos-ai
+RuntimeDirectoryMode=0700
+StateDirectory=tos-ai
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/tos-ai-worker --socket /run/tos-ai/worker.sock --task-store /var/lib/tos-ai/worker-tasks.db --runtime-config /etc/tos-ai/runtime.json --terminal-policy-config /etc/tos-ai/terminal-policy.json --model-trust-config /etc/tos-ai/model-trust.json
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/tos-ai /var/lib/tos-ai
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target
