@@ -5,6 +5,9 @@ Network. It turns owner-operated hardware into bounded AI services while
 preserving local resource authority. It is not a validator, bare GPU rental
 daemon, public shell, or wallet process.
 
+Current implementation status, ordered product work, and deployment-only
+certification gates are maintained in [`ROADMAP.md`](ROADMAP.md).
+
 ## Implemented foundation
 
 The Go 1.24 module currently contains:
