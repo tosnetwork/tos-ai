@@ -19,6 +19,7 @@ import (
 	"connectrpc.com/connect"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
+	"github.com/tosnetwork/tos-protocol/pkg/ard"
 	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 )
 
@@ -32,6 +33,13 @@ func main() {
 	var taskID string
 	var requestDigest string
 	var retainUntil int64
+	var ardIdentifier string
+	var ardServiceName string
+	var ardHostName string
+	var ardHostID string
+	var ardServiceURL string
+	var ardEntryVersion string
+	var ardOutput string
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.DurationVar(&timeout, "timeout", 30*time.Second, "RPC timeout")
 	flag.StringVar(&requestID, "request-id", "", "request ID (generated when omitted)")
@@ -45,9 +53,16 @@ func main() {
 		&retainUntil, "retain-until", 0,
 		"Worker task retention deadline in Unix milliseconds",
 	)
+	flag.StringVar(&ardIdentifier, "ard-identifier", "", "public ARD service identifier")
+	flag.StringVar(&ardServiceName, "ard-service-name", "", "public ARD service display name")
+	flag.StringVar(&ardHostName, "ard-host-name", "", "public ARD host display name")
+	flag.StringVar(&ardHostID, "ard-host-id", "", "optional public ARD host identifier")
+	flag.StringVar(&ardServiceURL, "ard-service-url", "", "public HTTPS TOS service descriptor URL")
+	flag.StringVar(&ardEntryVersion, "ard-entry-version", "", "public ARD entry version")
+	flag.StringVar(&ardOutput, "ard-output", "", "optional atomic mode-0600 catalog output file")
 	flag.Parse()
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: tos-ai-cli [flags] health|capabilities|metrics|quote|invoke|get-task|cancel [value]")
+		fmt.Fprintln(os.Stderr, "usage: tos-ai-cli [flags] health|capabilities|ard-catalog|metrics|quote|invoke|get-task|cancel [value]")
 		os.Exit(2)
 	}
 	httpClient, err := localrpc.HTTPClient(socketPath, timeout)
@@ -71,6 +86,34 @@ func main() {
 			log.Fatal(err)
 		}
 		printJSON(response.Msg)
+	case "ard-catalog":
+		if flag.NArg() != 1 {
+			log.Fatal("ard-catalog accepts no arguments")
+		}
+		response, err := client.GetCapabilities(
+			ctx, connect.NewRequest(&edgev1.GetCapabilitiesRequest{}),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+		catalog, err := ard.BuildWorkerCatalog(ard.WorkerCatalogConfig{
+			ServiceIdentifier: ardIdentifier, ServiceDisplayName: ardServiceName,
+			HostDisplayName: ardHostName, HostIdentifier: ardHostID,
+			ServiceURL: ardServiceURL, EntryVersion: ardEntryVersion,
+		}, response.Msg, time.Now().UTC())
+		if err != nil {
+			log.Fatal(err)
+		}
+		if ardOutput == "" {
+			printJSON(catalog)
+			break
+		}
+		if err := ard.WriteCatalogFile(
+			ardOutput, catalog, ard.DefaultLimits(),
+		); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stdout, ardOutput)
 	case "metrics":
 		if flag.NArg() != 1 {
 			log.Fatal("metrics accepts no arguments")

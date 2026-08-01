@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
+	"github.com/tosnetwork/tos-protocol/pkg/ard"
 	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -179,6 +181,23 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("private hardware identity appeared in capabilities: %s", lower)
 		}
+	}
+	catalog, err := ard.BuildWorkerCatalog(ard.WorkerCatalogConfig{
+		ServiceIdentifier:  "urn:air:edge.example:tos:ai-terminal",
+		ServiceDisplayName: "Example TOS AI Edge Terminal",
+		HostDisplayName:    "Example Edge Operator", HostIdentifier: "did:web:edge.example",
+		ServiceURL:   "https://edge.example/.well-known/tos-service.json",
+		EntryVersion: "0.1.0",
+	}, capabilities.Msg, time.Now().UTC())
+	if err != nil || len(catalog.Entries) != 1 ||
+		catalog.Entries[0].Identifier != "urn:air:edge.example:tos:ai-terminal" {
+		t.Fatalf("ARD catalog=%#v err=%v", catalog, err)
+	}
+	catalogJSON, err := json.Marshal(catalog)
+	if err != nil || strings.Contains(string(catalogJSON), "storage.task") ||
+		strings.Contains(string(catalogJSON), "availableExternal") ||
+		!strings.Contains(string(catalogJSON), "deterministic-echo") {
+		t.Fatalf("ARD catalog leaked dynamic capacity: %s err=%v", catalogJSON, err)
 	}
 
 	deadline := time.Now().Add(time.Minute)

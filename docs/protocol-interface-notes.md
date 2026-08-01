@@ -2,11 +2,13 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `9a4d35269eb3`, which includes the
+`tos-ai` pins `tos-protocol` revision `242ab8cafe91`, which includes the
 priority-aware task-store statistics, atomic owner-reserved slot enforcement,
-retained-byte counters, and `storage.task_bytes` contract used below. Protobuf
-definitions remain owned by `tos-protocol`; this repository does not copy or
-fork them.
+retained-byte counters, the `storage.task_bytes` contract, and the
+privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
+used below. Protobuf definitions remain owned by `tos-protocol`; this
+repository does not copy or fork them. The ARD addition does not change
+WorkerService v0.1 protobuf fields.
 
 ## Implemented coverage
 

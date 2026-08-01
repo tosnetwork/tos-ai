@@ -495,6 +495,10 @@ Implemented:
   `storage.task_bytes` capability/Quote commitments, atomic owner-local
   slot/byte reserves, priority-aware routing suppression, and fixed private
   capacity metrics
+- deterministic privacy-minimized one-service ARD catalog generation from
+  fresh validated externally callable Worker capabilities and
+  operator-approved identity/routing metadata, without publication or a
+  public listener; optional atomic mode-0600 local handoff rejects symlinks
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission
@@ -532,8 +536,8 @@ Planned, not claimed by this release:
 - public authentication, payment, receipts, and settlement through Edge Core
 - real streaming after a `tos-protocol` streaming RPC exists
 - active/known-good software update slots and crash recovery
-- ARD catalog/Registry, relay, offline journal, fleet, and physical-terminal
-  profiles
+- ARD publication/Registry hosting, relay, offline journal, fleet, and
+  physical-terminal profiles
 - authenticated remote metrics collection and durable operational history
 
 KubeEdge, EdgeX, Ollama, LocalAI, vLLM, and containerd remain external

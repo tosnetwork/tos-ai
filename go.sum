@@ -12,8 +12,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/tosnetwork/tos-protocol v0.0.0-20260801005748-9a4d35269eb3 h1:RjIrNjNg6czAegefqYbgeOtsqs7vZ+ZvPOb2h6dY+mo=
-github.com/tosnetwork/tos-protocol v0.0.0-20260801005748-9a4d35269eb3/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
+github.com/tosnetwork/tos-protocol v0.0.0-20260801013613-242ab8cafe91 h1:TsX/Fb2oI5ls7/cCPcEx6/9sHWkXdPN+zRBp8aGFVhk=
+github.com/tosnetwork/tos-protocol v0.0.0-20260801013613-242ab8cafe91/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 go.etcd.io/bbolt v1.4.3 h1:dEadXpI6G79deX5prL3QRNP6JB8UxVkqo4UPnHaNXJo=

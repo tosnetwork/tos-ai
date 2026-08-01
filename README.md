@@ -12,8 +12,9 @@ The Go 1.24 module currently contains:
 - `tos-ai-worker`, a private ConnectRPC worker served only on an exclusively
   owned mode-0600 Unix socket, with bounded connections and no public
   listener;
-- `tos-ai-cli`, with `health`, `capabilities`, `metrics`, `quote`, `invoke`,
-  `get-task`, and exact-identity `cancel` diagnostics;
+- `tos-ai-cli`, with `health`, `capabilities`, privacy-minimized `ard-catalog`,
+  `metrics`, `quote`, `invoke`, `get-task`, and exact-identity `cancel`
+  diagnostics;
 - a private Prometheus text snapshot on the same Unix socket, with a 16 KiB
   response cap and only fixed method, outcome, state, limit, and resource
   labels. It does not emit request IDs, model names, endpoints, credentials,
@@ -108,6 +109,17 @@ go run ./cmd/tos-ai-cli \
 
 go run ./cmd/tos-ai-cli \
   -socket /run/user/$(id -u)/tos-ai/worker.sock capabilities
+
+go run ./cmd/tos-ai-cli \
+  -socket /run/user/$(id -u)/tos-ai/worker.sock \
+  -ard-identifier urn:air:edge.example:tos:ai-terminal \
+  -ard-service-name "Example TOS AI Edge Terminal" \
+  -ard-host-name "Example Edge Operator" \
+  -ard-host-id did:web:edge.example \
+  -ard-service-url https://edge.example/.well-known/tos-service.json \
+  -ard-entry-version 0.1.0 \
+  -ard-output ./ai-catalog.json \
+  ard-catalog
 
 go run ./cmd/tos-ai-cli \
   -socket /run/user/$(id -u)/tos-ai/worker.sock metrics
@@ -356,6 +368,15 @@ thresholds from one through ten.
   routable capabilities and rejects new Quote owners; exact Quote replay and
   atomic `ClaimTask` retain
   their existing semantics.
+- `ard-catalog` reads one fresh validated private capability snapshot and emits
+  one service entry whose explicit operator-approved ARD identifier can be
+  bound by the TOS descriptor. Its bounded TOS extension contains only
+  externally callable selectors; live capacity, evidence attributes, local
+  endpoints, paths, hostnames, and hardware identifiers are omitted. It
+  neither publishes the catalog nor opens a public listener. With
+  `-ard-output`, it atomically replaces a mode-0600 regular file suitable for
+  explicit loading by `tos-edge` or `tos-ard-registry`; symlink targets are
+  rejected.
 - Production admission and process-capacity values come only from a private
   startup policy and are checked against effective observed RAM/free VRAM
   before the socket is created. On Linux, host totals are reduced by
@@ -414,7 +435,7 @@ model-list APIs expose an ID but do not attest their configured content
 digest.
 
 This repository also does not yet provide public ingress, TOS payment
-authorization, receipts, settlement, ARD publication/Registry, fleet
+authorization, receipts, settlement, ARD publication/Registry hosting, fleet
 management, an offline journal, a remote metrics collector/exporter, streaming
 RPC, a production containerd backend, physical-I/O control, or audited NVIDIA
 runtime packaging. It does not support arbitrary consumer
