@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-protocol/pkg/edge"
 )
 
@@ -66,6 +67,39 @@ func NewMapper(routes []Route) (*Mapper, error) {
 		allowed[key] = struct{}{}
 	}
 	return &Mapper{routes: allowed}, nil
+}
+
+// NewMapperFromCapabilities derives routes only from validated Worker
+// capabilities that implement this profile's operation and explicitly admit
+// external-service work. The input scan and resulting immutable map are both
+// hard-bounded.
+func NewMapperFromCapabilities(
+	capabilities []airuntime.Capability,
+) (*Mapper, error) {
+	if len(capabilities) == 0 || len(capabilities) > MaxRoutes {
+		return nil, fmt.Errorf(
+			"text-generation capabilities must contain 1..%d entries",
+			MaxRoutes,
+		)
+	}
+	routes := make([]Route, 0, len(capabilities))
+	for _, capability := range capabilities {
+		if err := airuntime.ValidateCapability(capability); err != nil {
+			return nil, errors.New("invalid Worker capability for profile routing")
+		}
+		if capability.Operation != Operation ||
+			!acceptsExternalService(capability.AcceptedPriorities) {
+			continue
+		}
+		routes = append(routes, Route{
+			ServiceID: capability.ServiceID,
+			Model:     capability.Model,
+		})
+	}
+	if len(routes) == 0 {
+		return nil, errors.New("no externally callable text-generation capability")
+	}
+	return NewMapper(routes)
 }
 
 // Registration returns the one exact Edge registration implemented by this
@@ -181,4 +215,13 @@ func validModel(model string) bool {
 
 func routeKey(serviceID, model string) string {
 	return serviceID + "\x00" + model
+}
+
+func acceptsExternalService(priorities []airuntime.Priority) bool {
+	for _, priority := range priorities {
+		if priority == airuntime.PriorityExternalService {
+			return true
+		}
+	}
+	return false
 }

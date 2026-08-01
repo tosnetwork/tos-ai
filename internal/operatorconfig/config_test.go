@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tosnetwork/tos-ai/pkg/profile/textgeneration"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
 
@@ -47,6 +48,30 @@ func TestLoadOpenAIConfigAndCredential(t *testing.T) {
 		configuration.Adapters[0].Capability().Runtime != "openai-compatible" {
 		t.Fatalf("unexpected adapters: %#v", configuration.Adapters)
 	}
+	profilePlan, err := configuration.TextGenerationProfilePlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profilePlan.Len() != 1 || !profilePlan.Supports(
+		textgeneration.ProfileID,
+		textgeneration.ProfileVersion,
+		nil,
+		textgeneration.Operation,
+	) {
+		t.Fatal("loaded runtime did not expose its exact text-generation mapper")
+	}
+	originalAdapter := configuration.Adapters[0]
+	configuration.Adapters[0] = nil
+	profilePlan, err = configuration.TextGenerationProfilePlan()
+	configuration.Adapters[0] = originalAdapter
+	if err != nil || profilePlan.Len() != 1 || !profilePlan.Supports(
+		textgeneration.ProfileID,
+		textgeneration.ProfileVersion,
+		nil,
+		textgeneration.Operation,
+	) {
+		t.Fatal("caller mutation changed the private profile capability snapshot")
+	}
 	response, err := configuration.Adapters[0].Execute(
 		context.Background(), airuntime.Request{
 			RequestID: "configured-request", Operation: "generate", Model: "approved-model",
@@ -55,6 +80,17 @@ func TestLoadOpenAIConfigAndCredential(t *testing.T) {
 	)
 	if err != nil || string(response.Output) != "configured" {
 		t.Fatalf("response=%#v err=%v", response, err)
+	}
+}
+
+func TestTextGenerationProfilePlanRejectsEmptyConfiguration(t *testing.T) {
+	var configuration *Configuration
+	if _, err := configuration.TextGenerationProfilePlan(); err == nil {
+		t.Fatal("nil runtime configuration produced a profile plan")
+	}
+	configuration = &Configuration{}
+	if _, err := configuration.TextGenerationProfilePlan(); err == nil {
+		t.Fatal("empty runtime configuration produced a profile plan")
 	}
 }
 

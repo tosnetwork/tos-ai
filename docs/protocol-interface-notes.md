@@ -2,7 +2,7 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `f9de14fd79cc`, which includes the
+`tos-ai` pins `tos-protocol` revision `c6977aaca800`, which includes the
 priority-aware task-store statistics, atomic owner-reserved slot enforcement,
 retained-byte counters, the `storage.task_bytes` contract, and the
 privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
@@ -82,8 +82,18 @@ model to an operator-reviewed Worker service ID.
 The mapper cannot provide any security-owned Worker field. Edge retains the
 request, quote, payment, task, priority, deadline, output and retention
 bindings and validates the mapped request before changing durable state.
-The exact registration is introspectable through
-`ProfileInvocationRegistry.Supports`, allowing future deployment composition
-to fail before advertising a profile without its reviewed mapper. The schema,
-semantic limits, privacy rules and fixed vectors live under
+The exact registration is bound into a `ProfileInvocationPlan`, allowing
+future deployment composition to fail before advertising a profile without
+its reviewed mapper and preventing installed but undeclared selectors from
+entering paid dispatch. The schema, semantic limits, privacy rules and fixed
+vectors live under
 `spec/profiles/text-generation/v0.1/` in this repository.
+
+`NewMapperFromCapabilities` validates a hard-bounded capability set and keeps
+only `generate` routes that explicitly accept `EXTERNAL_SERVICE` priority.
+The operator configuration loader snapshots those capabilities at successful
+load time; `TextGenerationProfilePlan` later constructs an immutable,
+constructor-validated deployment plan from that private copy rather than from
+the caller-mutable adapter slice. The plan binds its advertised exact selector
+set to the installed mapper before composition can open public
+ingress. Public ingress itself remains disabled in the current binaries.

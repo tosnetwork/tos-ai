@@ -25,7 +25,9 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/modelactivation"
 	activationollama "github.com/tosnetwork/tos-ai/pkg/modelactivation/ollama"
 	"github.com/tosnetwork/tos-ai/pkg/ollamabinding"
+	"github.com/tosnetwork/tos-ai/pkg/profile/textgeneration"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
+	"github.com/tosnetwork/tos-protocol/pkg/edge"
 )
 
 const (
@@ -130,8 +132,53 @@ type ActivationConfiguration struct {
 }
 
 type Configuration struct {
-	Adapters   []airuntime.Adapter
-	Activation *ActivationConfiguration
+	Adapters            []airuntime.Adapter
+	Activation          *ActivationConfiguration
+	profileCapabilities []airuntime.Capability
+}
+
+// TextGenerationProfilePlan constructs the exact immutable Edge deployment
+// plan supported by this loaded runtime configuration. The plan binds the
+// installed mapper to the one selector this deployment intends to advertise;
+// it does not expose the Worker, start a listener, or grant authority.
+func (c *Configuration) TextGenerationProfilePlan() (
+	*edge.ProfileInvocationPlan,
+	error,
+) {
+	if c == nil || len(c.profileCapabilities) == 0 ||
+		len(c.profileCapabilities) > MaxAdapters {
+		return nil, errors.New("invalid runtime configuration for profile routing")
+	}
+	mapper, err := textgeneration.NewMapperFromCapabilities(
+		cloneCapabilities(c.profileCapabilities),
+	)
+	if err != nil {
+		return nil, err
+	}
+	registration, err := mapper.Registration()
+	if err != nil {
+		return nil, err
+	}
+	plan, err := edge.NewProfileInvocationPlan(
+		[]edge.ProfileInvocationRegistration{registration},
+		[]edge.ProfileInvocationRequirement{{
+			ProfileID:      textgeneration.ProfileID,
+			ProfileVersion: textgeneration.ProfileVersion,
+			Operation:      textgeneration.Operation,
+		}},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !plan.Supports(
+		textgeneration.ProfileID,
+		textgeneration.ProfileVersion,
+		nil,
+		textgeneration.Operation,
+	) {
+		return nil, errors.New("text-generation profile mapper is not enabled")
+	}
+	return plan, nil
 }
 
 func (c *Configuration) CloseBackends() error {
@@ -238,7 +285,20 @@ func Load(path string) (Configuration, error) {
 		return Configuration{},
 			errors.New("activation configuration has no slots")
 	}
-	result := Configuration{Adapters: adapters}
+	profileCapabilities := make(
+		[]airuntime.Capability,
+		0,
+		len(adapters),
+	)
+	for _, adapter := range adapters {
+		profileCapabilities = append(
+			profileCapabilities,
+			cloneCapability(adapter.Capability()),
+		)
+	}
+	result := Configuration{
+		Adapters: adapters, profileCapabilities: profileCapabilities,
+	}
 	if len(slots) > 0 {
 		result.Activation = &ActivationConfiguration{
 			Controller: modelactivation.Config{
@@ -256,6 +316,24 @@ func Load(path string) (Configuration, error) {
 		}
 	}
 	return result, nil
+}
+
+func cloneCapabilities(
+	capabilities []airuntime.Capability,
+) []airuntime.Capability {
+	output := make([]airuntime.Capability, len(capabilities))
+	for index, capability := range capabilities {
+		output[index] = cloneCapability(capability)
+	}
+	return output
+}
+
+func cloneCapability(capability airuntime.Capability) airuntime.Capability {
+	capability.AcceptedPriorities = append(
+		[]airuntime.Priority(nil),
+		capability.AcceptedPriorities...,
+	)
+	return capability
 }
 
 func closeAdapters(adapters []airuntime.Adapter) {

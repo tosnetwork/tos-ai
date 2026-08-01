@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"time"
 )
@@ -107,7 +108,7 @@ type Policy struct {
 	RequireReadOnlyRoot bool
 }
 
-func (p Policy) Validate(spec Spec) error {
+func (p Policy) validate() error {
 	if p.MaxAllowedImages <= 0 || p.MaxAllowedImages > MaxAllowedImagesHard ||
 		len(p.AllowedImages) > p.MaxAllowedImages ||
 		p.MaxEnvironment < 0 || p.MaxArguments <= 0 || p.MaxAllowedHosts < 0 ||
@@ -118,6 +119,13 @@ func (p Policy) Validate(spec Spec) error {
 		if !digestPattern.MatchString(digest) {
 			return errors.New("executor policy contains an unpinned image")
 		}
+	}
+	return nil
+}
+
+func (p Policy) Validate(spec Spec) error {
+	if err := p.validate(); err != nil {
+		return err
 	}
 	if !digestPattern.MatchString(spec.ImageDigest) {
 		return errors.New("container image must be pinned by sha256 digest")
@@ -186,6 +194,148 @@ func (p Policy) Validate(spec Spec) error {
 		return err
 	}
 	return nil
+}
+
+// PolicyExecutor is a bounded validation and defensive-copy boundary around
+// an audited container runtime client. It does not implement isolation by
+// itself: the supplied client must enforce ContainerRequest in its runtime.
+// The policy is cloned at construction and is safe for concurrent use.
+type PolicyExecutor struct {
+	policy Policy
+	client ContainerdClient
+}
+
+func NewPolicyExecutor(
+	policy Policy,
+	client ContainerdClient,
+) (*PolicyExecutor, error) {
+	if err := policy.validate(); err != nil {
+		return nil, err
+	}
+	if nilContainerdClient(client) {
+		return nil, errors.New("nil container runtime client")
+	}
+	return &PolicyExecutor{
+		policy: clonePolicy(policy),
+		client: client,
+	}, nil
+}
+
+func (e *PolicyExecutor) Execute(
+	ctx context.Context,
+	spec Spec,
+	input []byte,
+) (Result, error) {
+	if e == nil || e.client == nil {
+		return Result{}, errors.New("invalid policy executor")
+	}
+	if ctx == nil {
+		return Result{}, errors.New("nil execution context")
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if err := e.policy.Validate(spec); err != nil {
+		return Result{}, err
+	}
+	if err := e.policy.ValidateInput(input); err != nil {
+		return Result{}, err
+	}
+	request := ContainerRequest{
+		ImageDigest:     spec.ImageDigest,
+		Entrypoint:      append([]string(nil), spec.Entrypoint...),
+		Environment:     cloneStringsMap(spec.Environment),
+		UserID:          spec.UserID,
+		GroupID:         spec.GroupID,
+		ReadOnlyRoot:    spec.ReadOnlyRoot,
+		NoNewPrivileges: spec.NoNewPrivileges,
+		Network:         spec.Network,
+		AllowedHosts:    append([]string(nil), spec.AllowedHosts...),
+		AllowGPU:        spec.AllowGPU,
+		Limits:          spec.Limits,
+	}
+	result, err := callContainerdClient(
+		ctx,
+		e.client,
+		request,
+		append([]byte(nil), input...),
+	)
+	if err != nil {
+		return Result{}, errors.New("isolated execution backend failed")
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if err := validateResult(spec.Limits, result); err != nil {
+		return Result{}, err
+	}
+	result.Output = append([]byte(nil), result.Output...)
+	return result, nil
+}
+
+func callContainerdClient(
+	ctx context.Context,
+	client ContainerdClient,
+	request ContainerRequest,
+	input []byte,
+) (result Result, err error) {
+	defer func() {
+		if recover() != nil {
+			result = Result{}
+			err = errors.New("container runtime client panicked")
+		}
+	}()
+	return client.RunIsolated(ctx, request, input)
+}
+
+func validateResult(limits Limits, result Result) error {
+	if result.ExitCode < 0 || result.ExitCode > 255 ||
+		uint64(len(result.Output)) > limits.OutputBytes ||
+		result.Usage.CPUMillis > limits.CPUMillis ||
+		result.Usage.PeakMemory > limits.MemoryBytes ||
+		result.Usage.DiskWritten > limits.DiskBytes ||
+		result.Usage.Duration < 0 ||
+		result.Usage.Duration > limits.ExecutionTime {
+		return errors.New("isolated execution result exceeds requested limits")
+	}
+	return nil
+}
+
+func clonePolicy(policy Policy) Policy {
+	cloned := policy
+	cloned.AllowedImages = make(
+		map[string]struct{},
+		len(policy.AllowedImages),
+	)
+	for digest := range policy.AllowedImages {
+		cloned.AllowedImages[digest] = struct{}{}
+	}
+	return cloned
+}
+
+func cloneStringsMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func nilContainerdClient(client ContainerdClient) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface,
+		reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (p Policy) ValidateInput(input []byte) error {

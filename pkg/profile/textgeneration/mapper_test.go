@@ -10,8 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/tosnetwork/tos-ai/pkg/admission"
+	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	"github.com/tosnetwork/tos-protocol/pkg/edge"
 )
 
@@ -156,6 +160,28 @@ func TestMapperConstructionIsBoundedAndImmutable(t *testing.T) {
 	if _, err := mapper.MapInvocation(context.Background(), valid); err != nil {
 		t.Fatal("caller mutation changed mapper routes")
 	}
+	const readers = 64
+	var wait sync.WaitGroup
+	errorsSeen := make(chan error, readers)
+	for range readers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			output, err := mapper.MapInvocation(context.Background(), valid)
+			if err != nil {
+				errorsSeen <- err
+				return
+			}
+			if output.Model != "deterministic-echo" || string(output.Payload) != "hello" {
+				errorsSeen <- errors.New("concurrent mapping changed output")
+			}
+		}()
+	}
+	wait.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		t.Error(err)
+	}
 	if _, err := NewMapper([]Route{routes[0], routes[0]}); err == nil {
 		t.Fatal("duplicate route accepted")
 	}
@@ -174,6 +200,84 @@ func TestMapperConstructionIsBoundedAndImmutable(t *testing.T) {
 	var nilMapper *Mapper
 	if _, err := nilMapper.Registration(); err == nil {
 		t.Fatal("nil mapper registered")
+	}
+}
+
+func TestMapperDerivesOnlyExternallyCallableTextGenerationRoutes(t *testing.T) {
+	external := validCapability("tos.ai.external", Operation, "model-a")
+	otherOperation := validCapability("tos.ai.embedding", "embed", "model-b")
+	ownerOnly := validCapability("tos.ai.owner", Operation, "model-c")
+	ownerOnly.AcceptedPriorities = []airuntime.Priority{airuntime.PriorityLocalAsync}
+	mapper, err := NewMapperFromCapabilities([]airuntime.Capability{
+		external, otherOperation, ownerOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapModel := func(serviceID, model string) error {
+		intent, err := json.Marshal(Intent{Model: model, Prompt: "hello"})
+		if err != nil {
+			return err
+		}
+		_, err = mapper.MapInvocation(context.Background(), edge.ProfileInvocationInput{
+			ProfileID: ProfileID, ProfileVersion: ProfileVersion,
+			Operation: Operation, ServiceID: serviceID, Intent: intent,
+			MaxInputBytes: 1024, MaxOutputBytes: 1024,
+		})
+		return err
+	}
+	if err := mapModel(external.ServiceID, external.Model); err != nil {
+		t.Fatal(err)
+	}
+	if err := mapModel(otherOperation.ServiceID, otherOperation.Model); err == nil {
+		t.Fatal("different operation was routed as text generation")
+	}
+	if err := mapModel(ownerOnly.ServiceID, ownerOnly.Model); err == nil {
+		t.Fatal("owner-only capability was exposed to external profile work")
+	}
+
+	invalid := external
+	invalid.ModelDigest = "invalid"
+	if _, err := NewMapperFromCapabilities(
+		[]airuntime.Capability{invalid},
+	); err == nil {
+		t.Fatal("invalid capability was accepted for profile routing")
+	}
+	if _, err := NewMapperFromCapabilities(
+		[]airuntime.Capability{external, external},
+	); err == nil {
+		t.Fatal("duplicate capability route was accepted")
+	}
+	if _, err := NewMapperFromCapabilities(
+		[]airuntime.Capability{ownerOnly},
+	); err == nil {
+		t.Fatal("route set without external text generation was accepted")
+	}
+	if _, err := NewMapperFromCapabilities(make(
+		[]airuntime.Capability,
+		MaxRoutes+1,
+	)); err == nil {
+		t.Fatal("oversized capability set was accepted")
+	}
+}
+
+func validCapability(
+	serviceID string,
+	operation string,
+	model string,
+) airuntime.Capability {
+	return airuntime.Capability{
+		ServiceID: serviceID, Operation: operation, Model: model,
+		ModelDigest: "sha256:" + strings.Repeat("a", 64),
+		Runtime:     "test", RuntimeRevision: "test-v1",
+		MaxInputBytes: 1024, MaxOutputBytes: 1024,
+		AcceptedPriorities: []airuntime.Priority{
+			airuntime.PriorityExternalService,
+		},
+		Admission: admission.Resources{
+			RAMBytes: 1, ContextTokens: 1, BatchSize: 1,
+			ExecutionTime: time.Second,
+		},
 	}
 }
 

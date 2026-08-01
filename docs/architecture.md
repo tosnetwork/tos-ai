@@ -459,12 +459,18 @@ the Unix identity boundary.
 ## Execution isolation
 
 `pkg/executor` remains fail closed. `DenyAll` is the default and there is no
-production containerd backend. The future client contract accepts only a
-validated request with a digest-pinned allowlisted image, non-root user/group,
-read-only root filesystem, no-new-privileges, PID/CPU/RAM/disk/output/time
-limits, and explicitly authorized GPU/network access. Policy rejects
-privileged mode, host mounts, writable root, runtime sockets, root identity,
-unpinned images, and resource overflow.
+production containerd backend. `PolicyExecutor` is the mandatory adapter for a
+future audited client: it clones the operator policy at construction,
+revalidates every request, defensively copies the runtime request and input,
+contains backend errors and panics, rechecks context cancellation, validates
+exit status and reported CPU/RAM/disk/time/output bounds, and defensively copies
+the accepted result. The client contract accepts only a request with a
+digest-pinned allowlisted image, non-root user/group, read-only root filesystem,
+no-new-privileges, PID/CPU/RAM/disk/output/time limits, and explicitly
+authorized GPU/network access. Policy rejects privileged mode, host mounts,
+writable root, runtime sockets, root identity, unpinned images, and resource
+overflow. The adapter is a safety boundary around a runtime client; it does not
+claim to implement kernel or container isolation itself.
 
 ## Process ownership
 
@@ -506,7 +512,10 @@ Implemented:
 - the first immutable vertical mapper candidate for
   `tos.ai.text-generation` v0.1.0, with strict duplicate/unknown-field
   rejection, exact profile selection, operator-reviewed service/model routes,
-  normative schema and fixed vectors
+  normative schema and fixed vectors; configuration loading captures a
+  private capability snapshot and constructs a fail-closed deployment plan so
+  later mutation of the exported adapter slice cannot change mapper routing
+  or enable an installed but undeclared selector
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission
@@ -531,7 +540,8 @@ Implemented:
   crash-safe active/known-good intent with explicit recovery
 - opt-in signed-cache GGUF activation for fixed Ollama endpoints, including
   startup recovery and synchronous shutdown cleanup
-- container isolation contract and validation layer with `DenyAll`
+- container isolation contract, immutable policy-enforcing client adapter,
+  adversarial result validation, and fail-closed `DenyAll` default
 
 Planned, not claimed by this release:
 
