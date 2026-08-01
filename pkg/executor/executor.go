@@ -4,6 +4,8 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -19,6 +21,7 @@ var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 const (
 	MaxAllowedImagesHard       = 1024
 	MaxAllowedNetworkHostsHard = 1024
+	MaxExecutionIDBytes        = 128
 )
 
 type NetworkMode string
@@ -74,19 +77,23 @@ type Usage struct {
 }
 
 type Executor interface {
-	Execute(context.Context, Spec, []byte) (Result, error)
+	Execute(context.Context, string, Spec, []byte) (Result, error)
 }
 
 // ContainerdClient is the narrow client a future audited backend must
-// implement. Implementations must honor context cancellation by stopping and
-// cleaning up the workload before returning. Result and Usage are treated as
-// untrusted input and validated by PolicyExecutor. This package intentionally
-// does not provide a concrete containerd implementation yet.
+// implement. ExecutionDigest is the only permitted runtime-object identity;
+// implementations must reject a second live workload with the same digest and
+// must never derive paths or runtime names from caller payloads. They must also
+// honor context cancellation by stopping and cleaning up the workload before
+// returning. Result and Usage are treated as untrusted input and validated by
+// PolicyExecutor. This package intentionally does not provide a concrete
+// containerd implementation yet.
 type ContainerdClient interface {
 	RunIsolated(context.Context, ContainerRequest, []byte) (Result, error)
 }
 
 type ContainerRequest struct {
+	ExecutionDigest string
 	ImageDigest     string
 	Entrypoint      []string
 	Environment     map[string]string
@@ -255,6 +262,7 @@ func NewPolicyExecutor(
 
 func (e *PolicyExecutor) Execute(
 	ctx context.Context,
+	executionID string,
 	spec Spec,
 	input []byte,
 ) (Result, error) {
@@ -267,6 +275,10 @@ func (e *PolicyExecutor) Execute(
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	executionDigest, err := ExecutionDigest(executionID)
+	if err != nil {
+		return Result{}, err
+	}
 	if err := e.policy.Validate(spec); err != nil {
 		return Result{}, err
 	}
@@ -274,6 +286,7 @@ func (e *PolicyExecutor) Execute(
 		return Result{}, err
 	}
 	request := ContainerRequest{
+		ExecutionDigest: executionDigest,
 		ImageDigest:     spec.ImageDigest,
 		Entrypoint:      append([]string(nil), spec.Entrypoint...),
 		Environment:     cloneStringsMap(spec.Environment),
@@ -310,6 +323,27 @@ func (e *PolicyExecutor) Execute(
 	}
 	result.Output = append([]byte(nil), result.Output...)
 	return result, nil
+}
+
+// ExecutionDigest maps an externally correlated Worker task identity to a
+// fixed, path-safe backend identity. Backends must use this digest, never the
+// caller-provided task ID, when naming runtime objects or cleanup records.
+func ExecutionDigest(executionID string) (string, error) {
+	if executionID == "" || len(executionID) > MaxExecutionIDBytes {
+		return "", errors.New("invalid isolated execution identity")
+	}
+	digest := sha256.New()
+	digest.Write([]byte("TOS-AI-EXECUTION-ID-V1"))
+	digest.Write([]byte{0})
+	digest.Write([]byte(executionID))
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func ValidateExecutionDigest(value string) error {
+	if !digestPattern.MatchString(value) {
+		return errors.New("invalid isolated execution digest")
+	}
+	return nil
 }
 
 func executionContextError(ctx context.Context) error {
@@ -523,6 +557,6 @@ func withinCeiling(request, ceiling Limits) error {
 // and operator policy are explicitly configured.
 type DenyAll struct{}
 
-func (DenyAll) Execute(context.Context, Spec, []byte) (Result, error) {
+func (DenyAll) Execute(context.Context, string, Spec, []byte) (Result, error) {
 	return Result{}, errors.New("arbitrary workload execution is disabled")
 }

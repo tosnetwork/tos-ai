@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const testExecutionID = "executor-test-task"
+
 type containerdClientFunc func(
 	context.Context,
 	ContainerRequest,
@@ -306,6 +308,7 @@ func TestPolicyExecutorClonesNetworkAllowlistAndSupportsConcurrency(t *testing.T
 			defer wait.Done()
 			if _, err := executor.Execute(
 				context.Background(),
+				testExecutionID,
 				spec,
 				nil,
 			); err != nil {
@@ -330,6 +333,7 @@ func TestPolicyExecutorClonesNetworkAllowlistAndSupportsConcurrency(t *testing.T
 	attacker.AllowedHosts = []string{"attacker.example:443"}
 	if _, err := executor.Execute(
 		context.Background(),
+		testExecutionID,
 		attacker,
 		nil,
 	); err == nil || calls.Load() != workers {
@@ -363,7 +367,7 @@ func TestPolicyExecutorAppliesExecutionDeadlineAndPreservesCancellation(t *testi
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if _, err := executor.Execute(context.Background(), spec, nil); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := executor.Execute(context.Background(), testExecutionID, spec, nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("execution error = %v, want deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
@@ -389,7 +393,7 @@ func TestPolicyExecutorAppliesExecutionDeadlineAndPreservesCancellation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cancelExecutor.Execute(parent, spec, nil); !errors.Is(err, context.Canceled) {
+	if _, err := cancelExecutor.Execute(parent, testExecutionID, spec, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("execution error = %v, want canceled", err)
 	}
 }
@@ -412,13 +416,17 @@ func TestPolicyExecutorRejectsLateResultFromCancellationIgnoringBackend(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := executor.Execute(context.Background(), spec, nil); !errors.Is(err, context.DeadlineExceeded) || len(result.Output) != 0 {
+	if result, err := executor.Execute(context.Background(), testExecutionID, spec, nil); !errors.Is(err, context.DeadlineExceeded) || len(result.Output) != 0 {
 		t.Fatalf("late backend result escaped boundary: %#v, %v", result, err)
 	}
 }
 
 func TestPolicyExecutorClonesPolicyRequestInputAndResult(t *testing.T) {
 	policy, spec := validExecutionPolicyAndSpec("c")
+	expectedExecutionDigest, err := ExecutionDigest(testExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	spec.Entrypoint = []string{"/worker", "serve"}
 	spec.Environment = map[string]string{"MODE": "safe"}
 	input := []byte("request")
@@ -428,7 +436,8 @@ func TestPolicyExecutorClonesPolicyRequestInputAndResult(t *testing.T) {
 		request ContainerRequest,
 		backendInput []byte,
 	) (Result, error) {
-		if ctx == nil || request.ImageDigest != spec.ImageDigest ||
+		if ctx == nil || request.ExecutionDigest != expectedExecutionDigest ||
+			request.ImageDigest != spec.ImageDigest ||
 			request.Entrypoint[1] != "serve" ||
 			request.Environment["MODE"] != "safe" ||
 			string(backendInput) != "request" {
@@ -451,7 +460,7 @@ func TestPolicyExecutorClonesPolicyRequestInputAndResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(policy.AllowedImages, spec.ImageDigest)
-	result, err := executor.Execute(context.Background(), spec, input)
+	result, err := executor.Execute(context.Background(), testExecutionID, spec, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,22 +499,32 @@ func TestPolicyExecutorRejectsBeforeAndAfterBackendBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := executor.Execute(
+		context.Background(), "", spec, nil,
+	); err == nil || calls.Load() != 0 {
+		t.Fatal("missing execution identity reached the container runtime client")
+	}
+	if _, err := executor.Execute(
+		context.Background(), strings.Repeat("x", MaxExecutionIDBytes+1), spec, nil,
+	); err == nil || calls.Load() != 0 {
+		t.Fatal("oversized execution identity reached the container runtime client")
+	}
 	unsafe := spec
 	unsafe.Privileged = true
 	if _, err := executor.Execute(
-		context.Background(), unsafe, nil,
+		context.Background(), testExecutionID, unsafe, nil,
 	); err == nil || calls.Load() != 0 {
 		t.Fatal("unsafe spec reached the container runtime client")
 	}
 	if _, err := executor.Execute(
-		context.Background(), spec,
+		context.Background(), testExecutionID, spec,
 		make([]byte, policy.MaxInputBytes+1),
 	); err == nil || calls.Load() != 0 {
 		t.Fatal("oversized input reached the container runtime client")
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := executor.Execute(canceled, spec, nil); err == nil ||
+	if _, err := executor.Execute(canceled, testExecutionID, spec, nil); err == nil ||
 		calls.Load() != 0 {
 		t.Fatal("canceled request reached the container runtime client")
 	}
@@ -535,9 +554,33 @@ func TestPolicyExecutorRejectsBeforeAndAfterBackendBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := bad.Execute(
-			context.Background(), spec, nil,
+			context.Background(), testExecutionID, spec, nil,
 		); err == nil {
 			t.Fatalf("invalid backend result %d was accepted", index)
+		}
+	}
+}
+
+func TestExecutionDigestIsDeterministicAndPathSafe(t *testing.T) {
+	first, err := ExecutionDigest("task/../../with\x00controls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := ExecutionDigest("task/../../with\x00controls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := ExecutionDigest("other-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again || first == other || ValidateExecutionDigest(first) != nil ||
+		strings.ContainsAny(first, "/\\\x00") {
+		t.Fatalf("unsafe execution digests: first=%q again=%q other=%q", first, again, other)
+	}
+	for _, invalid := range []string{"", "sha256:ABC", "raw-task-id"} {
+		if err := ValidateExecutionDigest(invalid); err == nil {
+			t.Fatalf("accepted invalid execution digest %q", invalid)
 		}
 	}
 }
@@ -566,7 +609,7 @@ func TestPolicyExecutorContainsBackendFailureAndSupportsConcurrency(t *testing.T
 				t.Fatal(err)
 			}
 			if result, err := executor.Execute(
-				context.Background(), spec, nil,
+				context.Background(), testExecutionID, spec, nil,
 			); err == nil || len(result.Output) != 0 ||
 				strings.Contains(err.Error(), "secret") {
 				t.Fatalf("backend failure escaped boundary: %#v, %v", result, err)
@@ -601,7 +644,7 @@ func TestPolicyExecutorContainsBackendFailureAndSupportsConcurrency(t *testing.T
 		go func() {
 			defer wait.Done()
 			if _, err := executor.Execute(
-				context.Background(), spec, nil,
+				context.Background(), testExecutionID, spec, nil,
 			); err != nil {
 				failures <- err
 			}

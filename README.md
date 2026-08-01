@@ -186,6 +186,33 @@ process lifetime; changing it requires a restart. See
 [docs/terminal-policy-config.example.json](docs/terminal-policy-config.example.json)
 and size it for the actual host and configured adapters.
 
+The isolated-executor path also has a separate strict configuration and
+factory-gated composition API. It binds one operator-approved container image,
+entrypoint, environment, non-root identity, network allowlist and complete
+resource ceiling to one Worker capability. The generated executor policy is
+exactly as restrictive as that fixed spec; invocation data can supply only
+input bytes and a smaller output bound. The Worker task ID is domain-separated
+and hashed into a fixed `sha256:` execution digest before crossing the backend
+boundary; raw caller IDs never become container, snapshot, task, or filesystem
+names. A backend must reject a second live workload using the same digest.
+JSON cannot instantiate a backend by itself: the worker binary must inject an
+audited `IsolatedBackendFactory`, and
+the current production binary intentionally injects none because a concrete
+containerd backend has not yet passed review. See
+[docs/isolated-runtime-config.example.json](docs/isolated-runtime-config.example.json).
+An isolated backend must also provide a bounded, cancellation-aware readiness
+probe. Every Worker preflight calls it before advertising the configured
+binding; backend errors and panics become a stable unavailable result and
+cannot leak runtime details. Static JSON alone therefore cannot make a dead
+backend appear ready.
+Future backend implementations must also pass the reusable lifecycle suite in
+`pkg/executor/backendtest`, which checks bounded readiness, success,
+cancellation, duplicate-identity rejection, concurrency, and zero
+container/task/snapshot residue in a fresh test namespace. This is a minimum
+conformance gate, not proof of kernel,
+network, GPU, or filesystem isolation; see
+[docs/isolated-backend-conformance.md](docs/isolated-backend-conformance.md).
+
 The worker also opens `-task-store`, a separate mode-0600 bbolt database in a
 mode-0700 non-symlink directory. When omitted it is placed beside the private
 socket as `worker-tasks.db`. It uses the protocol default of 10,000 retained
@@ -460,10 +487,10 @@ This repository also does not yet provide public ingress or the deployment
 composition that installs its reviewed mapper into `tos-edge`, TOS payment
 authorization, receipts, settlement, ARD publication/Registry hosting, fleet
 management, an offline journal, a remote metrics collector/exporter, streaming
-RPC, a production containerd backend, physical-I/O control, or audited NVIDIA
-runtime packaging. It does not support arbitrary consumer
-containers/programs/models, unrestricted fine-tuning, training, token
-issuance, or bare GPU rental.
+RPC, a production containerd backend,
+physical-I/O control, or audited NVIDIA runtime packaging. It does not support
+arbitrary consumer containers/programs/models, unrestricted fine-tuning,
+training, token issuance, or bare GPU rental.
 
 Terminal policy reload and dynamic RAM/VRAM capacity rebalancing are not
 implemented. The current monitor verifies that configured RAM backing,

@@ -479,6 +479,61 @@ while applying the validated destination set. The adapter is a safety boundary
 around a runtime client; it does not claim to implement kernel or container
 isolation itself.
 
+`executor.RuntimeAdapter` now connects that boundary to the ordinary Worker
+`runtime.Adapter` contract without creating an arbitrary-container API. Its
+constructor requires a valid `PolicyExecutor`, validates the complete fixed
+spec against the cloned operator policy, and binds it to one advertised
+capability. Invoke can supply only the model request payload and a smaller
+output limit. The image digest, entrypoint, environment, UID/GID, filesystem,
+network destinations, GPU access, CPU/RAM/disk/PID/time ceilings and runtime
+revision remain immutable operator state. Results and stable error categories
+are translated back into the existing Worker path. Because this adapter has
+no independent model-attestation operation, it accepts only `declared` model
+digest evidence and cannot upgrade an administrator assertion to locally
+observed evidence.
+
+Before execution crosses that boundary, `PolicyExecutor` hashes the validated
+Worker task ID with the fixed `TOS-AI-EXECUTION-ID-V1` domain into a lowercase
+`sha256:` execution digest. The backend receives no raw task ID and must use
+only this digest for container, task, snapshot, cleanup, and recovery identity.
+It must refuse a second live workload with the same digest rather than replace,
+attach to, or delete an existing object. The mapping is deterministic across
+restart and adds no cache or request-indexed process state.
+
+`operatorconfig.LoadIsolatedRuntime` supplies the corresponding strict local
+composition boundary. It reads a private bounded JSON file, rejects duplicate
+or unknown fields, and validates the complete capability and sandbox policy
+before opening any backend. One compiled-in `IsolatedBackendFactory` may then
+open only the fixed absolute local containerd socket and namespace. The loader
+derives a single-image `Policy` whose arguments, environment, network hosts,
+GPU permission, input and resource ceilings exactly match the immutable spec;
+read-only root, non-root UID/GID and no-new-privileges are mandatory, while
+privilege, host mounts and runtime-socket exposure are not expressible. Its
+owned backend is closed exactly once. The current worker does not inject a
+factory, so configuration text alone cannot turn this reviewed contract into
+an unaudited execution path. The schema is illustrated in
+`docs/isolated-runtime-config.example.json`.
+
+The backend also implements a side-effect-free `CheckReady` operation. The
+runtime adapter invokes it on every existing bounded/coalesced Worker
+preflight before returning the declared model binding. Cancellation and caller
+deadlines propagate directly; backend failures and panics are contained as a
+stable unavailable category with no socket, namespace, or runtime detail.
+This prevents static configuration from advertising a disconnected isolated
+runtime and introduces no watcher or per-request background goroutine.
+
+`pkg/executor/backendtest` supplies a reusable minimum lifecycle gate for each
+future backend. Against a fresh private runtime namespace it exercises
+side-effect-free readiness, deterministic success, cancellation,
+duplicate-identity rejection, bounded concurrency, result ceilings, and zero
+residual workloads, containers, tasks, or snapshots.
+Factory/readiness/execution/close panics become bounded test
+failures. Passing does not establish kernel isolation: privileged independent
+tests must still verify namespace/cgroup/seccomp/LSM enforcement, exact GPU
+assignment, network-none and DNS-rebinding-resistant allowlists, immutable
+image provenance, disk/log bounds, and crash/reboot cleanup. The complete
+contract is documented in `docs/isolated-backend-conformance.md`.
+
 ## Process ownership
 
 The Unix listener creates a per-socket, current-user, mode-0600 advisory lock
@@ -551,6 +606,13 @@ Implemented:
 - container isolation contract, immutable policy-enforcing client adapter,
   task deadline/cancellation semantics, bounded exact network destination
   allowlists, adversarial result validation, and fail-closed `DenyAll` default
+- fixed-profile `PolicyExecutor`-backed runtime adapter with immutable
+  operator-owned workload identity and declared-only model evidence
+- strict private isolated-runtime configuration plus compiled-in backend
+  factory gate and exact single-profile policy derivation
+- reusable isolated-backend lifecycle conformance harness covering readiness,
+  success, cancellation, duplicate execution identity, concurrency and zero
+  runtime-object residue
 
 Planned, not claimed by this release:
 
@@ -558,7 +620,8 @@ Planned, not claimed by this release:
 - live administrator lifecycle controls for fixed activation slots
 - authenticated policy rollout, hot reload, and dynamic capacity resizing or
   cross-process host coordination
-- audited containerd execution backend and packaging
+- audited containerd execution backend, production-binary factory wiring and
+  packaging
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, settlement, and explicit mapper
   installation through Edge Core
