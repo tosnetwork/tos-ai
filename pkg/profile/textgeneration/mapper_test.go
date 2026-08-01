@@ -16,6 +16,7 @@ import (
 
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
+	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/pkg/edge"
 	"github.com/tosnetwork/tos-protocol/pkg/protocol"
 )
@@ -362,6 +363,58 @@ func TestMapperDerivesOnlyExternallyCallableTextGenerationRoutes(t *testing.T) {
 		MaxRoutes+1,
 	)); err == nil {
 		t.Fatal("oversized capability set was accepted")
+	}
+}
+
+func TestProfilePlanDerivesOnlyLiveExternalWorkerRoutes(t *testing.T) {
+	external := &edgev1.Capability{
+		ServiceId: "tos.ai.external", Operation: Operation, Model: "model-a",
+		AcceptedPriorities: []edgev1.Priority{
+			edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		},
+	}
+	ownerOnly := &edgev1.Capability{
+		ServiceId: "tos.ai.owner", Operation: Operation, Model: "model-b",
+		AcceptedPriorities: []edgev1.Priority{
+			edgev1.Priority_PRIORITY_LOCAL_ASYNC,
+		},
+	}
+	otherOperation := &edgev1.Capability{
+		ServiceId: "tos.ai.embedding", Operation: "embed", Model: "model-c",
+		AcceptedPriorities: []edgev1.Priority{
+			edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+		},
+	}
+	plan, err := NewProfilePlanFromWorkerCapabilities([]*edgev1.Capability{
+		external, ownerOnly, otherOperation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Supports(ProfileID, ProfileVersion, nil, Operation) {
+		t.Fatal("live Worker route did not enable the exact profile")
+	}
+	for name, capabilities := range map[string][]*edgev1.Capability{
+		"nil":        {nil},
+		"owner only": {ownerOnly},
+		"duplicate":  {external, external},
+		"invalid route": {{
+			ServiceId: "invalid/service", Operation: Operation, Model: "model-a",
+			AcceptedPriorities: []edgev1.Priority{
+				edgev1.Priority_PRIORITY_EXTERNAL_SERVICE,
+			},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewProfilePlanFromWorkerCapabilities(capabilities); err == nil {
+				t.Fatal("unsafe Worker route set was accepted")
+			}
+		})
+	}
+	if _, err := NewProfilePlanFromWorkerCapabilities(make(
+		[]*edgev1.Capability, MaxRoutes+1,
+	)); err == nil {
+		t.Fatal("oversized Worker capability set was accepted")
 	}
 }
 

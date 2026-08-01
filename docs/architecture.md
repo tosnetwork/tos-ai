@@ -628,7 +628,9 @@ Implemented:
   and fixed intent/payload digests; configuration loading captures a private
   capability snapshot and production startup retains a fail-closed deployment
   plan so later mutation of the exported adapter slice cannot change mapper
-  routing or enable an installed but undeclared selector
+  routing or enable an installed but undeclared selector; the separate Edge
+  deployment bridge rechecks mandatory structured readiness and an
+  order-independent commitment to exact public model/runtime identities
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission
@@ -676,8 +678,9 @@ Planned, not claimed by this release:
 - privileged certification and packaging for the CPU-only containerd driver;
   later reviewed GPU and network policy backends
 - signed benchmark runner and external evidence issuers
-- public authentication, payment, receipts, settlement, and explicit mapper
-  installation through Edge Core
+- the public AI Edge deployment binary that composes the implemented protocol
+  authentication/payment/action boundary, this mapper bridge, chain adapters,
+  isolated Worker, and production key custody
 - real streaming after a `tos-protocol` streaming RPC exists
 - active/known-good software update slots and crash recovery
 - ARD publication/Registry hosting, relay, offline journal, fleet, and

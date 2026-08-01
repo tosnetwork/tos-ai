@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
+	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/pkg/edge"
 )
 
@@ -100,6 +101,65 @@ func NewMapperFromCapabilities(
 		return nil, errors.New("no externally callable text-generation capability")
 	}
 	return NewMapper(routes)
+}
+
+// NewProfilePlanFromWorkerCapabilities constructs the exact immutable Edge
+// deployment plan advertised by a live, already validated Worker capability
+// snapshot. Only externally callable text-generation routes enter the plan;
+// unrelated operations and owner-only capabilities cannot become public
+// routes. Callers should obtain the snapshot through localrpc.WorkerClient so
+// freshness, bounds, resource evidence, and private-RPC response validation
+// have already been enforced.
+func NewProfilePlanFromWorkerCapabilities(
+	capabilities []*edgev1.Capability,
+) (*edge.ProfileInvocationPlan, error) {
+	if len(capabilities) == 0 || len(capabilities) > MaxRoutes {
+		return nil, fmt.Errorf(
+			"text-generation Worker capabilities must contain 1..%d entries",
+			MaxRoutes,
+		)
+	}
+	routes := make([]Route, 0, len(capabilities))
+	for _, capability := range capabilities {
+		if capability == nil {
+			return nil, errors.New("nil Worker capability")
+		}
+		if capability.Operation != Operation ||
+			!wireAcceptsExternalService(capability.AcceptedPriorities) {
+			continue
+		}
+		routes = append(routes, Route{
+			ServiceID: capability.ServiceId,
+			Model:     capability.Model,
+		})
+	}
+	if len(routes) == 0 {
+		return nil, errors.New(
+			"no externally callable text-generation Worker capability",
+		)
+	}
+	mapper, err := NewMapper(routes)
+	if err != nil {
+		return nil, err
+	}
+	registration, err := mapper.Registration()
+	if err != nil {
+		return nil, err
+	}
+	plan, err := edge.NewProfileInvocationPlan(
+		[]edge.ProfileInvocationRegistration{registration},
+		[]edge.ProfileInvocationRequirement{{
+			ProfileID: ProfileID, ProfileVersion: ProfileVersion,
+			Operation: Operation,
+		}},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !plan.Supports(ProfileID, ProfileVersion, nil, Operation) {
+		return nil, errors.New("text-generation Worker profile is not enabled")
+	}
+	return plan, nil
 }
 
 // Registration returns the one exact Edge registration implemented by this
@@ -275,6 +335,15 @@ func routeKey(serviceID, model string) string {
 func acceptsExternalService(priorities []airuntime.Priority) bool {
 	for _, priority := range priorities {
 		if priority == airuntime.PriorityExternalService {
+			return true
+		}
+	}
+	return false
+}
+
+func wireAcceptsExternalService(priorities []edgev1.Priority) bool {
+	for _, priority := range priorities {
+		if priority == edgev1.Priority_PRIORITY_EXTERNAL_SERVICE {
 			return true
 		}
 	}

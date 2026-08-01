@@ -68,6 +68,17 @@ The Go 1.24 module currently contains:
   startup retains a fail-closed Edge deployment plan built only from
   externally callable `generate` capabilities, atomically binding the
   installed mapper to the exact selector intended for advertisement;
+- `pkg/edgeintegration`, a fail-closed deployment bridge that reads one fresh,
+  fully validated capability snapshot through the private
+  `tos-protocol/localrpc.WorkerClient` and installs only its currently
+  externally callable text-generation routes into the immutable Edge plan.
+  Its readiness check requires the structured Worker, admission, resource,
+  runtime, model-binding, and task-store components and recomputes an
+  order-independent commitment to every public service/model/digest/runtime
+  identity. Route drift fails closed before another paid action; dynamic
+  capacity remains governed by Quote/Invoke. The bridge does not own the
+  Worker client, add a public listener, retry work, or grant session, payment,
+  wallet, or signing authority;
 - bounded runtime/model preflight before advertisement, Quote, and Invoke,
   with a single process monitor, bounded refresh concurrency, fixed-size
   singleflight state, expiring success/failure caches, and stable redacted
@@ -109,6 +120,11 @@ make test-race
 
 Contributors changing both repositories together may optionally use a local Go
 workspace with `go work init ./tos-protocol ./tos-ai`.
+
+The code-complete candidate boundary and the real-chain, key-custody,
+container-isolation, model-supply-chain, load/RSS and public-perimeter evidence
+still required for a production claim are tracked in the pinned protocol's
+`docs/non-streaming-v0.1-production-gates.md`.
 
 ## Run the development worker
 

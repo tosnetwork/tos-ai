@@ -11,7 +11,7 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-protocol v0.0.0-20260801100934-b26060d5f3ea
+	github.com/tosnetwork/tos-protocol v0.0.0-20260801115111-306d7b3bf421
 	google.golang.org/protobuf v1.36.11
 )
 

@@ -2,7 +2,11 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `b26060d5f3ea`, which includes the
+Deployment certification is tracked separately in
+`tos-protocol/docs/non-streaming-v0.1-production-gates.md`; it is not implied
+by interface completion or unit-test coverage.
+
+`tos-ai` pins `tos-protocol` revision `306d7b3bf421`, which includes the
 priority-aware task-store statistics, atomic owner-reserved slot enforcement,
 retained-byte counters, the `storage.task_bytes` contract, and the
 privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
@@ -59,7 +63,13 @@ The real `tos-ai-worker` ConnectRPC handler is exercised through
 `tos-protocol/pkg/localrpc.WorkerClient` over the private Unix transport. The
 compatibility test covers structured Health/capabilities, resource Quote,
 Invoke, retained GetTask success, opaque result consumption, and exact Cancel
-validation. Separate tests cover resource limit failures, task identity
+validation. It also constructs `pkg/edgeintegration.Deployment` from that live
+validated capability response and verifies that the exact
+`tos.ai.text-generation` v0.1.0 plan is installed and remains ready under a
+second fresh Worker snapshot. The deployment commits the exact public
+service/model/digest/runtime identities, so Edge and Worker do not need
+separately maintained public route lists and cannot silently drift after
+startup. Separate tests cover resource limit failures, task identity
 conflicts, cancellation, concurrent replay, and result recovery after closing
 and reopening the Worker database.
 
@@ -90,13 +100,18 @@ entering paid dispatch. The schema, semantic limits, privacy rules and fixed
 vectors live under
 `spec/profiles/text-generation/v0.1/` in this repository.
 
-`NewMapperFromCapabilities` validates a hard-bounded capability set and keeps
+`NewMapperFromCapabilities` validates a hard-bounded in-process capability set and keeps
 only `generate` routes that explicitly accept `EXTERNAL_SERVICE` priority.
 The operator configuration loader snapshots those capabilities at successful
 load time; `TextGenerationProfilePlan` later constructs an immutable,
 constructor-validated deployment plan from that private copy rather than from
 the caller-mutable adapter slice. Production worker startup constructs and
-retains that plan before serving its private socket. The plan binds its
-advertised exact selector set to the installed mapper before composition can
-open public ingress. Public ingress itself remains disabled in the current
-binaries.
+retains that plan before serving its private socket. For a separately composed
+Edge process, `NewProfilePlanFromWorkerCapabilities` and
+`pkg/edgeintegration.New` derive the same exact plan from a fresh response that
+has crossed the protocol client's complete validation boundary. The plan binds
+its advertised exact selector set to the installed mapper before composition
+can open public ingress. `Deployment.CheckReady` then requires the mandatory
+structured Worker components and rejects route/model/runtime identity drift
+while allowing separately enforced dynamic capacity to change. Public ingress
+itself remains disabled in the current binaries.

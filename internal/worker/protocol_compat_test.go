@@ -17,6 +17,8 @@ import (
 	"github.com/tosnetwork/tos-ai/internal/unixserver"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
+	"github.com/tosnetwork/tos-ai/pkg/edgeintegration"
+	"github.com/tosnetwork/tos-ai/pkg/profile/textgeneration"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
@@ -593,14 +595,32 @@ func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if health, err := client.Health(context.Background()); err != nil ||
-		len(health.Readiness) != 7 {
-		t.Fatalf("validated Health=%v err=%v", health, err)
+	health, healthErr := client.Health(context.Background())
+	if healthErr != nil || len(health.Readiness) != 7 {
+		t.Fatalf("validated Health=%v err=%v", health, healthErr)
 	}
 	capabilities, err := client.GetCapabilities(context.Background())
 	if err != nil || len(capabilities.Capabilities) != 1 ||
 		len(capabilities.Resources) != len(aiResourceDimensions)+2 {
 		t.Fatalf("validated capabilities=%v err=%v", capabilities, err)
+	}
+	deployment, err := edgeintegration.New(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedWorker, err := deployment.Worker()
+	if err != nil || installedWorker != client {
+		t.Fatalf("installed Worker=%p want=%p err=%v", installedWorker, client, err)
+	}
+	profilePlan, err := deployment.ProfilePlan()
+	if err != nil || !profilePlan.Supports(
+		textgeneration.ProfileID, textgeneration.ProfileVersion, nil,
+		textgeneration.Operation,
+	) {
+		t.Fatalf("live Worker profile plan=%v err=%v", profilePlan, err)
+	}
+	if err := deployment.CheckReady(context.Background()); err != nil {
+		t.Fatalf("live Edge deployment readiness: %v health=%v", err, health)
 	}
 	now := time.Now().UTC()
 	quoteRequest := &edgev1.QuoteRequest{
