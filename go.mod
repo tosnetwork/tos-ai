@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	connectrpc.com/connect v1.19.1
 	github.com/NVIDIA/go-nvml v0.13.3-1
-	github.com/tosnetwork/tos-protocol v0.0.0-20260801013613-242ab8cafe91
+	github.com/tosnetwork/tos-protocol v0.0.0-20260801031852-4a2ece17f75a
 	google.golang.org/protobuf v1.36.11
 )
 

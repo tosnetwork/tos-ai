@@ -498,7 +498,11 @@ Implemented:
 - deterministic privacy-minimized one-service ARD catalog generation from
   fresh validated externally callable Worker capabilities and
   operator-approved identity/routing metadata, without publication or a
-  public listener; optional atomic mode-0600 local handoff rejects symlinks
+  public listener; optional atomic mode-0600 local handoff rejects symlinks and
+  is covered through the protocol Registry's fail-closed atomic reload path
+- cross-repository discovery coverage proving the real Worker model selector
+  is found through the bounded Registry HTTP search handler, extension index,
+  and exact service, operation, model, and runtime filters
 - bounded startup cleanup and payload-free pagination that resolves
   interrupted synchronous tasks to a retained zero-charge failure without
   resubmission

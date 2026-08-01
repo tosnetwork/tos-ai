@@ -376,7 +376,13 @@ thresholds from one through ten.
   neither publishes the catalog nor opens a public listener. With
   `-ard-output`, it atomically replaces a mode-0600 regular file suitable for
   explicit loading by `tos-edge` or `tos-ard-registry`; symlink targets are
-  rejected.
+  rejected. A compatible Registry can consume that replacement through an
+  explicit all-or-nothing `SIGHUP` reload while retaining its last valid
+  generation on failure. It validates the known TOS extension once and makes
+  its model, operation, runtime, digest, and Worker service ID available to
+  bounded lexical search and same-capability exact `x-tos.*` filters. The
+  cross-repository compatibility test exercises this through the Registry's
+  actual bounded HTTP `POST /search` handler.
 - Production admission and process-capacity values come only from a private
   startup policy and are checked against effective observed RAM/free VRAM
   before the socket is created. On Linux, host totals are reduced by

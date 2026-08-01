@@ -1,10 +1,13 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +22,7 @@ import (
 	"github.com/tosnetwork/tos-protocol/gen/tos/edge/v1/edgev1connect"
 	"github.com/tosnetwork/tos-protocol/pkg/ard"
 	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
+	"github.com/tosnetwork/tos-protocol/pkg/registry"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -198,6 +202,68 @@ func TestStructuredReadinessResourcesAndQuoteCommitment(t *testing.T) {
 		strings.Contains(string(catalogJSON), "availableExternal") ||
 		!strings.Contains(string(catalogJSON), "deterministic-echo") {
 		t.Fatalf("ARD catalog leaked dynamic capacity: %s err=%v", catalogJSON, err)
+	}
+	index, err := registry.NewIndex(registry.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogPath := filepath.Join(t.TempDir(), "tos-ai-catalog.json")
+	if err := ard.WriteCatalogFile(catalogPath, catalog, ard.DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	loadedCatalog, err := ard.ReadCatalogFile(catalogPath, ard.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.ReplaceCatalogs([]registry.CatalogInput{{
+		Source: "file:///tos-ai-catalog.json", Catalog: loadedCatalog,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	registryHandler, err := registry.NewHandler(index, "https://registry.edge.example/search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryServer := httptest.NewServer(registryHandler.Routes())
+	defer registryServer.Close()
+	searchJSON, err := json.Marshal(registry.SearchRequest{
+		Query: registry.QueryModel{
+			Text: "deterministic-echo",
+			Filter: map[string]interface{}{
+				registry.WorkerFilterServiceID: capabilities.Msg.Capabilities[0].ServiceId,
+				registry.WorkerFilterOperation: capabilities.Msg.Capabilities[0].Operation,
+				registry.WorkerFilterModel:     capabilities.Msg.Capabilities[0].Model,
+				registry.WorkerFilterRuntime:   capabilities.Msg.Capabilities[0].Runtime,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchContext, cancelSearch := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelSearch()
+	searchRequest, err := http.NewRequestWithContext(
+		searchContext, http.MethodPost, registryServer.URL+"/search",
+		bytes.NewReader(searchJSON),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchRequest.Header.Set("Content-Type", "application/json")
+	searchResponse, err := http.DefaultClient.Do(searchRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var discovered registry.SearchResponse
+	decodeErr := json.NewDecoder(io.LimitReader(searchResponse.Body, 1<<20)).Decode(&discovered)
+	closeErr := searchResponse.Body.Close()
+	if searchResponse.StatusCode != http.StatusOK || decodeErr != nil || closeErr != nil ||
+		len(discovered.Results) != 1 ||
+		discovered.Results[0].Identifier != catalog.Entries[0].Identifier {
+		t.Fatalf(
+			"ARD Worker HTTP discovery status=%d response=%#v decode_err=%v close_err=%v",
+			searchResponse.StatusCode, discovered, decodeErr, closeErr,
+		)
 	}
 
 	deadline := time.Now().Add(time.Minute)
