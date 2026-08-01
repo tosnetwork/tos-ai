@@ -673,8 +673,8 @@ Planned, not claimed by this release:
 - live administrator lifecycle controls for fixed activation slots
 - authenticated policy rollout, hot reload, and dynamic capacity resizing or
   cross-process host coordination
-- privileged certification, production-binary wiring and packaging for the
-  CPU-only containerd driver; later reviewed GPU and network policy backends
+- privileged certification and packaging for the CPU-only containerd driver;
+  later reviewed GPU and network policy backends
 - signed benchmark runner and external evidence issuers
 - public authentication, payment, receipts, settlement, and explicit mapper
   installation through Edge Core

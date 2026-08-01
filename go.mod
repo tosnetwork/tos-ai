@@ -5,10 +5,13 @@ go 1.24.0
 require (
 	connectrpc.com/connect v1.19.1
 	github.com/NVIDIA/go-nvml v0.13.3-1
+	github.com/containerd/cgroups/v3 v3.0.3
+	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/containerd/v2 v2.0.11
 	github.com/containerd/errdefs v1.0.0
+	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-protocol v0.0.0-20260801064617-9842130bc69a
+	github.com/tosnetwork/tos-protocol v0.0.0-20260801100934-b26060d5f3ea
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -17,8 +20,6 @@ require (
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20231105174938-2b5cbb29f3e2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.12.9 // indirect
-	github.com/containerd/cgroups/v3 v3.0.3 // indirect
-	github.com/containerd/containerd/api v1.8.0 // indirect
 	github.com/containerd/continuity v0.4.4 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
@@ -26,7 +27,6 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.1 // indirect
 	github.com/containerd/plugin v1.0.0 // indirect
 	github.com/containerd/ttrpc v1.2.7 // indirect
-	github.com/containerd/typeurl/v2 v2.2.3 // indirect
 	github.com/cyphar/filepath-securejoin v0.5.1 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

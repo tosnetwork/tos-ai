@@ -2,16 +2,17 @@
 
 Status: non-streaming v0.1 interface implemented
 
-`tos-ai` pins `tos-protocol` revision `f104414655ef`, which includes the
+`tos-ai` pins `tos-protocol` revision `b26060d5f3ea`, which includes the
 priority-aware task-store statistics, atomic owner-reserved slot enforcement,
 retained-byte counters, the `storage.task_bytes` contract, and the
 privacy-minimized Worker-to-ARD projection and atomic local catalog handoff
 used below. That revision also provides the strict Worker extension decoder,
 bounded Registry search/filter projection, strict local catalog reader, atomic
-complete-catalog-set reload, and bounded Registry request admission. Protobuf
-definitions remain owned by `tos-protocol`; this repository does not copy or
-fork them. These ARD additions do not change WorkerService v0.1 protobuf
-fields.
+complete-catalog-set reload, bounded Registry request admission, exact profile
+invocation plans, receipt charge policy, the isolated receipt-signer boundary,
+and opt-in authenticated receipt delivery. Protobuf definitions remain owned
+by `tos-protocol`; this repository does not copy or fork them. Those later Edge
+changes do not change WorkerService v0.1 protobuf fields.
 
 ## Implemented coverage
 
