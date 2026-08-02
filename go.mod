@@ -12,6 +12,7 @@ require (
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/tosnetwork/tos-protocol v0.0.0-20260801204521-c1e33bc6208e
+	go.etcd.io/bbolt v1.4.3
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -50,7 +51,6 @@ require (
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xssnick/tonutils-go v1.16.0 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.56.0 // indirect
 	go.opentelemetry.io/otel v1.31.0 // indirect

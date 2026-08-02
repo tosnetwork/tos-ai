@@ -1,7 +1,7 @@
 # tos-ai Roadmap
 
 Status: non-streaming M1 composition and local integration complete candidate
-Last reviewed: 2026-08-01
+Last reviewed: 2026-08-02
 
 This is the repository-level delivery roadmap for the TOS AI Edge Computing
 Terminal. The cross-repository program view lives in
@@ -65,6 +65,19 @@ consumer execution, a public shell, validator work, or token issuance.
   builds; mock NVIDIA telemetry and GPU admission degradation/recovery; signer
   rotation coverage; and concurrent TLS malformed-input rejection without
   durable-store growth.
+- Deterministic complete release bundles with internal and external SHA-256
+  manifests, detached Ed25519 verification, archive safety checks, service and
+  configuration material, and byte-identical build gates in CI.
+- Crash-safe two-slot software updates with signed artifact staging, an exact
+  candidate-boot health window, automatic known-good rollback after an
+  unconfirmed boot, monotonic security revisions, and bounded residue cleanup.
+- Terminal-bound signed administrator activation/confirmation/rollback
+  commands with durable exact replay, conflict and uncertain-outcome handling,
+  exclusive bounded storage, and a privacy-minimized bounded history view.
+- The CPU-only containerd lifecycle conformance suite has run successfully on
+  this host against real containerd/runc, including success, cancellation,
+  duplicate identity, concurrency, and synchronous object cleanup. This is
+  local runtime evidence, not target-kernel or NVIDIA certification.
 
 ## In Progress
 
@@ -82,32 +95,34 @@ work is target-deployment evidence and operator policy:
 - complete GPU/container isolation, model supply-chain, long-duration memory,
   public perimeter, controller/key rotation, revocation and settlement
   evidence on the actual target deployment;
-- produce signed reproducible artifacts and an audited rollback procedure.
+- execute the offline release-key ceremony, sign the reproducible candidate,
+  and rehearse the documented rollback procedure on the target terminal.
 
 ## Next
 
-1. Add signed production packaging, service management, upgrade/rollback, and
-   operator diagnostics for the Tier 1 terminal.
+1. Integrate the completed release/update primitives with the deployment's
+   selected service manager and independently audited operator transport; this
+   is installation policy rather than another request-facing protocol path.
 2. Add a reviewed NVIDIA container runtime/device-isolation backend and prove
    its cleanup and exclusivity on supported hardware; do not expose raw device
    access to callers.
 3. Add fixed activation backends for selected vLLM, llama.cpp, LocalAI, or
    vendor runtimes with exact artifact/runtime identity and the existing trust
    boundary. No arbitrary Internet model pull is implied.
-4. Implement active/known-good software update slots with crash- and power-loss
-   recovery, staged rollout, health gates, anti-rollback, and bounded retention.
-5. Add authenticated administrator lifecycle controls and carefully bounded
-   policy rollout. Dynamic capacity resizing or cross-process coordination must
-   retain one authoritative admission state.
-6. Consume `tos-protocol` streaming v0.2 only after ordering, backpressure,
+4. Add carefully bounded authenticated policy rollout. Dynamic capacity
+   resizing or cross-process coordination must retain one authoritative
+   admission state; software release lifecycle controls are already local and
+   signed.
+5. Consume `tos-protocol` streaming v0.2 only after ordering, backpressure,
    cancellation, resume, usage, total-output, and Receipt semantics are frozen.
-7. Add signed benchmark evidence and external evidence issuers without
+6. Add signed benchmark evidence and external evidence issuers without
    treating self-reported TOPS or hardware identity as proof of service quality.
-8. Implement the site-bound physical terminal track: real-time local priority,
+7. Implement the site-bound physical terminal track: real-time local priority,
    bounded offline journal, safe reconnect, signed updates, device/actuator
    isolation, independent safety interlocks, and fleet lifecycle.
-9. Add remote metrics collection and durable operational history through a
-   separate authenticated, bounded export path.
+8. Add remote metrics collection through a separately authenticated, bounded
+   export path. The local durable software lifecycle history is implemented;
+   remote transport and fleet aggregation remain outside this process.
 
 ## External Certification
 

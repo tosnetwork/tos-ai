@@ -561,8 +561,9 @@ assignment are rejected, not partially implemented. CPU, memory and block-write
 metrics are enforced internally but are not yet exposed as billable Worker v0.1
 usage, and block writes are not writable-tmpfs volume. Usage-dependent charging
 therefore remains unavailable. LSM policy and privileged seccomp enforcement, a private daemon fixture,
-adversarial privileged tests, crash/reboot residue rehearsal, and packaging
-remain launch gates.
+adversarial privileged tests and crash/reboot residue rehearsal remain launch
+gates. Deterministic signed packaging is implemented, but the target release
+ceremony and installation remain deployment evidence.
 
 The backend also implements a side-effect-free `CheckReady` operation. The
 runtime adapter invokes it on every existing bounded/coalesced Worker
@@ -668,24 +669,29 @@ Implemented:
 - reusable isolated-backend lifecycle conformance harness covering readiness,
   success, cancellation, duplicate execution identity, concurrency and zero
   runtime-object residue
+- deterministic release bundles containing binaries, service/config examples,
+  license and operating guide, with complete internal/external digests,
+  detached Ed25519 verification, archive-safety checks and tamper gates
+- two fixed software release slots with signed staging, candidate-boot health
+  gates, automatic known-good recovery after an unconfirmed boot, anti-rollback
+  security revisions, exclusive ownership and bounded crash residue
+- canonical signed administrator activation, health-confirmation and rollback
+  commands bound to one terminal and expected active slot, with bounded durable
+  exact replay, uncertain-outcome refusal and privacy-minimized local history
 
 Planned, not claimed by this release:
 
 - activation backends for LocalAI, vLLM, llama.cpp, and vendor runtimes
-- live administrator lifecycle controls for fixed activation slots
 - authenticated policy rollout, hot reload, and dynamic capacity resizing or
   cross-process host coordination
-- privileged certification and packaging for the CPU-only containerd driver;
+- privileged certification for the CPU-only containerd driver;
   later reviewed GPU and network policy backends
 - signed benchmark runner and external evidence issuers
-- the public AI Edge deployment binary that composes the implemented protocol
-  authentication/payment/action boundary, this mapper bridge, chain adapters,
-  isolated Worker, and production key custody
 - real streaming after a `tos-protocol` streaming RPC exists
-- active/known-good software update slots and crash recovery
 - ARD publication/Registry hosting, relay, offline journal, fleet, and
   physical-terminal profiles
-- authenticated remote metrics collection and durable operational history
+- authenticated remote metrics collection and bounded remote history export;
+  local software lifecycle history is already durable and bounded
 
 KubeEdge, EdgeX, Ollama, LocalAI, vLLM, and containerd remain external
 projects or design sources; this daemon does not fork or embed their control

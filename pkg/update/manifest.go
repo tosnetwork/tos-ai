@@ -1,5 +1,6 @@
-// Package update verifies content-addressed release manifests. Download,
-// staging, active/rollback slots, and fleet rollout remain separate layers.
+// Package update verifies content-addressed release manifests. Download and
+// fleet rollout remain deployment layers; pkg/softwareupdate owns the local
+// staged active/known-good slot state machine.
 package update
 
 import (

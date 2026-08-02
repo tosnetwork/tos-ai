@@ -113,8 +113,16 @@ func (e *sdkEngine) Run(
 		containerd.WithSnapshotter(e.snapshotter),
 		containerd.WithImage(image),
 		containerd.WithContainerLabels(map[string]string{managedLabel: "v1"}),
+		// containerd views are metadata-only read-only mounts and cannot back a
+		// runnable task on the supported overlayfs/runc v2 stack. Create an
+		// active snapshot, then enforce the immutable root at the OCI layer with
+		// spec.Root.Readonly, empty capabilities, no-new-privileges and seccomp.
+		// The digest-derived snapshot is still removed synchronously below.
+		containerd.WithNewSnapshot(id, image),
+		// WithImageConfig reads the new snapshot metadata. Containerd options
+		// execute in order, so specification construction must follow snapshot
+		// creation or it fails before runc starts.
 		containerd.WithNewSpec(oci.WithImageConfig(image), fixedIsolationSpec(request)),
-		containerd.WithNewSnapshotView(id, image),
 	)
 	if err != nil {
 		cleanupErr := e.removeFailedSnapshot(id)

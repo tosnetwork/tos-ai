@@ -1,4 +1,4 @@
-.PHONY: all build test test-race vet fmt-check reproducible-builds local-gates
+.PHONY: all build test test-race vet fmt-check reproducible-builds release-gates local-gates
 
 all: fmt-check vet test build
 
@@ -20,4 +20,7 @@ fmt-check:
 reproducible-builds:
 	./scripts/verify-reproducible-builds.sh
 
-local-gates: fmt-check vet test-race reproducible-builds
+release-gates:
+	./scripts/test-release-bundle.sh
+
+local-gates: fmt-check vet test-race reproducible-builds release-gates
