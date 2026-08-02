@@ -83,6 +83,36 @@ func TestLoadOpenAIConfigAndCredential(t *testing.T) {
 	}
 }
 
+func TestLoadFixedOpenAICompatibleRuntimeKinds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/models" {
+			_, _ = writer.Write([]byte(`{"object":"list","data":[{"id":"approved-model"}]}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{}}`))
+	}))
+	defer server.Close()
+	for _, kind := range []string{"vllm", "llama.cpp", "localai"} {
+		config := fmt.Sprintf(`{
+			"version": 2,
+			"adapters": [{
+				"type": %q, "baseUrl": %q, "model": "approved-model",
+				"modelDigest": "sha256:%s", "runtimeRevision": %q,
+				"maxInputBytes": 1024, "maxOutputBytes": 64,
+				"maxRequestBytes": 2048, "maxResponseBytes": 2048,
+				"admission": {"ramBytes": 1, "contextTokens": 128, "batchSize": 1}
+			}]
+		}`, kind, server.URL, strings.Repeat("a", 64), kind+"-v1")
+		configuration, err := Load(writePrivate(t, kind+".json", config, 0o600))
+		if err != nil {
+			t.Fatalf("kind %q: %v", kind, err)
+		}
+		if got := configuration.Adapters[0].Capability().Runtime; got != kind {
+			t.Fatalf("kind %q runtime=%q", kind, got)
+		}
+	}
+}
+
 func TestTextGenerationProfilePlanRejectsEmptyConfiguration(t *testing.T) {
 	var configuration *Configuration
 	if _, err := configuration.TextGenerationProfilePlan(); err == nil {

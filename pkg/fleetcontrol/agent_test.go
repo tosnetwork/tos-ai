@@ -112,6 +112,32 @@ func TestAgentRejectsWrongTerminalAndStaleGeneration(t *testing.T) {
 	}
 }
 
+func TestAgentAppliesSignedPolicyCommandsAndRejectsDigestConfusion(t *testing.T) {
+	publicKey, privateKey := fleetKey(t)
+	online, busy := true, false
+	executor := &mockExecutor{}
+	agent := openTestAgent(t, "terminal-one", publicKey, executor, &online, &busy)
+	now := time.Unix(1_800_000_000, 0)
+	command := Command{
+		Version: CommandVersion, CommandID: "policy-one", FleetID: "fleet-one", TerminalID: "terminal-one",
+		Generation: 1, Action: "apply-policy", PolicyDigest: "sha256:" + strings.Repeat("b", 64),
+	}
+	envelope, err := identity.SignCanonical(privateKey, CommandDomain, "controller-1", command, now.Add(-time.Second), now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := agent.Submit(context.Background(), envelope, now); err != nil || result.State != "succeeded" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	command.CommandID = "policy-confused"
+	command.Generation = 2
+	command.ReleaseDigest = "sha256:" + strings.Repeat("a", 64)
+	envelope, _ = identity.SignCanonical(privateKey, CommandDomain, "controller-1", command, now.Add(-time.Second), now.Add(time.Hour))
+	if _, err := agent.Submit(context.Background(), envelope, now); err == nil {
+		t.Fatal("command carrying both release and policy digests accepted")
+	}
+}
+
 func TestOpenRejectsSymlinkJournal(t *testing.T) {
 	publicKey, _ := fleetKey(t)
 	directory := filepath.Join(t.TempDir(), "private")

@@ -86,6 +86,30 @@ consumer execution, a public shell, validator work, or token issuance.
   queue and history, real-time-work priority, reconnect drain, deterministic
   canary rings and signed rollback. MOCK executors cover failure injection
   without requiring a physical GPU or terminal fleet.
+- Fixed operator-owned vLLM, llama.cpp, and LocalAI identities over the bounded
+  OpenAI-compatible adapter, with MOCK server coverage and no request-selected
+  endpoint.
+- Separately authenticated bounded fleet HTTP transport, signed policy
+  apply/rollback commands using the existing generation/replay/canary state
+  machine, and a fixed-destination privacy-filtered metrics exporter. These are
+  transport libraries; target TLS policy and physical interlocks remain
+  deployment evidence.
+- A fixed-action fleet execution bridge routes validated commands only to
+  release, policy and availability controllers; it never accepts paths, URLs,
+  unit names, shell text or runtime endpoints. MOCK failures and panics fail
+  closed.
+- An exclusive GPU alias lease layer for reviewed container backends, with
+  capacity rejection and synchronous release after success, error,
+  cancellation or panic. MOCK concurrency proves that one device is never
+  shared; actual NVIDIA OCI injection remains a target certification item.
+- Privacy-minimized signed benchmark evidence with deterministic MOCK runner
+  fault injection, plus a bounded authenticated fleet metrics collector that
+  retains one fixed-size snapshot per configured terminal alias and expires it
+  without a background queue.
+- A fixed-unit, no-shell systemd service-manager adapter with bounded
+  restart/reload/readiness operations and MOCK timeout/panic/injection tests.
+  Selecting the production unit and privilege boundary remains deployment
+  policy.
 
 ## In Progress
 
@@ -108,28 +132,28 @@ work is target-deployment evidence and operator policy:
 
 ## Next
 
-1. Integrate the completed release/update primitives with the deployment's
-   selected service manager and independently audited operator transport; this
-   is installation policy rather than another request-facing protocol path.
-2. Add a reviewed NVIDIA container runtime/device-isolation backend and prove
-   its cleanup and exclusivity on supported hardware; do not expose raw device
-   access to callers.
-3. Add fixed activation backends for selected vLLM, llama.cpp, LocalAI, or
-   vendor runtimes with exact artifact/runtime identity and the existing trust
-   boundary. No arbitrary Internet model pull is implied.
-4. Add carefully bounded authenticated policy rollout. Dynamic capacity
-   resizing or cross-process coordination must retain one authoritative
-   admission state; software release lifecycle controls are already local and
-   signed.
-5. Add signed benchmark evidence and external evidence issuers without
-   treating self-reported TOPS or hardware identity as proof of service quality.
-6. Integrate the completed fleet agent/control library with a selected
-   authenticated operator transport and physical safety controller. Actual
+1. Bind the fixed fleet action interfaces to the selected policy loader and
+   systemd unit, and audit the selected operator TLS identity. The local signed
+   command, fixed-action, systemd, retry/replay and MOCK failure boundaries are
+   complete; unit privileges and atomic policy reload semantics are
+   installation policy.
+2. Bind the exclusive GPU lease client to the selected NVIDIA OCI backend and
+   certify exact device injection and cleanup on supported hardware. The local
+   concurrency/capacity/panic contract is complete and exposes no raw device
+   selector to callers.
+3. Add vendor-specific artifact activation only when that runtime exposes a
+   reviewed atomic activation/rollback API. Fixed vLLM, llama.cpp and LocalAI
+   execution identities are complete; no arbitrary Internet model pull is
+   implied.
+4. Provision benchmark issuer trust and collect evidence on target hardware;
+   deterministic signed evidence generation is complete, but MOCK results are
+   never advertised as measured performance.
+5. Integrate the completed fleet agent/control library and bounded reference
+   operator transport with the selected TLS identity and physical safety controller. Actual
    actuator interlocks remain outside this Go process and require target-site
    evidence.
-7. Add remote metrics collection through a separately authenticated, bounded
-   export path. The local durable software lifecycle history is implemented;
-   remote transport and fleet aggregation remain outside this process.
+6. Deploy the completed fixed-destination exporter and bounded reference
+   collector with operator-selected retention and monitoring infrastructure.
 
 ## External Certification
 
@@ -151,7 +175,7 @@ This ROADMAP intentionally does not duplicate that ledger.
 | A0: private terminal foundation | Worker, admission, persistence, runtime adapters, model trust, text profile, isolation foundation, protocol compatibility and race tests | Completed |
 | A1: public non-streaming composition | `tos-ai-edge` completes the local discovery-to-receipt flow with complete fail-closed dependencies | Completed |
 | A2: Tier 1 production candidate | Packaging plus required chain, key, isolation, model, memory, and network evidence | In Progress |
-| A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Streaming local gates complete; runtime certification remains |
+| A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Streaming and GPU lease MOCK gates complete; NVIDIA OCI certification remains |
 | A4: physical terminal and fleet | Offline, real-time, update, device-safety, reconnect, and fleet acceptance | Fleet-control local gates complete; physical certification remains |
 
 ## Maintenance

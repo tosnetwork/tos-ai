@@ -45,6 +45,7 @@ type Command struct {
 	Generation    uint64 `json:"generation" cbor:"generation"`
 	Action        string `json:"action" cbor:"action"`
 	ReleaseDigest string `json:"releaseDigest,omitempty" cbor:"releaseDigest,omitempty"`
+	PolicyDigest  string `json:"policyDigest,omitempty" cbor:"policyDigest,omitempty"`
 }
 
 type Result struct {
@@ -256,7 +257,7 @@ func (a *Agent) verify(envelope identity.Envelope, now time.Time) (Command, stri
 	if len(key) != ed25519.PublicKeySize || envelope.VerifyCanonical(key, CommandDomain, now.UTC(), &command) != nil ||
 		command.Version != CommandVersion || command.FleetID != a.config.FleetID || command.TerminalID != a.config.TerminalID ||
 		!validID(command.CommandID) || command.Generation == 0 || !validAction(command.Action) ||
-		(command.ReleaseDigest != "" && (!strings.HasPrefix(command.ReleaseDigest, "sha256:") || len(command.ReleaseDigest) != 71)) {
+		!validCommandDigests(command) {
 		return Command{}, "", errors.New("fleet command is unauthorized")
 	}
 	fingerprint, err := envelope.Fingerprint()
@@ -443,7 +444,30 @@ func validID(value string) bool {
 	return true
 }
 func validAction(value string) bool {
-	return value == "install-release" || value == "rollback" || value == "drain" || value == "resume"
+	return value == "install-release" || value == "rollback" || value == "drain" || value == "resume" ||
+		value == "apply-policy" || value == "rollback-policy"
+}
+func validCommandDigests(command Command) bool {
+	validDigest := func(value string) bool {
+		if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+			return false
+		}
+		for _, character := range value[len("sha256:"):] {
+			if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	switch command.Action {
+	case "apply-policy", "rollback-policy":
+		return command.ReleaseDigest == "" && validDigest(command.PolicyDigest)
+	case "install-release":
+		return command.PolicyDigest == "" && validDigest(command.ReleaseDigest)
+	default:
+		return command.PolicyDigest == "" &&
+			(command.ReleaseDigest == "" || validDigest(command.ReleaseDigest))
+	}
 }
 
 func ownedByCurrentUser(info os.FileInfo) bool {

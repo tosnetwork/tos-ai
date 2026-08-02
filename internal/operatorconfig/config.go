@@ -483,7 +483,7 @@ func buildAdapter(
 			},
 			closer: backend,
 		}, nil
-	case "openai-compatible":
+	case "openai-compatible", "vllm", "llama.cpp", "localai":
 		if config.Activation != nil {
 			return nil, nil, errors.New(
 				"OpenAI-compatible activation is unavailable",
@@ -500,6 +500,7 @@ func buildAdapter(
 		adapter, err := openai.New(openai.Config{
 			BaseURL: config.BaseURL, APIKey: apiKey, Model: config.Model,
 			ModelDigest: config.ModelDigest, RuntimeRevision: config.RuntimeRevision,
+			Runtime:       config.Type,
 			MaxInputBytes: config.MaxInputBytes, MaxOutputBytes: config.MaxOutputBytes,
 			MaxRequestBytes: config.MaxRequestBytes, MaxResponseBytes: config.MaxResponseBytes,
 			MaxConnections:         config.MaxConnections,

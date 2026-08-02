@@ -428,8 +428,8 @@ thresholds from one through ten.
 
 ## Security boundaries
 
-- `tos-edge` in `tos-protocol` remains the future authentication, payment,
-  receipt, and settlement control plane.
+- `tos-ai-edge` composes the `tos-protocol` authentication, payment, receipt
+  and settlement control plane; the private Worker still owns no wallet key.
 - The text-generation mapper accepts only the exact v0.1.0 profile selector
   with no extensions. It cannot set Worker identity, payment, priority,
   deadline, output, retention, endpoint, credential, or runtime fields; Edge
@@ -530,12 +530,16 @@ supported through bounded inventory preflight. Generic OpenAI-compatible
 model-list APIs expose an ID but do not attest their configured content
 digest.
 
-This repository also does not yet provide public ingress or the deployment
-composition that installs its reviewed mapper into `tos-edge`, TOS payment
-authorization, receipts, settlement, ARD publication/Registry hosting, fleet
-management, an offline journal, a remote metrics collector/exporter, streaming
-RPC, privileged containerd isolation certification,
-physical-I/O control, or audited NVIDIA runtime packaging. It does not support
+The repository now includes the bounded `tos-ai-edge` deployment composition,
+TOS authorization/payment/Receipt flow, ARD handoff, unary and versioned
+streaming Worker RPC, durable offline fleet control, fixed-action controller
+bridges, a bounded authenticated metrics exporter/collector pair, signed
+benchmark evidence, CPU containerd execution and an exclusive GPU-alias lease
+boundary. A fixed-unit, no-shell systemd adapter supplies bounded
+restart/reload/readiness operations. These implementations do not by themselves certify a particular
+public TLS perimeter, operator authentication/custody policy, service manager,
+policy loader, physical safety controller, privileged target kernel or NVIDIA
+OCI runtime/device mapping. It does not support
 arbitrary consumer containers/programs/models, unrestricted fine-tuning,
 training, token issuance, or bare GPU rental.
 

@@ -27,11 +27,15 @@ const (
 )
 
 type Config struct {
-	BaseURL                string
-	APIKey                 string
-	Model                  string
-	ModelDigest            string
-	RuntimeRevision        string
+	BaseURL         string
+	APIKey          string
+	Model           string
+	ModelDigest     string
+	RuntimeRevision string
+	// Runtime is an operator-selected fixed implementation identity. Supported
+	// values share the OpenAI-compatible wire contract but are never selected
+	// by an invocation payload.
+	Runtime                string
 	MaxInputBytes          uint64
 	MaxOutputBytes         uint64
 	MaxRequestBytes        uint64
@@ -58,6 +62,9 @@ type Adapter struct {
 }
 
 func New(config Config) (*Adapter, error) {
+	if config.Runtime == "" {
+		config.Runtime = "openai-compatible"
+	}
 	if config.Model == "" || config.ModelDigest == "" || config.RuntimeRevision == "" ||
 		config.MaxInputBytes == 0 || config.MaxOutputBytes == 0 ||
 		config.MaxRequestBytes == 0 || config.MaxRequestBytes > MaxBodyBytesHard ||
@@ -65,14 +72,14 @@ func New(config Config) (*Adapter, error) {
 		config.MaxResponseBytes < config.MaxOutputBytes ||
 		config.Admission.RAMBytes == 0 || config.Admission.ContextTokens == 0 ||
 		config.Admission.BatchSize == 0 || config.Admission.ExecutionTime <= 0 ||
-		!validCredential(config.APIKey) {
+		!validCredential(config.APIKey) || !validRuntime(config.Runtime) {
 		return nil, errors.New("invalid OpenAI-compatible adapter configuration")
 	}
 	config.Admission.OutputBytes = config.MaxOutputBytes
 	capability := airuntime.Capability{
 		ServiceID: "tos.ai.openai-compatible", Operation: "generate",
 		Model: config.Model, ModelDigest: config.ModelDigest,
-		Runtime: "openai-compatible", RuntimeRevision: config.RuntimeRevision,
+		Runtime: config.Runtime, RuntimeRevision: config.RuntimeRevision,
 		MaxInputBytes: config.MaxInputBytes, MaxOutputBytes: config.MaxOutputBytes,
 		AcceptedPriorities: []airuntime.Priority{
 			airuntime.PriorityLocalAsync,
@@ -103,6 +110,15 @@ func New(config Config) (*Adapter, error) {
 		maxResponse:       config.MaxResponseBytes,
 		capability:        capability,
 	}, nil
+}
+
+func validRuntime(value string) bool {
+	switch value {
+	case "openai-compatible", "vllm", "llama.cpp", "localai":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Adapter) Capability() airuntime.Capability {

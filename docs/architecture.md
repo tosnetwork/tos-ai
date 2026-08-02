@@ -13,7 +13,7 @@ The current release is a managed-inference worker foundation, not a bare GPU
 rental daemon, hard real-time controller, payment service, or public runtime.
 
 ```text
-tos-edge (future wallet/payment/auth boundary)
+tos-ai-edge (implemented wallet/payment/auth composition)
        |
        | ConnectRPC over a private mode-0600 Unix socket
        v
@@ -688,19 +688,33 @@ Implemented:
   commands bound to one terminal and expected active slot, with bounded durable
   exact replay, uncertain-outcome refusal and privacy-minimized local history
 
-Planned, not claimed by this release:
+Implemented locally but requiring deployment integration or external evidence:
 
-- activation backends for LocalAI, vLLM, llama.cpp, and vendor runtimes
-- authenticated policy rollout, hot reload, and dynamic capacity resizing or
-  cross-process host coordination
+- fixed LocalAI, vLLM and llama.cpp execution identities use the bounded
+  OpenAI-compatible transport; vendor-specific artifact activation remains
+  unavailable without a reviewed atomic runtime API
+- signed, generation-bound policy apply/rollback commands, a separately
+  authenticated bounded fleet HTTP handler, and a fixed-action bridge to
+  release/policy/drain/resume controllers; the selected policy loader, service
+  manager, TLS identity and physical safety controller remain deployment-owned
+- a fixed-unit systemd adapter that invokes `/usr/bin/systemctl` directly with
+  fixed verbs, no shell, no prompt and bounded deadlines; selecting the unit,
+  D-Bus/OS permissions and restart handover is deployment-owned
+- a fixed HTTPS destination, bearer-authenticated, privacy-filtered and
+  byte-bounded metrics exporter plus a bounded reference collector retaining
+  one latest snapshot per unique configured terminal alias with TTL cleanup;
+  production monitoring/retention policy remains deployment-owned
+- a privacy-minimized signed benchmark evidence issuer with deterministic MOCK
+  execution/failure injection; only measurements from a real reviewed runtime
+  and provisioned issuer may be advertised
+- an exclusive sorted GPU-alias lease client that rejects overlap and releases
+  synchronously after backend failure or panic; the target NVIDIA backend must
+  still prove that each alias maps to the exact isolated OCI device set
 - privileged certification for the CPU-only containerd driver;
   later reviewed GPU and network policy backends
-- signed benchmark runner and external evidence issuers
-- real streaming after a `tos-protocol` streaming RPC exists
-- ARD publication/Registry hosting, relay, offline journal, fleet, and
-  physical-terminal profiles
-- authenticated remote metrics collection and bounded remote history export;
-  local software lifecycle history is already durable and bounded
+- external benchmark issuer trust and target-hardware measurements
+- public ARD publication, relay, and physical-terminal certification
+- dynamic admission resizing or cross-process host coordination
 
 KubeEdge, EdgeX, Ollama, LocalAI, vLLM, and containerd remain external
 projects or design sources; this daemon does not fork or embed their control

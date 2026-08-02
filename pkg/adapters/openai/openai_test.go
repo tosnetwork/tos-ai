@@ -54,6 +54,28 @@ func TestExecuteSuccess(t *testing.T) {
 	}
 }
 
+func TestFixedRuntimeIdentities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	for _, runtimeName := range []string{"openai-compatible", "vllm", "llama.cpp", "localai"} {
+		adapter, err := New(Config{
+			BaseURL: server.URL, Model: "approved", ModelDigest: "sha256:" + strings.Repeat("a", 64),
+			Runtime: runtimeName, RuntimeRevision: runtimeName + "-v1",
+			MaxInputBytes: 1024, MaxOutputBytes: 32, MaxRequestBytes: 2048,
+			MaxResponseBytes: 2048, MaxConnections: 1, MaxResponseHeaderBytes: 4096,
+			Timeout: time.Second, ConnectTimeout: time.Second,
+			Admission: admission.Resources{RAMBytes: 1, ContextTokens: 128, BatchSize: 1, ExecutionTime: time.Second},
+		})
+		if err != nil {
+			t.Fatalf("runtime %q: %v", runtimeName, err)
+		}
+		if adapter.Capability().Runtime != runtimeName {
+			t.Fatalf("runtime=%q", adapter.Capability().Runtime)
+		}
+		_ = adapter.Close()
+	}
+}
+
 func TestPreflightObservesModelIDButKeepsDigestDeclared(t *testing.T) {
 	adapter, server := newAdapter(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.Path != "/v1/models" {
