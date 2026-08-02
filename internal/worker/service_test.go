@@ -107,6 +107,57 @@ func TestNewServiceRejectsUnsafeRuntimeMonitorConfiguration(t *testing.T) {
 	}
 }
 
+func TestNewServiceRejectsTypedNilAndPanickingDependencies(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*Config)
+		adapter   airuntime.Adapter
+	}{
+		{
+			name: "typed-nil runtime adapter",
+			adapter: func() airuntime.Adapter {
+				var adapter *faultAdapter
+				return adapter
+			}(),
+		},
+		{
+			name: "panicking runtime capability",
+			adapter: &faultAdapter{
+				panicCapability: true,
+			},
+		},
+		{
+			name: "typed-nil resource health",
+			configure: func(config *Config) {
+				var resources *mutableResourceHealth
+				config.ResourceHealth = resources
+			},
+			adapter: mock.New(0),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := testServiceConfig(t)
+			if test.configure != nil {
+				test.configure(&config)
+			}
+			taskScheduler, admissionController := newTestDependencies(t, 2)
+			service, err := NewService(
+				config, taskScheduler, admissionController,
+				[]airuntime.Adapter{test.adapter},
+			)
+			if err == nil || service != nil {
+				t.Fatal("unsafe Worker dependency accepted")
+			}
+			shutdownContext, cancel := context.WithTimeout(
+				context.Background(), time.Second,
+			)
+			defer cancel()
+			_ = taskScheduler.Shutdown(shutdownContext)
+			admissionController.Shutdown()
+		})
+	}
+}
+
 func TestPreflightScanLimitAccountsForEveryBoundedBatch(t *testing.T) {
 	if got := preflightScanLimit(5, 2, time.Second); got != 3*time.Second {
 		t.Fatalf("five adapters with two workers scan limit=%v", got)
@@ -322,14 +373,21 @@ func TestInvokeRejectsRequestIDReuseWithDifferentPayload(t *testing.T) {
 }
 
 type faultAdapter struct {
-	capability airuntime.Capability
-	preflight  func(context.Context) (airuntime.Preflight, error)
-	execute    func(context.Context, airuntime.Request) (airuntime.Response, error)
-	closeCount atomic.Int32
-	closeErr   error
+	capability      airuntime.Capability
+	preflight       func(context.Context) (airuntime.Preflight, error)
+	execute         func(context.Context, airuntime.Request) (airuntime.Response, error)
+	closeCount      atomic.Int32
+	closeErr        error
+	panicCapability bool
+	panicClose      bool
 }
 
-func (a *faultAdapter) Capability() airuntime.Capability { return a.capability }
+func (a *faultAdapter) Capability() airuntime.Capability {
+	if a.panicCapability {
+		panic("runtime capability detail")
+	}
+	return a.capability
+}
 func (a *faultAdapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
 	if a.preflight != nil {
 		return a.preflight(ctx)
@@ -344,6 +402,9 @@ func (a *faultAdapter) Execute(ctx context.Context, request airuntime.Request) (
 }
 func (a *faultAdapter) Close() error {
 	a.closeCount.Add(1)
+	if a.panicClose {
+		panic("runtime close detail")
+	}
 	return a.closeErr
 }
 
@@ -694,6 +755,57 @@ func TestShutdownClosesRuntimeOnceAndRedactsCloseError(t *testing.T) {
 	}
 }
 
+func TestShutdownContainsMOCKDependencyPanics(t *testing.T) {
+	t.Run("runtime close", func(t *testing.T) {
+		service := newFaultService(t, func(
+			context.Context, airuntime.Request,
+		) (airuntime.Response, error) {
+			return airuntime.Response{}, nil
+		})
+		adapter := service.adapters[adapterKey(
+			"tos.ai.mock", "generate", "deterministic-echo",
+		)].(*faultAdapter)
+		adapter.panicClose = true
+		if err := service.Shutdown(context.Background()); err == nil ||
+			strings.Contains(err.Error(), "runtime close detail") {
+			t.Fatalf("shutdown error=%v", err)
+		}
+		if adapter.closeCount.Load() != 1 {
+			t.Fatalf("adapter close count=%d", adapter.closeCount.Load())
+		}
+	})
+
+	t.Run("resource shutdown", func(t *testing.T) {
+		resources := &mutableResourceHealth{
+			health: probe.ResourceHealth{
+				Ready: true, Status: "ready", GPU: "no-devices",
+			},
+			panicShutdown: true,
+		}
+		taskScheduler, admissionController := newTestDependencies(t, 2)
+		config := testServiceConfig(t)
+		config.ResourceHealth = resources
+		service, err := NewService(
+			config, taskScheduler, admissionController,
+			[]airuntime.Adapter{mock.New(0)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Shutdown(context.Background()); !errors.Is(err, ErrShutdownIncomplete) ||
+			strings.Contains(err.Error(), "resource shutdown detail") {
+			t.Fatalf("first shutdown error=%v", err)
+		}
+		resources.panicShutdown = false
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Fatalf("retry shutdown error=%v", err)
+		}
+		if resources.shutdowns.Load() != 2 {
+			t.Fatalf("resource shutdown count=%d", resources.shutdowns.Load())
+		}
+	})
+}
+
 func TestQuoteRetryIsIdempotentAndConflictsOnChangedContent(t *testing.T) {
 	service := newTestService(t)
 	request := &edgev1.QuoteRequest{
@@ -742,6 +854,7 @@ type mutableResourceHealth struct {
 	mu            sync.Mutex
 	health        probe.ResourceHealth
 	panicOnHealth bool
+	panicShutdown bool
 	shutdowns     atomic.Int32
 }
 
@@ -756,6 +869,9 @@ func (h *mutableResourceHealth) Health() probe.ResourceHealth {
 
 func (h *mutableResourceHealth) Shutdown(context.Context) error {
 	h.shutdowns.Add(1)
+	if h.panicShutdown {
+		panic("resource shutdown detail")
+	}
 	return nil
 }
 

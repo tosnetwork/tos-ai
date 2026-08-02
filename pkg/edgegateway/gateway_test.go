@@ -123,6 +123,12 @@ func TestOpenRequiresCompleteTrustComposition(t *testing.T) {
 	if _, err := Open(context.Background(), config, partial); err == nil {
 		t.Fatal("partial signer readiness was accepted")
 	}
+	var typedNilAuthority *inertAuthorityResolver
+	typedNil := dependencies
+	typedNil.AuthorityResolver = typedNilAuthority
+	if gateway, err := Open(context.Background(), config, typedNil); err == nil || gateway != nil {
+		t.Fatal("typed-nil authority dependency was accepted")
+	}
 	wrongReference := config
 	wrongReference.Reference.ServiceID = "different.service"
 	if _, err := Open(context.Background(), wrongReference, dependencies); err == nil {

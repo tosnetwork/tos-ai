@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-protocol/pkg/identity"
 	bolt "go.etcd.io/bbolt"
 )
@@ -100,7 +101,7 @@ func Open(config Config) (*Agent, error) {
 		config.MaxDBBytes = 64 << 20
 	}
 	if !filepath.IsAbs(config.DatabasePath) || config.DatabasePath != filepath.Clean(config.DatabasePath) ||
-		!validID(config.FleetID) || !validID(config.TerminalID) || config.Executor == nil ||
+		!validID(config.FleetID) || !validID(config.TerminalID) || nilcheck.IsNil(config.Executor) ||
 		config.RealtimeBusy == nil || config.Online == nil || config.MaxQueued <= 0 ||
 		config.MaxQueued > MaxQueueHard || config.MaxDBBytes <= 0 || config.MaxDBBytes > 1<<30 ||
 		config.MaxRecords <= 0 || config.MaxRecords > 65_536 || config.MaxRecords < config.MaxQueued ||

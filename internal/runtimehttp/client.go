@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 )
 
 const (
@@ -73,7 +75,7 @@ func build(
 ) (*url.URL, *http.Client, error) {
 	if len(config.BaseURL) == 0 || len(config.BaseURL) > MaxEndpointBytes ||
 		len(config.AllowedPlaintextCIDRs) > MaxPlaintextCIDRs ||
-		resolver == nil || dialer == nil {
+		nilcheck.IsNil(resolver) || nilcheck.IsNil(dialer) {
 		return nil, nil, errors.New("runtime endpoint configuration exceeds hard limits")
 	}
 	baseURL, err := url.Parse(config.BaseURL)
@@ -194,7 +196,7 @@ func boundedTLSConfig(config Config, scheme string) (*tls.Config, error) {
 
 func cloneClientCertificate(source tls.Certificate) (tls.Certificate, error) {
 	if len(source.Certificate) == 0 ||
-		len(source.Certificate) > MaxTLSChainHard || source.PrivateKey == nil ||
+		len(source.Certificate) > MaxTLSChainHard || nilcheck.IsNil(source.PrivateKey) ||
 		len(source.OCSPStaple) != 0 ||
 		len(source.SignedCertificateTimestamps) != 0 ||
 		len(source.SupportedSignatureAlgorithms) > MaxTLSChainHard*4 {

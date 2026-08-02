@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/softwareupdate"
 	"github.com/tosnetwork/tos-protocol/pkg/identity"
 	bolt "go.etcd.io/bbolt"
@@ -125,7 +126,7 @@ func Open(config Config) (*Controller, error) {
 		config.Retention = 24 * time.Hour
 	}
 	if !filepath.IsAbs(config.DatabasePath) || filepath.Clean(config.DatabasePath) != config.DatabasePath ||
-		!validIdentifier(config.TerminalID, 128) || config.Lifecycle == nil ||
+		!validIdentifier(config.TerminalID, 128) || nilcheck.IsNil(config.Lifecycle) ||
 		config.MaxRecords <= 0 || config.MaxRecords > MaxRecordsHard ||
 		config.MaxDatabaseBytes <= 0 || config.MaxDatabaseBytes > MaxDatabaseBytesHard ||
 		config.Retention <= 0 || config.Retention > 30*24*time.Hour ||

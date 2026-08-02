@@ -3,6 +3,8 @@ package fleetcontrol
 import (
 	"context"
 	"errors"
+
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 )
 
 // ReleaseController, PolicyController and AvailabilityController are narrow
@@ -31,7 +33,7 @@ type ActionExecutor struct {
 }
 
 func NewActionExecutor(releases ReleaseController, policies PolicyController, availability AvailabilityController) (*ActionExecutor, error) {
-	if releases == nil || policies == nil || availability == nil {
+	if nilcheck.IsNil(releases) || nilcheck.IsNil(policies) || nilcheck.IsNil(availability) {
 		return nil, errors.New("invalid fleet action executor")
 	}
 	return &ActionExecutor{releases: releases, policies: policies, availability: availability}, nil

@@ -9,11 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 )
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -509,17 +510,7 @@ func validatePolicyCeiling(ceiling Limits, permitGPU bool) error {
 }
 
 func nilContainerdClient(client ContainerdClient) bool {
-	if client == nil {
-		return true
-	}
-	value := reflect.ValueOf(client)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface,
-		reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
+	return nilcheck.IsNil(client)
 }
 
 func (p Policy) ValidateInput(input []byte) error {

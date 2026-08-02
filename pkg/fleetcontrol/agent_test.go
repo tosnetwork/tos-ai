@@ -81,6 +81,21 @@ func openTestAgent(t *testing.T, terminal string, publicKey ed25519.PublicKey, e
 	return agent
 }
 
+func TestOpenRejectsTypedNilMOCKExecutor(t *testing.T) {
+	publicKey, _ := fleetKey(t)
+	var executor *mockExecutor
+	agent, err := Open(Config{
+		DatabasePath: filepath.Join(t.TempDir(), "private", "fleet.db"),
+		FleetID:      "fleet-one", TerminalID: "terminal-one",
+		ControllerKeys: map[string]ed25519.PublicKey{"controller-1": publicKey},
+		Executor:       executor, Online: func() bool { return true },
+		RealtimeBusy: func() bool { return false }, MaxQueued: 2,
+	})
+	if err == nil || agent != nil {
+		t.Fatal("typed-nil fleet executor accepted")
+	}
+}
+
 func TestAgentOfflineQueueRealtimePriorityReplayAndBounds(t *testing.T) {
 	publicKey, privateKey := fleetKey(t)
 	online, busy := false, false

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-ai/internal/dirlock"
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 )
 
@@ -125,14 +126,14 @@ func newBackend(
 	ownership *dirlock.Lock,
 	maximum int,
 ) (*Backend, error) {
-	if ctx == nil || runtimeEngine == nil || maximum <= 0 ||
+	if ctx == nil || nilcheck.IsNil(runtimeEngine) || maximum <= 0 ||
 		maximum > executor.MaxSupervisedActiveHard {
 		return nil, errors.New("invalid containerd backend")
 	}
-	if err := runtimeEngine.CheckReady(ctx); err != nil {
+	if err := callReady(ctx, runtimeEngine); err != nil {
 		return nil, errors.New("containerd backend is unavailable")
 	}
-	if err := runtimeEngine.CheckResidue(ctx); err != nil {
+	if err := callResidue(ctx, runtimeEngine); err != nil {
 		return nil, errors.New("containerd backend namespace is not clean")
 	}
 	return &Backend{
@@ -362,6 +363,15 @@ func callReady(ctx context.Context, runtimeEngine engine) (err error) {
 		}
 	}()
 	return runtimeEngine.CheckReady(ctx)
+}
+
+func callResidue(ctx context.Context, runtimeEngine engine) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("containerd residue check panicked")
+		}
+	}()
+	return runtimeEngine.CheckResidue(ctx)
 }
 
 func callRun(

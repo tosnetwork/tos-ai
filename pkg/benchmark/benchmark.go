@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-protocol/pkg/identity"
 	"github.com/tosnetwork/tos-protocol/pkg/protocol"
@@ -53,7 +54,7 @@ type Issuer struct {
 }
 
 func NewIssuer(keyID, issuer string, privateKey ed25519.PrivateKey, runner Runner) (*Issuer, error) {
-	if !validID(keyID, 512) || !validID(issuer, 512) || len(privateKey) != ed25519.PrivateKeySize || runner == nil {
+	if !validID(keyID, 512) || !validID(issuer, 512) || len(privateKey) != ed25519.PrivateKeySize || nilcheck.IsNil(runner) {
 		return nil, errors.New("invalid benchmark issuer")
 	}
 	return &Issuer{keyID: keyID, issuer: issuer, privateKey: append(ed25519.PrivateKey(nil), privateKey...), runner: runner}, nil

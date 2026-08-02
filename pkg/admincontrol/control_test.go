@@ -107,6 +107,15 @@ func (f controllerFixture) config(root string, lifecycle Lifecycle) Config {
 	}
 }
 
+func TestOpenRejectsTypedNilMOCKLifecycle(t *testing.T) {
+	fixture := newControllerFixture(t)
+	var lifecycle *fakeLifecycle
+	controller, err := Open(fixture.config(t.TempDir(), lifecycle))
+	if err == nil || controller != nil {
+		t.Fatal("typed-nil administrator lifecycle accepted")
+	}
+}
+
 func (f controllerFixture) sign(
 	t *testing.T,
 	command Command,

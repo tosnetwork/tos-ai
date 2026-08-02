@@ -76,3 +76,21 @@ func TestFleetTransportRejectsUnsafeBearerConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func FuzzValidateTransportJSON(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte(`{"version":1}`),
+		[]byte(`{"version":1,"version":2}`),
+		[]byte(`[[[[[[[[[[0]]]]]]]]]]`),
+		[]byte(`null`),
+		{0xff, 0x00, '{'},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > MaxTransportBody {
+			return
+		}
+		_ = validateTransportJSON(data)
+	})
+}

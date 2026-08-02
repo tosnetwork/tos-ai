@@ -38,6 +38,27 @@ func (m *mockActions) RollbackPolicy(_ context.Context, digest string) error {
 func (m *mockActions) Drain(context.Context) error  { return m.call("drain") }
 func (m *mockActions) Resume(context.Context) error { return m.call("resume") }
 
+func TestNewActionExecutorRejectsTypedNilMOCKControllers(t *testing.T) {
+	valid := &mockActions{}
+	var typedNil *mockActions
+	for name, controllers := range map[string][3]any{
+		"release":      {typedNil, valid, valid},
+		"policy":       {valid, typedNil, valid},
+		"availability": {valid, valid, typedNil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			executor, err := NewActionExecutor(
+				controllers[0].(ReleaseController),
+				controllers[1].(PolicyController),
+				controllers[2].(AvailabilityController),
+			)
+			if err == nil || executor != nil {
+				t.Fatal("typed-nil fleet controller accepted")
+			}
+		})
+	}
+}
+
 func TestActionExecutorRoutesOnlyFixedActionsAndDigests(t *testing.T) {
 	mock := &mockActions{}
 	executor, err := NewActionExecutor(mock, mock, mock)

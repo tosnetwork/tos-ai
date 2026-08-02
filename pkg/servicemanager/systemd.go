@@ -7,9 +7,10 @@ import (
 	"context"
 	"errors"
 	"os/exec"
-	"reflect"
 	"regexp"
 	"time"
+
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 )
 
 const MaxOperationTimeout = 2 * time.Minute
@@ -34,7 +35,7 @@ func NewSystemd(unit string, timeout time.Duration) (*Systemd, error) {
 // NewSystemdWithRunner exists for deterministic tests and reviewed platform
 // adapters. Production callers should use NewSystemd.
 func NewSystemdWithRunner(unit, binary string, timeout time.Duration, runner Runner) (*Systemd, error) {
-	if !unitPattern.MatchString(unit) || binary != "/usr/bin/systemctl" || timeout <= 0 || timeout > MaxOperationTimeout || nilRunner(runner) {
+	if !unitPattern.MatchString(unit) || binary != "/usr/bin/systemctl" || timeout <= 0 || timeout > MaxOperationTimeout || nilcheck.IsNil(runner) {
 		return nil, errors.New("invalid systemd service configuration")
 	}
 	return &Systemd{unit: unit, binary: binary, timeout: timeout, runner: runner}, nil
@@ -47,7 +48,7 @@ func (s *Systemd) Reload(ctx context.Context) error { return s.run(ctx, "reload"
 func (s *Systemd) CheckReady(ctx context.Context) error { return s.run(ctx, "is-active", "--quiet") }
 
 func (s *Systemd) run(ctx context.Context, verb string, suffix ...string) (resultErr error) {
-	if s == nil || ctx == nil || s.runner == nil {
+	if s == nil || ctx == nil || nilcheck.IsNil(s.runner) {
 		return errors.New("invalid systemd service operation")
 	}
 	if err := ctx.Err(); err != nil {
@@ -83,17 +84,4 @@ func (commandRunner) Run(ctx context.Context, binary string, arguments ...string
 	command.Stdout = nil
 	command.Stderr = nil
 	return command.Run()
-}
-
-func nilRunner(runner Runner) bool {
-	if runner == nil {
-		return true
-	}
-	value := reflect.ValueOf(runner)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }

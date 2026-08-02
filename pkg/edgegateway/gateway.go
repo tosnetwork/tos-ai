@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/edgeintegration"
 	"github.com/tosnetwork/tos-protocol/pkg/ard"
 	"github.com/tosnetwork/tos-protocol/pkg/authorization"
@@ -77,11 +78,21 @@ func Open(ctx context.Context, config Config, dependencies Dependencies) (*Gatew
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if dependencies.AuthorityResolver == nil ||
-		dependencies.ClientKeyResolver == nil ||
-		dependencies.PaymentObserver == nil || dependencies.ChainReadiness == nil ||
-		dependencies.Worker == nil || dependencies.ReceiptSigner == nil ||
-		dependencies.ReceiptReadiness == nil {
+	for _, dependency := range []any{
+		dependencies.AuthorityResolver, dependencies.ClientKeyResolver,
+		dependencies.ChainReadiness, dependencies.ReceiptSigner,
+		dependencies.ReceiptReadiness, dependencies.ReceiptAuthorizer,
+		dependencies.ActionStatusAuthorizer, dependencies.PaidActionErrorReporter,
+	} {
+		if dependency != nil && nilcheck.IsNil(dependency) {
+			return nil, errors.New("typed-nil AI Edge gateway dependency")
+		}
+	}
+	if nilcheck.IsNil(dependencies.AuthorityResolver) ||
+		nilcheck.IsNil(dependencies.ClientKeyResolver) ||
+		dependencies.PaymentObserver == nil || nilcheck.IsNil(dependencies.ChainReadiness) ||
+		dependencies.Worker == nil || nilcheck.IsNil(dependencies.ReceiptSigner) ||
+		nilcheck.IsNil(dependencies.ReceiptReadiness) {
 		return nil, errors.New("incomplete AI Edge gateway trust dependencies")
 	}
 	if config.Reference.Network != config.Descriptor.Network ||

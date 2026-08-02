@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
-	"reflect"
 	"sync"
+
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 )
 
 const MaxSupervisedActiveHard = 256
@@ -194,17 +195,7 @@ func callDriverClose(driver BackendDriver) (err error) {
 }
 
 func nilBackendDriver(driver BackendDriver) bool {
-	if driver == nil {
-		return true
-	}
-	value := reflect.ValueOf(driver)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
-		reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
+	return nilcheck.IsNil(driver)
 }
 
 var _ BackendDriver = (*SupervisedBackend)(nil)

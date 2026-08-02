@@ -3,9 +3,9 @@ package executor
 import (
 	"context"
 	"errors"
-	"reflect"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
 
@@ -231,17 +231,7 @@ func durationMilliseconds(value time.Duration) uint64 {
 }
 
 func nilRuntimeReadiness(readiness RuntimeReadiness) bool {
-	if readiness == nil {
-		return true
-	}
-	value := reflect.ValueOf(readiness)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
-		reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
+	return nilcheck.IsNil(readiness)
 }
 
 func callRuntimeReadiness(

@@ -333,6 +333,43 @@ func (f dialerFunc) DialContext(
 	return f(ctx, network, address)
 }
 
+func TestBuildRejectsTypedNilNetworkDependencies(t *testing.T) {
+	config := testConfig("http://localhost")
+	resolver := resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	})
+	dialer := dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unused")
+	})
+	var nilResolver resolverFunc
+	var nilDialer dialerFunc
+	for name, dependencies := range map[string]struct {
+		resolver ipResolver
+		dialer   contextDialer
+	}{
+		"resolver": {nilResolver, dialer},
+		"dialer":   {resolver, nilDialer},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if base, client, err := build(config, dependencies.resolver, dependencies.dialer); err == nil || base != nil || client != nil {
+				t.Fatal("typed-nil runtime network dependency accepted")
+			}
+		})
+	}
+}
+
+func TestBuildRejectsTypedNilTLSPrivateKey(t *testing.T) {
+	certificate, roots := selfSignedClientCertificate(t)
+	var privateKey *ecdsa.PrivateKey
+	certificate.PrivateKey = privateKey
+	config := testConfig("https://runtime.example")
+	config.RootCAs = roots
+	config.ClientCertificate = &certificate
+	if base, client, err := Build(config); err == nil || base != nil || client != nil {
+		t.Fatal("typed-nil TLS private key accepted")
+	}
+}
+
 func TestLocalhostDialRequiresEveryResolvedAddressToBeLoopback(t *testing.T) {
 	resolver := resolverFunc(func(
 		context.Context, string, string,

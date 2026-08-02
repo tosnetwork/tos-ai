@@ -23,6 +23,13 @@ type lateSuccessBackend struct {
 	cancel context.CancelFunc
 }
 
+func TestNewRejectsTypedNilMOCKBackend(t *testing.T) {
+	var backend *mockBackend
+	if client, err := New([]string{"gpu-a"}, backend); err == nil || client != nil {
+		t.Fatal("typed-nil GPU backend accepted")
+	}
+}
+
 func (b lateSuccessBackend) RunIsolatedOnDevices(context.Context, executor.ContainerRequest, []byte, []string) (executor.Result, error) {
 	b.cancel()
 	return executor.Result{ExitCode: 0}, nil

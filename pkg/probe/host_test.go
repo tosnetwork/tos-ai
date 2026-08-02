@@ -73,6 +73,14 @@ type fakeNVIDIA struct {
 	devices  []fakeGPU
 }
 
+type panicNVIDIA struct{}
+
+func (*panicNVIDIA) Init() error                             { panic("SDK detail") }
+func (*panicNVIDIA) Shutdown() error                         { panic("SDK detail") }
+func (*panicNVIDIA) DriverVersion() (string, error)          { panic("SDK detail") }
+func (*panicNVIDIA) DeviceCount() (int, error)               { panic("SDK detail") }
+func (*panicNVIDIA) Device(int) (NVIDIADeviceBackend, error) { panic("SDK detail") }
+
 func (f *fakeNVIDIA) Init() error                    { return f.initErr }
 func (f *fakeNVIDIA) Shutdown() error                { return nil }
 func (f *fakeNVIDIA) DriverVersion() (string, error) { return "560.1", nil }
@@ -124,6 +132,17 @@ func TestCollectNVIDIAUnavailableDoesNotFail(t *testing.T) {
 	report = CollectNVIDIA(&fakeNVIDIA{})
 	if report.Status != "no-devices" || len(report.Devices) != 0 {
 		t.Fatalf("no-GPU report = %#v", report)
+	}
+}
+
+func TestCollectNVIDIAContainsTypedNilAndMOCKSDKPanic(t *testing.T) {
+	var typedNil *fakeNVIDIA
+	if report := CollectNVIDIA(typedNil); report.Status != "unavailable" || len(report.Devices) != 0 {
+		t.Fatalf("typed-nil report=%#v", report)
+	}
+	if report := CollectNVIDIA(&panicNVIDIA{}); report.Status != "degraded" ||
+		report.DriverVersion != "" || len(report.Devices) != 0 {
+		t.Fatalf("panic report=%#v", report)
 	}
 }
 

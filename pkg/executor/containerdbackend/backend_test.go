@@ -24,6 +24,8 @@ type fakeEngine struct {
 	runErr       error
 	block        bool
 	panicRun     bool
+	panicReady   bool
+	panicResidue bool
 	closed       bool
 	started      chan struct{}
 	lastID       string
@@ -38,12 +40,18 @@ func newFakeEngine() *fakeEngine {
 }
 
 func (e *fakeEngine) CheckReady(context.Context) error {
+	if e.panicReady {
+		panic("readiness detail")
+	}
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	return e.readyErr
 }
 
 func (e *fakeEngine) CheckResidue(context.Context) error {
+	if e.panicResidue {
+		panic("residue detail")
+	}
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	return e.residueErr
@@ -193,6 +201,8 @@ func TestBackendFailsClosedOnReadinessResidueAndPanic(t *testing.T) {
 	}{
 		{"readiness", func(engine *fakeEngine) { engine.readyErr = errors.New("secret") }},
 		{"residue", func(engine *fakeEngine) { engine.residueErr = errors.New("secret") }},
+		{"readiness panic", func(engine *fakeEngine) { engine.panicReady = true }},
+		{"residue panic", func(engine *fakeEngine) { engine.panicResidue = true }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			engine := newFakeEngine()
@@ -203,6 +213,10 @@ func TestBackendFailsClosedOnReadinessResidueAndPanic(t *testing.T) {
 				t.Fatal("unsafe runtime state was accepted")
 			}
 		})
+	}
+	var typedNil *fakeEngine
+	if backend, err := newBackend(context.Background(), typedNil, nil, 1); err == nil || backend != nil {
+		t.Fatal("typed-nil containerd engine accepted")
 	}
 	engine := newFakeEngine()
 	engine.panicRun = true

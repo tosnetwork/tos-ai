@@ -5,6 +5,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 )
 
 const (
@@ -51,14 +53,27 @@ type NVIDIADevice struct {
 	PowerState           string  `json:"powerState"`
 }
 
-func CollectNVIDIA(backend NVIDIABackend) NVIDIAReport {
-	report := NVIDIAReport{
+func CollectNVIDIA(backend NVIDIABackend) (report NVIDIAReport) {
+	report = NVIDIAReport{
 		Status:      "unavailable",
 		Devices:     make([]NVIDIADevice, 0),
 		CollectedAt: time.Now().UTC(),
 		Evidence:    EvidenceLocallyObserved,
 	}
-	if backend == nil || backend.Init() != nil {
+	if nilcheck.IsNil(backend) {
+		return report
+	}
+	// Hardware SDK boundaries are not trusted to preserve process safety. A
+	// panic yields a privacy-minimized degraded observation, never a worker
+	// crash or a partially trusted device inventory.
+	defer func() {
+		if recover() != nil {
+			report.Status = "degraded"
+			report.DriverVersion = ""
+			report.Devices = make([]NVIDIADevice, 0)
+		}
+	}()
+	if backend.Init() != nil {
 		return report
 	}
 	defer backend.Shutdown()

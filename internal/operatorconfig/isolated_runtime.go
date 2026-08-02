@@ -7,12 +7,12 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
@@ -314,29 +314,11 @@ func cloneStringMap(values map[string]string) map[string]string {
 }
 
 func nilIsolatedFactory(factory IsolatedBackendFactory) bool {
-	if factory == nil {
-		return true
-	}
-	value := reflect.ValueOf(factory)
-	return nilReflectValue(value)
+	return nilcheck.IsNil(factory)
 }
 
 func nilIsolatedBackend(backend IsolatedBackend) bool {
-	if backend == nil {
-		return true
-	}
-	value := reflect.ValueOf(backend)
-	return nilReflectValue(value)
-}
-
-func nilReflectValue(value reflect.Value) bool {
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
-		reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
+	return nilcheck.IsNil(backend)
 }
 
 func openIsolatedBackend(

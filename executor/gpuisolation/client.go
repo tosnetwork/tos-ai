@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 )
 
@@ -28,7 +29,7 @@ type Client struct {
 }
 
 func New(aliases []string, backend Backend) (*Client, error) {
-	if len(aliases) == 0 || len(aliases) > MaxDevices || backend == nil {
+	if len(aliases) == 0 || len(aliases) > MaxDevices || nilcheck.IsNil(backend) {
 		return nil, errors.New("invalid GPU isolation configuration")
 	}
 	devices := append([]string(nil), aliases...)
@@ -42,7 +43,7 @@ func New(aliases []string, backend Backend) (*Client, error) {
 }
 
 func (c *Client) RunIsolated(ctx context.Context, request executor.ContainerRequest, input []byte) (result executor.Result, resultErr error) {
-	if c == nil || ctx == nil || c.backend == nil || executor.ValidateExecutionDigest(request.ExecutionDigest) != nil {
+	if c == nil || ctx == nil || nilcheck.IsNil(c.backend) || executor.ValidateExecutionDigest(request.ExecutionDigest) != nil {
 		return executor.Result{}, errors.New("invalid GPU isolation request")
 	}
 	if err := ctx.Err(); err != nil {

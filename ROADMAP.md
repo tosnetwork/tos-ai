@@ -113,6 +113,13 @@ consumer execution, a public shell, validator work, or token issuance.
   restart/reload/readiness operations and MOCK timeout/panic/injection tests.
   Selecting the production unit and privilege boundary remains deployment
   policy.
+- Unified construction-time typed-nil rejection across runtime HTTP,
+  containerd, GPU isolation, model activation/approval, benchmark, fleet,
+  administrator, service-manager, Worker lifecycle and AI Edge dependency
+  injection. Runtime capability/close, resource-provider shutdown and NVIDIA
+  SDK panics are converted into bounded fail-closed errors or a
+  privacy-minimized degraded observation, and strict fleet transport parsing
+  has a persistent fuzz regression target.
 
 ## In Progress
 

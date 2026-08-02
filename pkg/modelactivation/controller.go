@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/modelmanager"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
@@ -228,7 +229,7 @@ func New(manager *modelmanager.Manager, config Config) (*Controller, error) {
 		operationLimit: config.OperationTimeout, cleanupLimit: config.CleanupTimeout,
 	}
 	for _, configured := range config.Slots {
-		if configured.Backend == nil || validatePolicy(configured.Policy) != nil {
+		if nilcheck.IsNil(configured.Backend) || validatePolicy(configured.Policy) != nil {
 			return nil, newError(ErrorInvalid, nil)
 		}
 		if _, exists := controller.slots[configured.Policy.ID]; exists {

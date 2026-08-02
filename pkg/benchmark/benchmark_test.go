@@ -17,6 +17,14 @@ type mockRunner struct {
 	panicNow bool
 }
 
+func TestNewIssuerRejectsTypedNilMOCKRunner(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	var runner *mockRunner
+	if issuer, err := NewIssuer("key", "issuer", privateKey, runner); err == nil || issuer != nil {
+		t.Fatal("typed-nil benchmark runner accepted")
+	}
+}
+
 func (m mockRunner) Run(_ context.Context, value Case) (Sample, error) {
 	if m.panicNow {
 		panic("injected")

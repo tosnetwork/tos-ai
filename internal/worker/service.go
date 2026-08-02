@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"connectrpc.com/connect"
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	"github.com/tosnetwork/tos-ai/pkg/probe"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
@@ -113,6 +114,7 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		config.PreflightWorkers <= 0 ||
 		config.PreflightWorkers > MaxPreflightWorkersHard ||
 		config.TaskStore == nil ||
+		(config.ResourceHealth != nil && nilcheck.IsNil(config.ResourceHealth)) ||
 		!validInitialResourceHealth(config) {
 		return nil, errors.New("invalid worker configuration")
 	}
@@ -143,10 +145,13 @@ func NewService(config Config, taskScheduler *scheduler.Scheduler, admissionCont
 		now: config.Now,
 	}
 	for _, adapter := range adapters {
-		if adapter == nil {
+		if nilcheck.IsNil(adapter) {
 			return nil, errors.New("nil runtime adapter")
 		}
-		capability := adapter.Capability()
+		capability, capabilityErr := safeAdapterCapability(adapter)
+		if capabilityErr != nil {
+			return nil, errors.New("runtime adapter capability unavailable")
+		}
 		capability.AcceptedPriorities = append(
 			[]airuntime.Priority(nil), capability.AcceptedPriorities...,
 		)
@@ -1095,7 +1100,7 @@ func validGPUStatus(value string) bool {
 }
 
 func validInitialResourceHealth(config Config) bool {
-	if config.ResourceHealth == nil {
+	if nilcheck.IsNil(config.ResourceHealth) {
 		return true
 	}
 	_, valid := observedResourceHealth(config.ResourceHealth)
@@ -1111,6 +1116,9 @@ func validResourceHealth(health probe.ResourceHealth) bool {
 func observedResourceHealth(
 	provider probe.ResourceHealthProvider,
 ) (health probe.ResourceHealth, valid bool) {
+	if nilcheck.IsNil(provider) {
+		return probe.ResourceHealth{}, false
+	}
 	defer func() {
 		if recover() != nil {
 			health, valid = probe.ResourceHealth{}, false
@@ -1131,7 +1139,7 @@ func safeResourceHealth(provider probe.ResourceHealthProvider) probe.ResourceHea
 }
 
 func (s *Service) currentResourceHealth() probe.ResourceHealth {
-	if s.resourceHealth != nil {
+	if !nilcheck.IsNil(s.resourceHealth) {
 		return safeResourceHealth(s.resourceHealth)
 	}
 	gpu := s.config.GPUStatus
@@ -1337,8 +1345,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.BeginDrain()
 	s.beginRuntimeStop()
 	var resourceErr error
-	if s.resourceHealth != nil {
-		resourceErr = s.resourceHealth.Shutdown(ctx)
+	if !nilcheck.IsNil(s.resourceHealth) {
+		resourceErr = safeResourceShutdown(s.resourceHealth, ctx)
 	}
 	schedulerErr := s.scheduler.Shutdown(ctx)
 	resultErr := s.waitInvocationResults(ctx)
@@ -1354,8 +1362,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		var closeErrors []error
 		for _, adapter := range s.adapters {
-			if closer, ok := adapter.(airuntime.AdapterCloser); ok {
-				if err := closer.Close(); err != nil {
+			if closer, ok := adapter.(airuntime.AdapterCloser); ok &&
+				!nilcheck.IsNil(closer) {
+				if err := safeAdapterClose(closer); err != nil {
 					closeErrors = append(closeErrors, errors.New("close runtime adapter"))
 				}
 			}
@@ -1366,6 +1375,39 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		s.closeErr = errors.Join(closeErrors...)
 	})
 	return s.closeErr
+}
+
+func safeAdapterCapability(
+	adapter airuntime.Adapter,
+) (capability airuntime.Capability, err error) {
+	defer func() {
+		if recover() != nil {
+			capability = airuntime.Capability{}
+			err = errors.New("runtime adapter capability panicked")
+		}
+	}()
+	return adapter.Capability(), nil
+}
+
+func safeAdapterClose(closer airuntime.AdapterCloser) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("runtime adapter close panicked")
+		}
+	}()
+	return closer.Close()
+}
+
+func safeResourceShutdown(
+	provider probe.ResourceHealthProvider,
+	ctx context.Context,
+) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("resource health shutdown panicked")
+		}
+	}()
+	return provider.Shutdown(ctx)
 }
 
 func (s *Service) waitInvocationResults(ctx context.Context) error {

@@ -676,6 +676,10 @@ func TestConfigurationAndBindingBoundsFailClosed(t *testing.T) {
 			{Policy: SlotPolicy{ID: "slot", Model: "model", Runtime: "fake", MaxModelBytes: 1}, Backend: f.backend},
 			{Policy: SlotPolicy{ID: "slot", Model: "model", Runtime: "fake", MaxModelBytes: 1}, Backend: f.backend},
 		}},
+		{OperationTimeout: time.Second, CleanupTimeout: time.Second, Slots: []Slot{{
+			Policy:  SlotPolicy{ID: "typed-nil", Model: "model", Runtime: "fake", MaxModelBytes: 1},
+			Backend: (*fakeBackend)(nil),
+		}}},
 	}
 	for _, config := range invalidConfigs {
 		if _, err := New(f.manager, config); ErrorKindOf(err) != ErrorInvalid {

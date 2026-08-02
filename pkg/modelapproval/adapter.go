@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/nilcheck"
 	"github.com/tosnetwork/tos-ai/pkg/modelmanager"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
 )
@@ -42,13 +43,13 @@ func New(
 	inner airuntime.Adapter,
 	verificationTimeout time.Duration,
 ) (*Adapter, error) {
-	if ctx == nil || manager == nil || inner == nil ||
+	if ctx == nil || manager == nil || nilcheck.IsNil(inner) ||
 		verificationTimeout <= 0 ||
 		verificationTimeout > MaxVerificationTimeoutHard {
 		return nil, errors.New("invalid model approval configuration")
 	}
-	capability := inner.Capability()
-	if err := airuntime.ValidateCapability(capability); err != nil {
+	capability, capabilityErr := safeCapability(inner)
+	if capabilityErr != nil || airuntime.ValidateCapability(capability) != nil {
 		return nil, errors.New("invalid approved runtime capability")
 	}
 	lease, err := manager.AcquireArtifact(capability.ModelDigest)
@@ -93,10 +94,13 @@ func WrapAll(
 }
 
 func (a *Adapter) Capability() airuntime.Capability {
-	if a == nil || a.inner == nil {
+	if !a.valid() {
 		return airuntime.Capability{}
 	}
-	capability := a.inner.Capability()
+	capability, err := safeCapability(a.inner)
+	if err != nil {
+		return airuntime.Capability{}
+	}
 	capability.AcceptedPriorities = append(
 		[]airuntime.Priority(nil), capability.AcceptedPriorities...,
 	)
@@ -126,7 +130,11 @@ func (a *Adapter) Preflight(ctx context.Context) (airuntime.Preflight, error) {
 			airuntime.ErrorUnavailable, nil,
 		)
 	}
-	return a.inner.Preflight(ctx)
+	preflight, err := safeAdapterPreflight(a.inner, ctx)
+	if err != nil {
+		return airuntime.Preflight{}, approvalRuntimeError(ctx, err)
+	}
+	return preflight, nil
 }
 
 func (a *Adapter) Execute(
@@ -138,7 +146,11 @@ func (a *Adapter) Execute(
 			airuntime.ErrorUnavailable, nil,
 		)
 	}
-	return a.inner.Execute(ctx, request)
+	response, err := safeAdapterExecute(a.inner, ctx, request)
+	if err != nil {
+		return airuntime.Response{}, approvalRuntimeError(ctx, err)
+	}
+	return response, nil
 }
 
 func (a *Adapter) Close() error {
@@ -154,7 +166,7 @@ func (a *Adapter) Close() error {
 		<-a.gate
 		defer func() { a.gate <- struct{}{} }()
 		if closer, ok := a.inner.(airuntime.AdapterCloser); ok {
-			if err := closer.Close(); err != nil {
+			if err := safeAdapterClose(closer); err != nil {
 				a.closeErr = errors.New("close approved runtime adapter")
 			}
 		}
@@ -202,15 +214,61 @@ func (a *Adapter) verifyLocked(ctx context.Context) error {
 }
 
 func (a *Adapter) valid() bool {
-	return a != nil && a.inner != nil && a.lease != nil && a.gate != nil
+	return a != nil && !nilcheck.IsNil(a.inner) && a.lease != nil && a.gate != nil
 }
 
 func closeAdapters(adapters []airuntime.Adapter) {
 	for _, adapter := range adapters {
-		if closer, ok := adapter.(airuntime.AdapterCloser); ok {
-			_ = closer.Close()
+		if closer, ok := adapter.(airuntime.AdapterCloser); ok && !nilcheck.IsNil(closer) {
+			_ = safeAdapterClose(closer)
 		}
 	}
+}
+
+func safeCapability(adapter airuntime.Adapter) (capability airuntime.Capability, err error) {
+	defer func() {
+		if recover() != nil {
+			capability = airuntime.Capability{}
+			err = errors.New("approved runtime capability panicked")
+		}
+	}()
+	return adapter.Capability(), nil
+}
+
+func safeAdapterClose(adapter airuntime.AdapterCloser) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("approved runtime close panicked")
+		}
+	}()
+	return adapter.Close()
+}
+
+func safeAdapterPreflight(
+	adapter airuntime.Adapter,
+	ctx context.Context,
+) (preflight airuntime.Preflight, err error) {
+	defer func() {
+		if recover() != nil {
+			preflight = airuntime.Preflight{}
+			err = errors.New("approved runtime preflight panicked")
+		}
+	}()
+	return adapter.Preflight(ctx)
+}
+
+func safeAdapterExecute(
+	adapter airuntime.Adapter,
+	ctx context.Context,
+	request airuntime.Request,
+) (response airuntime.Response, err error) {
+	defer func() {
+		if recover() != nil {
+			response = airuntime.Response{}
+			err = errors.New("approved runtime execution panicked")
+		}
+	}()
+	return adapter.Execute(ctx, request)
 }
 
 func approvalRuntimeError(ctx context.Context, err error) error {

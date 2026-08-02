@@ -23,22 +23,32 @@ import (
 )
 
 type fakeAdapter struct {
-	capability     airuntime.Capability
-	preflightCalls atomic.Int32
-	executeCalls   atomic.Int32
-	closeCalls     atomic.Int32
-	closeErr       error
-	preflightStart chan struct{}
-	preflightDone  chan struct{}
+	capability      airuntime.Capability
+	preflightCalls  atomic.Int32
+	executeCalls    atomic.Int32
+	closeCalls      atomic.Int32
+	closeErr        error
+	panicCapability bool
+	panicPreflight  bool
+	panicExecute    bool
+	panicClose      bool
+	preflightStart  chan struct{}
+	preflightDone   chan struct{}
 }
 
 func (f *fakeAdapter) Capability() airuntime.Capability {
+	if f.panicCapability {
+		panic("runtime detail")
+	}
 	return f.capability
 }
 
 func (f *fakeAdapter) Preflight(
 	context.Context,
 ) (airuntime.Preflight, error) {
+	if f.panicPreflight {
+		panic("runtime detail")
+	}
 	f.preflightCalls.Add(1)
 	if f.preflightStart != nil {
 		close(f.preflightStart)
@@ -54,11 +64,17 @@ func (f *fakeAdapter) Execute(
 	context.Context,
 	airuntime.Request,
 ) (airuntime.Response, error) {
+	if f.panicExecute {
+		panic("runtime detail")
+	}
 	f.executeCalls.Add(1)
 	return airuntime.Response{Output: []byte("ok")}, nil
 }
 
 func (f *fakeAdapter) Close() error {
+	if f.panicClose {
+		panic("runtime detail")
+	}
 	f.closeCalls.Add(1)
 	return f.closeErr
 }
@@ -117,6 +133,57 @@ func approvedFake(digest string) *fakeAdapter {
 			ExecutionTime: time.Second,
 		},
 	}}
+}
+
+func TestNewRejectsTypedNilAndMOCKCapabilityPanic(t *testing.T) {
+	fixture := newApprovalFixture(t, []byte("approved-model"))
+	var typedNil *fakeAdapter
+	for name, inner := range map[string]airuntime.Adapter{
+		"typed-nil": typedNil,
+		"panic":     &fakeAdapter{panicCapability: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			adapter, err := New(context.Background(), fixture.manager, inner, time.Second)
+			if err == nil || adapter != nil {
+				t.Fatal("unsafe approved runtime accepted")
+			}
+		})
+	}
+}
+
+func TestApprovedAdapterContainsMOCKRuntimePanics(t *testing.T) {
+	for _, operation := range []string{"preflight", "execute", "close"} {
+		t.Run(operation, func(t *testing.T) {
+			fixture := newApprovalFixture(t, []byte("approved-model"))
+			inner := approvedFake(fixture.digest)
+			guarded, err := New(context.Background(), fixture.manager, inner, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch operation {
+			case "preflight":
+				inner.panicPreflight = true
+				_, err = guarded.Preflight(context.Background())
+			case "execute":
+				inner.panicExecute = true
+				_, err = guarded.Execute(context.Background(), airuntime.Request{})
+			case "close":
+				inner.panicClose = true
+				err = guarded.Close()
+			}
+			if err == nil {
+				t.Fatal("runtime panic was accepted")
+			}
+			if operation != "close" {
+				if closeErr := guarded.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+			}
+			if model := fixture.manager.Status(fixture.digest); model.InUse != 0 {
+				t.Fatalf("panic leaked approved model lease: %#v", model)
+			}
+		})
+	}
 }
 
 func TestApprovedAdapterVerifiesBeforePreflightAndReleasesLease(t *testing.T) {
