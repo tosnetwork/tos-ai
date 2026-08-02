@@ -31,8 +31,7 @@ type TransportConfig struct {
 // behind TLS or an equivalently private authenticated channel.
 func NewTransportHandler(config TransportConfig) (http.Handler, error) {
 	if config.Agent == nil || config.Now == nil || config.MaxConcurrent <= 0 ||
-		config.MaxConcurrent > MaxTransportWorkers || len(config.BearerToken) < 16 ||
-		len(config.BearerToken) > MaxTransportToken {
+		config.MaxConcurrent > MaxTransportWorkers || !validTransportToken(config.BearerToken) {
 		return nil, errors.New("invalid fleet transport configuration")
 	}
 	gate := make(chan struct{}, config.MaxConcurrent)
@@ -79,6 +78,18 @@ func NewTransportHandler(config TransportConfig) (http.Handler, error) {
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(result)
 	}), nil
+}
+
+func validTransportToken(value string) bool {
+	if len(value) < 16 || len(value) > MaxTransportToken {
+		return false
+	}
+	for _, character := range value {
+		if character <= ' ' || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validateTransportJSON(data []byte) error {

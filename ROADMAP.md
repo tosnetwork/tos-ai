@@ -83,9 +83,11 @@ consumer execution, a public shell, validator work, or token issuance.
   resume and cross-repository client validation.
 - Bounded terminal-side fleet control with signed terminal/fleet-scoped
   commands, monotonic generations, exact replay, capped persistent offline
-  queue and history, real-time-work priority, reconnect drain, deterministic
-  canary rings and signed rollback. MOCK executors cover failure injection
-  without requiring a physical GPU or terminal fleet.
+  queue and history, pre-execution durable claims, fail-closed `uncertain`
+  restart recovery, real-time-work priority, reconnect drain, deterministic
+  canary rings and signed rollback. The Agent itself contains executor panic
+  and cancellation-late success. MOCK crash windows and executors cover failure
+  injection without requiring a physical GPU or terminal fleet.
 - Fixed operator-owned vLLM, llama.cpp, and LocalAI identities over the bounded
   OpenAI-compatible adapter, with MOCK server coverage and no request-selected
   endpoint.
@@ -104,8 +106,9 @@ consumer execution, a public shell, validator work, or token issuance.
   shared; actual NVIDIA OCI injection remains a target certification item.
 - Privacy-minimized signed benchmark evidence with deterministic MOCK runner
   fault injection, plus a bounded authenticated fleet metrics collector that
-  retains one fixed-size snapshot per configured terminal alias and expires it
-  without a background queue.
+  retains only bearer-token digests and one fixed-size snapshot per configured
+  terminal alias, rejects excess concurrency before reading another body, and
+  expires data without a background queue.
 - A fixed-unit, no-shell systemd service-manager adapter with bounded
   restart/reload/readiness operations and MOCK timeout/panic/injection tests.
   Selecting the production unit and privilege boundary remains deployment

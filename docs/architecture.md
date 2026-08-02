@@ -696,20 +696,28 @@ Implemented locally but requiring deployment integration or external evidence:
 - signed, generation-bound policy apply/rollback commands, a separately
   authenticated bounded fleet HTTP handler, and a fixed-action bridge to
   release/policy/drain/resume controllers; the selected policy loader, service
-  manager, TLS identity and physical safety controller remain deployment-owned
+  manager, TLS identity and physical safety controller remain deployment-owned.
+  Queue drain first commits a durable `executing` claim; restart converts an
+  interrupted claim to `uncertain` and never automatically repeats its side
+  effect. Executor panic and cancellation-late success are also persisted as
+  `uncertain` at the Agent boundary
 - a fixed-unit systemd adapter that invokes `/usr/bin/systemctl` directly with
   fixed verbs, no shell, no prompt and bounded deadlines; selecting the unit,
   D-Bus/OS permissions and restart handover is deployment-owned
 - a fixed HTTPS destination, bearer-authenticated, privacy-filtered and
   byte-bounded metrics exporter plus a bounded reference collector retaining
   one latest snapshot per unique configured terminal alias with TTL cleanup;
-  production monitoring/retention policy remains deployment-owned
+  the collector retains SHA-256 token digests instead of bearer plaintext and
+  rejects excess authenticated concurrency before body allocation. Production
+  monitoring/retention policy remains deployment-owned
 - a privacy-minimized signed benchmark evidence issuer with deterministic MOCK
   execution/failure injection; only measurements from a real reviewed runtime
   and provisioned issuer may be advertised
-- an exclusive sorted GPU-alias lease client that rejects overlap and releases
-  synchronously after backend failure or panic; the target NVIDIA backend must
-  still prove that each alias maps to the exact isolated OCI device set
+- a process-local exclusive sorted GPU-alias lease client that rejects overlap,
+  cancellation-late success and releases synchronously after backend failure
+  or panic; the target NVIDIA backend must still prove that each alias maps to
+  the exact isolated OCI device set and the deployment prevents a second
+  independent worker from bypassing that lease
 - privileged certification for the CPU-only containerd driver;
   later reviewed GPU and network policy backends
 - external benchmark issuer trust and target-hardware measurements

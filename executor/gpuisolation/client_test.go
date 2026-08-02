@@ -19,6 +19,15 @@ type mockBackend struct {
 	fail     bool
 }
 
+type lateSuccessBackend struct {
+	cancel context.CancelFunc
+}
+
+func (b lateSuccessBackend) RunIsolatedOnDevices(context.Context, executor.ContainerRequest, []byte, []string) (executor.Result, error) {
+	b.cancel()
+	return executor.Result{ExitCode: 0}, nil
+}
+
 func (m *mockBackend) RunIsolatedOnDevices(ctx context.Context, _ executor.ContainerRequest, _ []byte, devices []string) (executor.Result, error) {
 	if m.panicNow {
 		panic("injected")
@@ -122,6 +131,20 @@ func TestLeaseReleasedAfterMOCKCancellationAndFailure(t *testing.T) {
 				t.Fatal("failed execution leaked device lease")
 			}
 		})
+	}
+}
+
+func TestMOCKBackendLateSuccessAfterCancellationIsRejected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client, err := New([]string{"gpu-a"}, lateSuccessBackend{cancel: cancel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RunIsolated(ctx, requestFor(t, "task-a"), nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("late success returned err=%v", err)
+	}
+	if client.Available() != 1 {
+		t.Fatal("late success leaked device lease")
 	}
 }
 

@@ -63,3 +63,16 @@ func TestFleetTransportRejectsAmbiguousAndOversizedJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetTransportRejectsUnsafeBearerConfiguration(t *testing.T) {
+	publicKey, _ := fleetKey(t)
+	online, busy := true, false
+	agent := openTestAgent(t, "terminal-one", publicKey, &mockExecutor{}, &online, &busy)
+	for _, token := range []string{"short", "operator-token-with-newline\n", "operator token with space"} {
+		if _, err := NewTransportHandler(TransportConfig{
+			Agent: agent, BearerToken: token, Now: time.Now, MaxConcurrent: 1,
+		}); err == nil {
+			t.Fatalf("unsafe bearer token %q accepted", token)
+		}
+	}
+}

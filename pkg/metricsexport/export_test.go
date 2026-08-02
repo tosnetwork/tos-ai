@@ -9,11 +9,17 @@ import (
 	"testing"
 )
 
+type metricsRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (function metricsRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
 func TestExporterUsesFixedAuthenticatedTLSDestination(t *testing.T) {
 	snapshot := []byte("tos_ai_rpc_requests_total{method=\"invoke\",outcome=\"ok\"} 7\n")
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/ingest" ||
-			request.Header.Get("Authorization") != "Bearer operator-secret" ||
+			request.Header.Get("Authorization") != "Bearer operator-secret-token" ||
 			request.Header.Get("X-TOS-Metrics-Version") != "1" {
 			t.Fatalf("unexpected request: %s %s %v", request.Method, request.URL, request.Header)
 		}
@@ -24,7 +30,7 @@ func TestExporterUsesFixedAuthenticatedTLSDestination(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	exporter, err := New(server.URL+"/ingest", "operator-secret", server.Client())
+	exporter, err := New(server.URL+"/ingest", "operator-secret-token", server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,11 +45,11 @@ func TestExporterRejectsUnsafeOrUnboundedInputs(t *testing.T) {
 	}))
 	defer server.Close()
 	for _, endpoint := range []string{"http://example.test/ingest", server.URL + "/ingest?destination=other", "https://user@example.test/"} {
-		if _, err := New(endpoint, "token", server.Client()); err == nil {
+		if _, err := New(endpoint, "operator-secret-token", server.Client()); err == nil {
 			t.Fatalf("unsafe endpoint accepted: %q", endpoint)
 		}
 	}
-	exporter, err := New(server.URL+"/ingest", "token", server.Client())
+	exporter, err := New(server.URL+"/ingest", "operator-secret-token", server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,5 +81,20 @@ func TestExporterDoesNotFollowRedirects(t *testing.T) {
 	exporter, _ := New(redirect.URL, "operator-secret-token", redirect.Client())
 	if err := exporter.Export(context.Background(), []byte("metric 1\n")); err == nil || destinationReached {
 		t.Fatal("metrics exporter followed a redirect")
+	}
+}
+
+func TestExporterRejectsLateSuccessAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: metricsRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		cancel()
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	exporter, err := New("https://collector.example/ingest", "operator-secret-token", client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Export(ctx, []byte("metric 1\n")); err != context.Canceled {
+		t.Fatalf("late success returned err=%v", err)
 	}
 }

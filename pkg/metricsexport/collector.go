@@ -1,7 +1,7 @@
 package metricsexport
 
 import (
-	"crypto/subtle"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"net/http"
@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	CollectorPath    = "/tos-ai/metrics/v1/ingest"
-	MaxTerminalsHard = 4096
-	MaxCollectorTTL  = 24 * time.Hour
+	CollectorPath              = "/tos-ai/metrics/v1/ingest"
+	MaxTerminalsHard           = 4096
+	MaxCollectorTTL            = 24 * time.Hour
+	MaxCollectorConcurrent     = 128
+	DefaultCollectorConcurrent = 16
 )
 
 type CollectorConfig struct {
@@ -23,6 +25,9 @@ type CollectorConfig struct {
 	Credentials map[string]string
 	TTL         time.Duration
 	Now         func() time.Time
+	// MaxConcurrent bounds authenticated requests before any body is read.
+	// Zero selects DefaultCollectorConcurrent.
+	MaxConcurrent int
 }
 
 type TerminalSnapshot struct {
@@ -33,10 +38,11 @@ type TerminalSnapshot struct {
 
 type Collector struct {
 	mu          sync.Mutex
-	credentials map[string]string
+	credentials map[[sha256.Size]byte]string
 	snapshots   map[string]TerminalSnapshot
 	ttl         time.Duration
 	now         func() time.Time
+	gate        chan struct{}
 }
 
 func NewCollector(config CollectorConfig) (*Collector, error) {
@@ -44,19 +50,27 @@ func NewCollector(config CollectorConfig) (*Collector, error) {
 		config.TTL <= 0 || config.TTL > MaxCollectorTTL || config.Now == nil {
 		return nil, errors.New("invalid metrics collector configuration")
 	}
-	credentials := make(map[string]string, len(config.Credentials))
-	seenTokens := make(map[string]struct{}, len(config.Credentials))
+	if config.MaxConcurrent == 0 {
+		config.MaxConcurrent = DefaultCollectorConcurrent
+	}
+	if config.MaxConcurrent < 0 || config.MaxConcurrent > MaxCollectorConcurrent {
+		return nil, errors.New("invalid metrics collector concurrency")
+	}
+	credentials := make(map[[sha256.Size]byte]string, len(config.Credentials))
 	for alias, token := range config.Credentials {
 		if !validAlias(alias) || !validToken(token) {
 			return nil, errors.New("invalid metrics collector credential")
 		}
-		if _, duplicate := seenTokens[token]; duplicate {
+		digest := sha256.Sum256([]byte(token))
+		if _, duplicate := credentials[digest]; duplicate {
 			return nil, errors.New("metrics collector credentials must be unique")
 		}
-		seenTokens[token] = struct{}{}
-		credentials[alias] = token
+		credentials[digest] = alias
 	}
-	return &Collector{credentials: credentials, snapshots: make(map[string]TerminalSnapshot, len(credentials)), ttl: config.TTL, now: config.Now}, nil
+	return &Collector{
+		credentials: credentials, snapshots: make(map[string]TerminalSnapshot, len(credentials)),
+		ttl: config.TTL, now: config.Now, gate: make(chan struct{}, config.MaxConcurrent),
+	}, nil
 }
 
 func (c *Collector) Handler() http.Handler {
@@ -72,6 +86,14 @@ func (c *Collector) Handler() http.Handler {
 		alias, ok := c.authenticate(request.Header.Get("Authorization"))
 		if !ok {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		select {
+		case c.gate <- struct{}{}:
+			defer func() { <-c.gate }()
+		default:
+			writer.Header().Set("Retry-After", "1")
+			http.Error(writer, "capacity exhausted", http.StatusServiceUnavailable)
 			return
 		}
 		data, err := io.ReadAll(io.LimitReader(request.Body, MaxSnapshotBytes+1))
@@ -111,23 +133,15 @@ func (c *Collector) Latest(now time.Time) ([]TerminalSnapshot, error) {
 }
 
 func (c *Collector) authenticate(header string) (string, bool) {
-	provided := []byte(strings.TrimPrefix(header, "Bearer "))
-	if len(provided) == len(header) {
+	provided := strings.TrimPrefix(header, "Bearer ")
+	if len(provided) == len(header) || !validToken(provided) {
 		return "", false
 	}
-	// Always inspect the complete bounded credential set; do not reveal which
-	// aliases exist through early-return timing.
-	matched := ""
-	count := 0
-	for alias, token := range c.credentials {
-		expected := []byte(token)
-		equal := len(expected) == len(provided) && subtle.ConstantTimeCompare(expected, provided) == 1
-		if equal {
-			matched = alias
-			count++
-		}
-	}
-	return matched, count == 1
+	// Retain only a fixed-size one-way digest of each bearer token. Tokens are
+	// required to be high-entropy operator secrets, not passwords.
+	digest := sha256.Sum256([]byte(provided))
+	alias, ok := c.credentials[digest]
+	return alias, ok
 }
 
 func (c *Collector) pruneLocked(now time.Time) {

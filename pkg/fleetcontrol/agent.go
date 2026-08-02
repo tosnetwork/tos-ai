@@ -35,6 +35,7 @@ var (
 	lastGenerationKey = []byte("last-generation")
 	ErrRealtimeBusy   = errors.New("local real-time work has priority")
 	ErrOffline        = errors.New("terminal is offline")
+	ErrUncertain      = errors.New("fleet command outcome is uncertain")
 )
 
 type Command struct {
@@ -148,6 +149,10 @@ func Open(config Config) (*Agent, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := reconcileInterrupted(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Agent{db: db, config: config, keys: keys}, nil
 }
 
@@ -242,7 +247,11 @@ func (a *Agent) Drain(ctx context.Context, now time.Time, maximum int) ([]Result
 			}
 			continue
 		}
-		result, err := a.execute(ctx, item.Command, item.Fingerprint, item.ExpiresAt, item.Sequence)
+		claimed, err := a.claimQueued(item)
+		if err != nil {
+			return results, err
+		}
+		result, err := a.execute(ctx, claimed.Command, claimed.Fingerprint, claimed.ExpiresAt, 0)
 		if err != nil {
 			return results, err
 		}
@@ -287,7 +296,12 @@ func (a *Agent) replay(command Command, fingerprint string) (Result, bool, error
 	if existing.Fingerprint != fingerprint {
 		return Result{}, true, errors.New("fleet command identifier conflict")
 	}
-	return Result{CommandID: command.CommandID, Generation: command.Generation, State: existing.State, Replay: true}, true, nil
+	result := Result{CommandID: command.CommandID, Generation: command.Generation, State: existing.State, Replay: true}
+	if existing.State == "uncertain" || existing.State == "executing" {
+		result.State = "uncertain"
+		return result, true, ErrUncertain
+	}
+	return result, true, nil
 }
 
 func (a *Agent) enqueue(command Command, fingerprint string, expiresAt int64) error {
@@ -353,8 +367,51 @@ func (a *Agent) claim(command Command, fingerprint string, expiresAt int64) erro
 	})
 }
 
+// claimQueued durably removes a queued command before invoking its external
+// side effect. A crash after this transaction is recovered as uncertain and
+// never causes automatic re-execution.
+func (a *Agent) claimQueued(item record) (record, error) {
+	claimed := item
+	err := a.db.Update(func(tx *bolt.Tx) error {
+		queue := tx.Bucket(queueBucket)
+		records := tx.Bucket(recordBucket)
+		queuedValue := queue.Get(sequenceKey(item.Sequence))
+		recordValue := records.Get([]byte(item.Command.CommandID))
+		if queuedValue == nil || recordValue == nil {
+			return errors.New("fleet queue claim is stale")
+		}
+		var queuedRecord, durableRecord record
+		if json.Unmarshal(queuedValue, &queuedRecord) != nil || json.Unmarshal(recordValue, &durableRecord) != nil ||
+			queuedRecord.Fingerprint != item.Fingerprint || durableRecord.Fingerprint != item.Fingerprint ||
+			queuedRecord.Command.CommandID != item.Command.CommandID || durableRecord.Command.CommandID != item.Command.CommandID ||
+			queuedRecord.Sequence != item.Sequence || durableRecord.Sequence != item.Sequence ||
+			queuedRecord.State != "queued" || durableRecord.State != "queued" {
+			return errors.New("fleet queue claim is inconsistent")
+		}
+		claimed.State = "executing"
+		claimed.Sequence = 0
+		encoded, err := json.Marshal(claimed)
+		if err != nil {
+			return err
+		}
+		if err := records.Put([]byte(claimed.Command.CommandID), encoded); err != nil {
+			return err
+		}
+		return queue.Delete(sequenceKey(item.Sequence))
+	})
+	return claimed, err
+}
+
 func (a *Agent) execute(ctx context.Context, command Command, fingerprint string, expiresAt int64, sequence uint64) (Result, error) {
-	if err := a.config.Executor.Apply(ctx, command); err != nil {
+	err, panicked := callExecutor(ctx, a.config.Executor, command)
+	if panicked || ctx.Err() != nil {
+		item := record{Fingerprint: fingerprint, Command: command, State: "uncertain", ExpiresAt: expiresAt, Sequence: sequence}
+		if finishErr := a.finish(item, "uncertain"); finishErr != nil {
+			return Result{}, finishErr
+		}
+		return Result{CommandID: command.CommandID, Generation: command.Generation, State: "uncertain"}, ErrUncertain
+	}
+	if err != nil {
 		item := record{Fingerprint: fingerprint, Command: command, State: "failed", ExpiresAt: expiresAt, Sequence: sequence}
 		_ = a.finish(item, "failed")
 		return Result{CommandID: command.CommandID, Generation: command.Generation, State: "failed"}, errors.New("fleet command failed")
@@ -364,6 +421,16 @@ func (a *Agent) execute(ctx context.Context, command Command, fingerprint string
 		return Result{}, err
 	}
 	return Result{CommandID: command.CommandID, Generation: command.Generation, State: "succeeded"}, nil
+}
+
+func callExecutor(ctx context.Context, executor Executor, command Command) (resultErr error, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			resultErr = errors.New("fleet command executor panicked")
+			panicked = true
+		}
+	}()
+	return executor.Apply(ctx, command), false
 }
 
 func (a *Agent) finish(item record, state string) error {
@@ -431,6 +498,43 @@ func paddedGeneration(value []byte) []byte {
 		return value
 	}
 	return make([]byte, 8)
+}
+
+func reconcileInterrupted(db *bolt.DB) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		records := tx.Bucket(recordBucket)
+		queue := tx.Bucket(queueBucket)
+		interrupted := make([]record, 0)
+		if err := records.ForEach(func(_, value []byte) error {
+			var item record
+			if json.Unmarshal(value, &item) != nil {
+				return errors.New("corrupt fleet journal")
+			}
+			if item.State == "executing" {
+				interrupted = append(interrupted, item)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, item := range interrupted {
+			if item.Sequence != 0 {
+				if err := queue.Delete(sequenceKey(item.Sequence)); err != nil {
+					return err
+				}
+				item.Sequence = 0
+			}
+			item.State = "uncertain"
+			encoded, err := json.Marshal(item)
+			if err != nil {
+				return err
+			}
+			if err := records.Put([]byte(item.Command.CommandID), encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 func validID(value string) bool {
 	if len(value) < 3 || len(value) > 128 {

@@ -86,7 +86,9 @@ func (commandRunner) Run(ctx context.Context, binary string, arguments ...string
 }
 
 func nilRunner(runner Runner) bool {
-	if runner == nil { return true }
+	if runner == nil {
+		return true
+	}
 	value := reflect.ValueOf(runner)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:

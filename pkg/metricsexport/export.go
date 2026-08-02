@@ -29,7 +29,7 @@ func New(endpoint, bearerToken string, client *http.Client) (*Exporter, error) {
 	parsed, err := url.ParseRequestURI(endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
-		len(endpoint) > 2048 || len(bearerToken) == 0 || len(bearerToken) > MaxTokenBytes ||
+		len(endpoint) > 2048 || len(bearerToken) < 16 || len(bearerToken) > MaxTokenBytes ||
 		strings.IndexFunc(bearerToken, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 ||
 		client == nil {
 		return nil, errors.New("invalid metrics export configuration")
@@ -64,6 +64,9 @@ func (e *Exporter) Export(ctx context.Context, snapshot []byte) error {
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, MaxResponseBytes+1))
 	if readErr != nil || len(data) > MaxResponseBytes || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return errors.New("metrics export rejected")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return nil
 }

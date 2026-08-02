@@ -535,7 +535,7 @@ TOS authorization/payment/Receipt flow, ARD handoff, unary and versioned
 streaming Worker RPC, durable offline fleet control, fixed-action controller
 bridges, a bounded authenticated metrics exporter/collector pair, signed
 benchmark evidence, CPU containerd execution and an exclusive GPU-alias lease
-boundary. A fixed-unit, no-shell systemd adapter supplies bounded
+boundary within one worker process. A fixed-unit, no-shell systemd adapter supplies bounded
 restart/reload/readiness operations. These implementations do not by themselves certify a particular
 public TLS perimeter, operator authentication/custody policy, service manager,
 policy loader, physical safety controller, privileged target kernel or NVIDIA

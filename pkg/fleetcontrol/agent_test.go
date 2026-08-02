@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,21 +14,35 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-protocol/pkg/identity"
+	bolt "go.etcd.io/bbolt"
 )
 
 type mockExecutor struct {
-	mu         sync.Mutex
-	actions    []string
-	failAction string
+	mu          sync.Mutex
+	actions     []string
+	failAction  string
+	panicAction string
 }
 
 func (m *mockExecutor) Apply(_ context.Context, command Command) error {
+	if command.Action == m.panicAction {
+		panic("injected executor panic")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.actions = append(m.actions, command.Action)
 	if command.Action == m.failAction {
 		return errors.New("injected failure")
 	}
+	return nil
+}
+
+type cancelingFleetExecutor struct {
+	cancel context.CancelFunc
+}
+
+func (executor cancelingFleetExecutor) Apply(context.Context, Command) error {
+	executor.cancel()
 	return nil
 }
 
@@ -198,6 +213,96 @@ func TestAgentRestartPreservesQueueAndPreventsOvertake(t *testing.T) {
 	results, err := agent.Drain(context.Background(), now, 4)
 	if err != nil || len(results) != 2 || len(executor.actions) != 2 || executor.actions[0] != "drain" || executor.actions[1] != "resume" {
 		t.Fatalf("restart drain=%#v actions=%#v err=%v", results, executor.actions, err)
+	}
+}
+
+func TestQueuedCommandCrashWindowRecoversUncertainWithoutReexecution(t *testing.T) {
+	publicKey, privateKey := fleetKey(t)
+	now := time.Unix(1_800_000_000, 0)
+	online, busy := false, false
+	executor := &mockExecutor{}
+	path := filepath.Join(t.TempDir(), "private", "fleet.db")
+	config := Config{
+		DatabasePath: path, FleetID: "fleet-one", TerminalID: "terminal-one",
+		ControllerKeys: map[string]ed25519.PublicKey{"controller-1": publicKey}, Executor: executor,
+		Online: func() bool { return online }, RealtimeBusy: func() bool { return busy }, MaxQueued: 4,
+	}
+	agent, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := signedFleetCommand(t, privateKey, "terminal-one", "crash-window-command", "install-release", 1, now)
+	if result, err := agent.Submit(context.Background(), envelope, now); err != nil || result.State != "queued" {
+		t.Fatalf("queue result=%#v err=%v", result, err)
+	}
+	var queued record
+	if err := agent.db.View(func(tx *bolt.Tx) error {
+		_, value := tx.Bucket(queueBucket).Cursor().First()
+		return json.Unmarshal(value, &queued)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.claimQueued(queued); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a process loss after durable claim and before a result write.
+	if err := agent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	agent, err = Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	online = true
+	replay, err := agent.Submit(context.Background(), envelope, now)
+	if !errors.Is(err, ErrUncertain) || !replay.Replay || replay.State != "uncertain" {
+		t.Fatalf("replay=%#v err=%v", replay, err)
+	}
+	if drained, err := agent.Drain(context.Background(), now, 4); err != nil || len(drained) != 0 {
+		t.Fatalf("drained=%#v err=%v", drained, err)
+	}
+	if len(executor.actions) != 0 {
+		t.Fatalf("uncertain action re-executed: %v", executor.actions)
+	}
+}
+
+func TestAgentContainsExecutorPanicAndCancellationLateSuccess(t *testing.T) {
+	publicKey, privateKey := fleetKey(t)
+	now := time.Unix(1_800_000_000, 0)
+	for name, setup := range map[string]struct {
+		executor func(context.CancelFunc) Executor
+	}{
+		"panic": {executor: func(context.CancelFunc) Executor {
+			return &mockExecutor{panicAction: "drain"}
+		}},
+		"cancellation": {executor: func(cancel context.CancelFunc) Executor {
+			return cancelingFleetExecutor{cancel: cancel}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			online, busy := true, false
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			agent, err := Open(Config{
+				DatabasePath: filepath.Join(t.TempDir(), "private", "fleet.db"), FleetID: "fleet-one", TerminalID: "terminal-one",
+				ControllerKeys: map[string]ed25519.PublicKey{"controller-1": publicKey}, Executor: setup.executor(cancel),
+				Online: func() bool { return online }, RealtimeBusy: func() bool { return busy },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer agent.Close()
+			envelope := signedFleetCommand(t, privateKey, "terminal-one", name+"-uncertain", "drain", 1, now)
+			result, err := agent.Submit(ctx, envelope, now)
+			if !errors.Is(err, ErrUncertain) || result.State != "uncertain" {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			replay, err := agent.Submit(context.Background(), envelope, now)
+			if !errors.Is(err, ErrUncertain) || !replay.Replay || replay.State != "uncertain" {
+				t.Fatalf("replay=%#v err=%v", replay, err)
+			}
+		})
 	}
 }
 

@@ -67,6 +67,11 @@ func (c *Client) RunIsolated(ctx context.Context, request executor.ContainerRequ
 	if err != nil {
 		return executor.Result{}, errors.New("GPU isolation backend failed")
 	}
+	// A backend may return a late success after the caller has cancelled. Never
+	// publish that result as successful work.
+	if err := ctx.Err(); err != nil {
+		return executor.Result{}, err
+	}
 	return result, nil
 }
 
