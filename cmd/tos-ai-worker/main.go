@@ -270,6 +270,13 @@ func run() error {
 	)
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
+	streamPath, streamHandler := edgev1connect.NewWorkerStreamServiceHandler(
+		service,
+		connect.WithReadMaxBytes(2<<20),
+		connect.WithSendMaxBytes(2<<20),
+		connect.WithInterceptors(operationalMetrics.Interceptor()),
+	)
+	mux.Handle(streamPath, streamHandler)
 	mux.Handle(worker.MetricsPath, operationalMetrics.Handler(service))
 	server := &http.Server{
 		Handler:           mux,

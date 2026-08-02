@@ -1,5 +1,14 @@
 # TOS AI Tier 1 runtime foundation
 
+The current local v0.2 candidate also mounts a separate
+`WorkerStreamService` beside the unchanged unary v0.1 service. It streams only
+an execute-once, durably retained bounded result, validates exact sequence and
+offset cursors on the client, and resumes through `GetTask` without a second
+runtime execution. `pkg/fleetcontrol` provides the transport-neutral signed
+terminal state machine: monotonic commands, bounded persistent offline work,
+real-time priority gates, reconnect drain, canary promotion and rollback.
+Operator networking and hard-real-time/actuator safety remain external.
+
 The current release is a managed-inference worker foundation, not a bare GPU
 rental daemon, hard real-time controller, payment service, or public runtime.
 

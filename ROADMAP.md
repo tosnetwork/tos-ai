@@ -78,6 +78,14 @@ consumer execution, a public shell, validator work, or token issuance.
   this host against real containerd/runc, including success, cancellation,
   duplicate identity, concurrency, and synchronous object cleanup. This is
   local runtime evidence, not target-kernel or NVIDIA certification.
+- WorkerStreamService v0.2 result streaming over the private Unix socket, with
+  durable execute-once semantics, bounded chunks, backpressure, exact retained
+  resume and cross-repository client validation.
+- Bounded terminal-side fleet control with signed terminal/fleet-scoped
+  commands, monotonic generations, exact replay, capped persistent offline
+  queue and history, real-time-work priority, reconnect drain, deterministic
+  canary rings and signed rollback. MOCK executors cover failure injection
+  without requiring a physical GPU or terminal fleet.
 
 ## In Progress
 
@@ -113,14 +121,13 @@ work is target-deployment evidence and operator policy:
    resizing or cross-process coordination must retain one authoritative
    admission state; software release lifecycle controls are already local and
    signed.
-5. Consume `tos-protocol` streaming v0.2 only after ordering, backpressure,
-   cancellation, resume, usage, total-output, and Receipt semantics are frozen.
-6. Add signed benchmark evidence and external evidence issuers without
+5. Add signed benchmark evidence and external evidence issuers without
    treating self-reported TOPS or hardware identity as proof of service quality.
-7. Implement the site-bound physical terminal track: real-time local priority,
-   bounded offline journal, safe reconnect, signed updates, device/actuator
-   isolation, independent safety interlocks, and fleet lifecycle.
-8. Add remote metrics collection through a separately authenticated, bounded
+6. Integrate the completed fleet agent/control library with a selected
+   authenticated operator transport and physical safety controller. Actual
+   actuator interlocks remain outside this Go process and require target-site
+   evidence.
+7. Add remote metrics collection through a separately authenticated, bounded
    export path. The local durable software lifecycle history is implemented;
    remote transport and fleet aggregation remain outside this process.
 
@@ -144,8 +151,8 @@ This ROADMAP intentionally does not duplicate that ledger.
 | A0: private terminal foundation | Worker, admission, persistence, runtime adapters, model trust, text profile, isolation foundation, protocol compatibility and race tests | Completed |
 | A1: public non-streaming composition | `tos-ai-edge` completes the local discovery-to-receipt flow with complete fail-closed dependencies | Completed |
 | A2: Tier 1 production candidate | Packaging plus required chain, key, isolation, model, memory, and network evidence | In Progress |
-| A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Next |
-| A4: physical terminal and fleet | Offline, real-time, update, device-safety, reconnect, and fleet acceptance | Next |
+| A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Streaming local gates complete; runtime certification remains |
+| A4: physical terminal and fleet | Offline, real-time, update, device-safety, reconnect, and fleet acceptance | Fleet-control local gates complete; physical certification remains |
 
 ## Maintenance
 

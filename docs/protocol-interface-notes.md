@@ -1,12 +1,14 @@
 # `tos-protocol` WorkerService alignment
 
-Status: non-streaming v0.1 M1 interface implemented and immutably pinned
+Status: unary v0.1 plus WorkerStreamService v0.2 candidate implemented and pinned
 
 Deployment certification is tracked separately in
 the [canonical production-gate ledger](https://github.com/tosnetwork/tos-protocol/blob/main/docs/non-streaming-v0.1-production-gates.md);
 it is not implied by interface completion or unit-test coverage.
 
-The immutable `tos-ai` pin is `tos-protocol` revision `c1e33bc6208e`. It
+The active immutable `tos-ai` pin is `tos-protocol` revision `3d54e29e70a1`.
+It includes the earlier non-streaming baseline from `c1e33bc6208e` plus the
+separate WorkerStreamService v0.2 contract and bounded ARD federation. It
 includes the priority-aware task-store statistics, atomic owner-reserved slot
 enforcement, retained-byte counters, the `storage.task_bytes` contract, the
 privacy-minimized Worker-to-ARD projection, strict extension/catalog decoders,
@@ -79,12 +81,19 @@ and reopening the Worker database.
 
 ## Streaming
 
-WorkerService v0.1 remains deliberately unary. `tos-ai` does not emulate
-streaming with repeated Invoke calls or an opaque byte field. Ordering,
-partial-result semantics, bounded buffering and backpressure, cancellation,
-terminal state, retry/resume, idempotency, total output, usage, and receipt
-binding are specified as a separate `tos-protocol` streaming RFC targeted at
-v0.2 unless explicitly accepted before the v0.1 release tag.
+WorkerService v0.1 remains deliberately unary. The local v0.2 candidate adds a
+separate `WorkerStreamService`; it never emulates streaming with repeated
+Invoke calls or an opaque unary field. `InvokeStream` enters the existing
+durable task state machine once, and `ResumeStream` reads only the retained
+task. Ordered sequence/offset cursors, fixed revisions and stream digest,
+bounded chunks/events/total output, Connect backpressure, one terminal state,
+final usage and conversion to the existing opaque validated completion are
+implemented and exercised over the real private Unix handler. Partial chunks
+are provisional and cannot issue a Receipt.
+
+The module pins the published v0.2 candidate exactly; the source protobuf is
+not copied into `tos-ai`. WorkerService v0.1 remains wire-compatible and the
+new service has a separate handler path.
 
 ## First vertical profile mapper
 

@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +28,7 @@ import (
 	"github.com/tosnetwork/tos-protocol/pkg/localrpc"
 	"github.com/tosnetwork/tos-protocol/pkg/registry"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestAIResourceDimensionsAndRequestedUpperBounds(t *testing.T) {
@@ -582,6 +585,8 @@ func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 	path, handler := edgev1connect.NewWorkerServiceHandler(service)
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
+	streamPath, streamHandler := edgev1connect.NewWorkerStreamServiceHandler(service)
+	mux.Handle(streamPath, streamHandler)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve(listener) }()
@@ -671,6 +676,51 @@ func TestTosProtocolWorkerClientCompatibility(t *testing.T) {
 		context.Background(), invocation,
 	); err != nil || accepted {
 		t.Fatalf("terminal Cancel accepted=%v err=%v", accepted, err)
+	}
+
+	streamQuoteRequest := proto.Clone(quoteRequest).(*edgev1.QuoteRequest)
+	streamQuoteRequest.RequestId = "compat-stream-request-0001"
+	streamQuote, err := client.Quote(context.Background(), streamQuoteRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamInvocation, _, err := localrpc.BindInvocationRequest(&edgev1.InvokeRequest{
+		RequestId: streamQuoteRequest.RequestId, QuoteId: streamQuote.QuoteId,
+		TaskId: "compat-stream-task-0001", ServiceId: streamQuoteRequest.ServiceId,
+		Operation: streamQuoteRequest.Operation, Model: streamQuoteRequest.Model,
+		Payload: []byte("hello"), MaxOutputBytes: streamQuoteRequest.MaxOutputBytes,
+		DeadlineUnixMillis:    streamQuoteRequest.DeadlineUnixMillis,
+		RetainUntilUnixMillis: now.Add(time.Hour).UnixMilli(),
+		Priority:              streamQuoteRequest.Priority,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamed, err := client.InvokeStream(context.Background(), streamInvocation, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamCompletion, err := streamed.Completion(localrpc.InvocationBinding{
+		RequestID: streamInvocation.RequestId, QuoteID: streamInvocation.QuoteId,
+		ServiceID: streamInvocation.ServiceId, Operation: streamInvocation.Operation,
+	})
+	if err != nil || string(streamCompletion.Output) != "hello" {
+		t.Fatalf("stream completion=%v err=%v", streamCompletion, err)
+	}
+	digest := sha256.Sum256([]byte("hello"))
+	resumed, err := client.ResumeStream(
+		context.Background(), streamInvocation, 1, []byte("he"),
+		"sha256:"+hex.EncodeToString(digest[:]), 2,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeCompletion, err := resumed.Completion(localrpc.InvocationBinding{
+		RequestID: streamInvocation.RequestId, QuoteID: streamInvocation.QuoteId,
+		ServiceID: streamInvocation.ServiceId, Operation: streamInvocation.Operation,
+	})
+	if err != nil || string(resumeCompletion.Output) != "hello" {
+		t.Fatalf("resume completion=%v err=%v", resumeCompletion, err)
 	}
 }
 
