@@ -76,7 +76,11 @@ func CollectNVIDIA(backend NVIDIABackend) (report NVIDIAReport) {
 	if backend.Init() != nil {
 		return report
 	}
-	defer backend.Shutdown()
+	defer func() {
+		if backend.Shutdown() != nil {
+			report.Status = "degraded"
+		}
+	}()
 
 	driver, err := backend.DriverVersion()
 	if err != nil {

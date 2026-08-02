@@ -67,10 +67,11 @@ func TestValidateReportRejectsMalformedSubprocessObservations(t *testing.T) {
 }
 
 type fakeNVIDIA struct {
-	initErr  error
-	count    int
-	countErr error
-	devices  []fakeGPU
+	initErr     error
+	shutdownErr error
+	count       int
+	countErr    error
+	devices     []fakeGPU
 }
 
 type panicNVIDIA struct{}
@@ -82,7 +83,7 @@ func (*panicNVIDIA) DeviceCount() (int, error)               { panic("SDK detail
 func (*panicNVIDIA) Device(int) (NVIDIADeviceBackend, error) { panic("SDK detail") }
 
 func (f *fakeNVIDIA) Init() error                    { return f.initErr }
-func (f *fakeNVIDIA) Shutdown() error                { return nil }
+func (f *fakeNVIDIA) Shutdown() error                { return f.shutdownErr }
 func (f *fakeNVIDIA) DriverVersion() (string, error) { return "560.1", nil }
 func (f *fakeNVIDIA) DeviceCount() (int, error)      { return f.count, f.countErr }
 func (f *fakeNVIDIA) Device(index int) (NVIDIADeviceBackend, error) {
@@ -143,6 +144,15 @@ func TestCollectNVIDIAContainsTypedNilAndMOCKSDKPanic(t *testing.T) {
 	if report := CollectNVIDIA(&panicNVIDIA{}); report.Status != "degraded" ||
 		report.DriverVersion != "" || len(report.Devices) != 0 {
 		t.Fatalf("panic report=%#v", report)
+	}
+}
+
+func TestCollectNVIDIAReportsMOCKShutdownFailureAsDegraded(t *testing.T) {
+	report := CollectNVIDIA(&fakeNVIDIA{
+		shutdownErr: errors.New("injected shutdown failure"),
+	})
+	if report.Status != "degraded" || len(report.Devices) != 0 {
+		t.Fatalf("shutdown failure report=%#v", report)
 	}
 }
 

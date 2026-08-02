@@ -65,6 +65,7 @@ type Manager struct {
 	target     string
 	publicKeys map[string]ed25519.PublicKey
 	ownership  *dirlock.Lock
+	writeFile  func(string, []byte, os.FileMode) error
 
 	mu        sync.Mutex
 	state     persistentState
@@ -117,7 +118,7 @@ func Open(config Config) (*Manager, error) {
 	manager := &Manager{
 		root: config.Root, target: config.Target,
 		publicKeys: keys, ownership: ownership,
-		state: persistentState{Version: stateVersion},
+		state: persistentState{Version: stateVersion}, writeFile: writeAtomic,
 	}
 	if err := manager.loadAndRecover(); err != nil {
 		return nil, err
@@ -185,7 +186,7 @@ func (m *Manager) Stage(
 	if err != nil {
 		return "", errors.New("encode staged software manifest")
 	}
-	if err := writeAtomic(filepath.Join(slotDirectory, manifestName), manifestJSON, 0o600); err != nil {
+	if err := m.writeFile(filepath.Join(slotDirectory, manifestName), manifestJSON, 0o600); err != nil {
 		return "", err
 	}
 	if err := syncDirectory(slotDirectory); err != nil {
@@ -406,7 +407,10 @@ func (m *Manager) storeState(state persistentState) error {
 	if err != nil {
 		return errors.New("encode software update state")
 	}
-	if err := writeAtomic(filepath.Join(m.root, stateName), data, 0o600); err != nil {
+	if m.writeFile == nil {
+		return errors.New("software update persistence is unavailable")
+	}
+	if err := m.writeFile(filepath.Join(m.root, stateName), data, 0o600); err != nil {
 		return err
 	}
 	return syncDirectory(m.root)

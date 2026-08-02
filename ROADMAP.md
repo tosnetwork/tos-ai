@@ -120,6 +120,11 @@ consumer execution, a public shell, validator work, or token issuance.
   SDK panics are converted into bounded fail-closed errors or a
   privacy-minimized degraded observation, and strict fleet transport parsing
   has a persistent fuzz regression target.
+- NVIDIA probe shutdown failure is a degraded observation rather than a false
+  healthy result. Deterministic `ENOSPC` injection proves that software-update
+  manifest/state persistence cannot advance durable state or leave temporary
+  residue before a clean retry, and the public runtime validation/error/timing
+  contract has complete statement coverage including every configured bound.
 
 ## In Progress
 

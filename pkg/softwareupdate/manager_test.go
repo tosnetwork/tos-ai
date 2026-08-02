@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -314,5 +315,55 @@ func TestRecoveryCleansInterruptedFilesAndRejectsTampering(t *testing.T) {
 	}
 	if _, err := Open(fixture.config(root)); err == nil {
 		t.Fatal("tampered installed artifact was accepted")
+	}
+}
+
+func TestMOCKDiskFullDoesNotAdvanceSoftwareUpdateState(t *testing.T) {
+	fixture := newUpdateFixture(t)
+	root := filepath.Join(t.TempDir(), "updates")
+	manager, err := Open(fixture.config(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	artifact := []byte("release-with-disk-faults")
+	manifest := fixture.manifest(t, artifact, 1)
+	originalWrite := manager.writeFile
+
+	for _, failedFile := range []string{manifestName, stateName} {
+		manager.writeFile = func(
+			path string, data []byte, mode os.FileMode,
+		) error {
+			if filepath.Base(path) == failedFile {
+				return syscall.ENOSPC
+			}
+			return originalWrite(path, data, mode)
+		}
+		if _, err := manager.Stage(
+			context.Background(), manifest, bytes.NewReader(artifact), fixture.now,
+		); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("%s disk-full error=%v", failedFile, err)
+		}
+		status, err := manager.Status()
+		if err != nil || status.PendingSlot != "" || status.ActiveSlot != "" ||
+			status.AwaitingHealth {
+			t.Fatalf("%s disk-full advanced state: %#v err=%v", failedFile, status, err)
+		}
+		for _, temporary := range []string{
+			filepath.Join(root, "a", artifactName+".tmp"),
+			filepath.Join(root, "a", manifestName+".tmp"),
+			filepath.Join(root, stateName+".tmp"),
+		} {
+			if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s retained temporary file %s: %v", failedFile, temporary, err)
+			}
+		}
+	}
+
+	manager.writeFile = originalWrite
+	if slot, err := manager.Stage(
+		context.Background(), manifest, bytes.NewReader(artifact), fixture.now,
+	); err != nil || slot != "a" {
+		t.Fatalf("retry after disk-full slot=%q err=%v", slot, err)
 	}
 }
