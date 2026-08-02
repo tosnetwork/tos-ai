@@ -27,6 +27,7 @@ type sdkEngine struct {
 	cleanupTimeout time.Duration
 	imageReference string
 	imageDigest    string
+	cdi            *cdiInjector
 }
 
 func newSDKEngine(config Config) (*sdkEngine, error) {
@@ -39,11 +40,20 @@ func newSDKEngine(config Config) (*sdkEngine, error) {
 	if err != nil {
 		return nil, err
 	}
+	var injector *cdiInjector
+	if config.PermitGPU {
+		injector, err = newCDIInjector(config.CDISpecDirs)
+		if err != nil {
+			_ = client.Close()
+			return nil, err
+		}
+	}
 	return &sdkEngine{
 		client: client, namespace: config.Namespace,
 		snapshotter: config.Snapshotter, fifoDir: config.FIFODir,
 		cleanupTimeout: config.CleanupTimeout,
 		imageReference: config.ImageReference, imageDigest: config.ImageDigest,
+		cdi: injector,
 	}, nil
 }
 
@@ -93,6 +103,7 @@ func (e *sdkEngine) Run(
 	id string,
 	request executor.ContainerRequest,
 	input []byte,
+	devices []string,
 ) (result executor.Result, returnedErr error) {
 	ctx = e.runtimeContext(ctx)
 	started := time.Now()
@@ -122,7 +133,10 @@ func (e *sdkEngine) Run(
 		// WithImageConfig reads the new snapshot metadata. Containerd options
 		// execute in order, so specification construction must follow snapshot
 		// creation or it fails before runc starts.
-		containerd.WithNewSpec(oci.WithImageConfig(image), fixedIsolationSpec(request)),
+		containerd.WithNewSpec(
+			oci.WithImageConfig(image), fixedIsolationSpec(request),
+			e.cdi.specOpt(devices),
+		),
 	)
 	if err != nil {
 		cleanupErr := e.removeFailedSnapshot(id)

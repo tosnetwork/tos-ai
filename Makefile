@@ -1,4 +1,4 @@
-.PHONY: all build test test-race vet fmt-check reproducible-builds release-gates local-gates
+.PHONY: all build test test-race vet fmt-check reproducible-builds release-gates local-gates nvidia-certification
 
 all: fmt-check vet test build
 
@@ -24,3 +24,9 @@ release-gates:
 	./scripts/test-release-bundle.sh
 
 local-gates: fmt-check vet test-race reproducible-builds release-gates
+
+# Opt-in physical gate. The script requires an operator-owned private
+# containerd socket, digest-pinned certification image and one exact NVIDIA CDI
+# device. It is intentionally not run on ordinary CPU CI.
+nvidia-certification:
+	./scripts/run-nvidia-certification.sh

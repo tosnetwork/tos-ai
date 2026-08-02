@@ -13,9 +13,14 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
+	"tags.cncf.io/container-device-interface/pkg/parser"
 )
 
-func validateRequest(request executor.ContainerRequest, input []byte) error {
+func validateRequest(
+	request executor.ContainerRequest,
+	input []byte,
+	assignedDevices int,
+) error {
 	if executor.ValidateExecutionDigest(request.ExecutionDigest) != nil ||
 		executor.ValidateExecutionDigest(request.ImageDigest) != nil ||
 		len(input) > MaxInputBytesHard ||
@@ -24,9 +29,12 @@ func validateRequest(request executor.ContainerRequest, input []byte) error {
 		request.UserID == 0 || request.GroupID == 0 ||
 		!request.ReadOnlyRoot || !request.NoNewPrivileges ||
 		request.Network != executor.NetworkNone || len(request.AllowedHosts) != 0 ||
-		request.AllowGPU || request.Limits.GPUDeviceCount != 0 ||
-		validateDriverLimits(request.Limits) != nil {
+		validateDriverLimits(request.Limits, request.AllowGPU) != nil {
 		return errors.New("unsupported or invalid containerd execution request")
+	}
+	if request.AllowGPU != (assignedDevices > 0) ||
+		assignedDevices != int(request.Limits.GPUDeviceCount) {
+		return errors.New("invalid containerd GPU assignment")
 	}
 	for _, argument := range request.Entrypoint {
 		if invalidRuntimeString(argument, false) {
@@ -42,7 +50,7 @@ func validateRequest(request executor.ContainerRequest, input []byte) error {
 	return nil
 }
 
-func validateDriverLimits(limits executor.Limits) error {
+func validateDriverLimits(limits executor.Limits, permitGPU bool) error {
 	if limits.CPUMillis == 0 || limits.MemoryBytes == 0 ||
 		limits.DiskBytes < minimumTmpfsBytes || limits.PIDs == 0 ||
 		limits.ExecutionTime <= 0 || limits.OutputBytes == 0 ||
@@ -50,11 +58,59 @@ func validateDriverLimits(limits executor.Limits) error {
 		limits.MemoryBytes > MaxMemoryBytesHard ||
 		limits.DiskBytes > MaxDiskBytesHard || limits.PIDs > MaxPIDsHard ||
 		limits.ExecutionTime > MaxExecutionTimeHard ||
-		limits.OutputBytes > MaxOutputBytesHard || limits.GPUDeviceCount != 0 {
+		limits.OutputBytes > MaxOutputBytesHard {
 		return errors.New("containerd resource limits are unsupported or invalid")
+	}
+	if permitGPU != (limits.GPUDeviceCount > 0) {
+		return errors.New("containerd GPU limits are inconsistent")
 	}
 	_, _, err := cpuQuota(limits)
 	return err
+}
+
+func validateGPUDeviceMap(
+	devices map[string]string,
+	permitGPU bool,
+	maximum uint32,
+) error {
+	if !permitGPU {
+		if len(devices) != 0 || maximum != 0 {
+			return errors.New("GPU devices require GPU permission")
+		}
+		return nil
+	}
+	if maximum == 0 || maximum > uint32(len(devices)) ||
+		len(devices) > 64 {
+		return errors.New("invalid GPU device capacity")
+	}
+	seen := make(map[string]struct{}, len(devices))
+	for alias, device := range devices {
+		if !validGPUAlias(alias) {
+			return errors.New("invalid GPU device alias")
+		}
+		_, _, deviceName, err := parser.ParseQualifiedName(device)
+		if err != nil || strings.EqualFold(deviceName, "all") {
+			return errors.New("invalid CDI device identifier")
+		}
+		if _, duplicate := seen[device]; duplicate {
+			return errors.New("duplicate CDI device identifier")
+		}
+		seen[device] = struct{}{}
+	}
+	return nil
+}
+
+func validGPUAlias(value string) bool {
+	if len(value) < 3 || len(value) > 64 || strings.Contains(value, "..") {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') &&
+			!(character >= '0' && character <= '9') && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func invalidRuntimeString(value string, allowEmpty bool) bool {

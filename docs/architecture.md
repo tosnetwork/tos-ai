@@ -519,12 +519,13 @@ GPU permission, input and resource ceilings exactly match the immutable spec;
 read-only root, non-root UID/GID and no-new-privileges are mandatory, while
 privilege, host mounts and runtime-socket exposure are not expressible. Its
 owned backend is closed exactly once. The worker injects exactly the compiled-in
-CPU-only containerd factory when `-isolated-runtime-config` is explicitly
+fixed-policy containerd factory when `-isolated-runtime-config` is explicitly
 present. It rejects any attempt to combine that mode with the development mock,
 the HTTP runtime configuration, or HTTP model-trust configuration. Configuration
 text cannot select a different factory or expand the compiled-in authority. The
-schema is illustrated in
-`docs/isolated-runtime-config.example.json`.
+CPU and GPU schemas are illustrated in
+`docs/isolated-runtime-config.example.json` and
+`docs/isolated-gpu-runtime-config.example.json`.
 
 The factory result is always wrapped in `executor.SupervisedBackend` with the
 explicit startup-only `backend.maxActive` limit (hard maximum 256). Admission,
@@ -544,8 +545,12 @@ the already domain-separated execution digest; raw task or payload data never
 becomes an object name. Startup rejects matching container/snapshot or FIFO
 residue rather than deleting uncertain state. The driver accepts only
 one preloaded digest-qualified image reference whose returned target digest is
-rechecked without listing tags, and CPU-only
-`network=none` requests. Its OCI override enforces non-root UID/GID, read-only
+rechecked without listing tags, and `network=none` requests. CPU execution has
+no device assignment. GPU execution additionally requires an administrator-
+fixed alias-to-qualified-CDI map, positive immutable GPU count and VRAM
+admission, and an exclusive process-local alias lease. Only that map is
+translated into OCI CDI injection; callers cannot submit aliases, CDI names,
+UUIDs, or device paths. Its OCI override enforces non-root UID/GID, read-only
 root, no-new-privileges, empty capability sets, a non-empty default seccomp
 allowlist, a private network namespace, CPU CFS, RAM, PID and bounded
 non-executable tmpfs mounts. Stdout and stderr
@@ -713,13 +718,15 @@ Implemented locally but requiring deployment integration or external evidence:
 - a privacy-minimized signed benchmark evidence issuer with deterministic MOCK
   execution/failure injection; only measurements from a real reviewed runtime
   and provisioned issuer may be advertised
-- a process-local exclusive sorted GPU-alias lease client that rejects overlap,
-  cancellation-late success and releases synchronously after backend failure
-  or panic; the target NVIDIA backend must still prove that each alias maps to
-  the exact isolated OCI device set and the deployment prevents a second
-  independent worker from bypassing that lease
-- privileged certification for the CPU-only containerd driver;
-  later reviewed GPU and network policy backends
+- a process-local exclusive sorted GPU-alias lease client bound to the
+  containerd CDI injector; it rejects overlap and cancellation-late success and
+  releases synchronously after backend failure or panic. A real containerd/runc
+  MOCK-CDI test proves exact OCI injection and cleanup. Target NVIDIA
+  certification must still prove the configured CDI identity exposes exactly
+  one intended device and deployment ownership prevents a second worker from
+  bypassing the lease
+- privileged certification for the containerd driver on each target kernel,
+  runtime and NVIDIA stack; later reviewed network-policy backends
 - external benchmark issuer trust and target-hardware measurements
 - public ARD publication, relay, and physical-terminal certification
 - dynamic admission resizing or cross-process host coordination

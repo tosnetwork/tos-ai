@@ -105,6 +105,25 @@ func validIsolatedConfig() string {
 }`
 }
 
+func validGPUIsolatedConfig() string {
+	value := validIsolatedConfig()
+	value = strings.Replace(
+		value,
+		`"maxActive":8}`,
+		`"maxActive":8,"gpuDevices":[{"alias":"gpu-a","cdiDevice":"nvidia.com/gpu=0"}]}`,
+		1,
+	)
+	value = strings.Replace(
+		value, `"ramBytes":1048576,`,
+		`"ramBytes":1048576,"vramBytes":1073741824,`, 1,
+	)
+	value = strings.Replace(
+		value, `"network":"none","cpuMillis":2000`,
+		`"network":"none","allowGpu":true,"cpuMillis":2000`, 1,
+	)
+	return strings.Replace(value, `"pids":32`, `"pids":32,"gpuDevices":1`, 1)
+}
+
 func writeIsolatedConfig(t *testing.T, data string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "isolated.json")
@@ -174,6 +193,48 @@ func TestLoadIsolatedRuntimeBindsFixedPolicy(t *testing.T) {
 	}
 }
 
+func TestLoadGPUIsolatedRuntimeBindsFixedOperatorCDIDevice(t *testing.T) {
+	backend := &testIsolatedBackend{result: executor.Result{
+		Output: []byte("gpu-result"),
+		Usage: executor.Usage{
+			CPUMillis: 10, PeakMemory: 100, Duration: time.Millisecond,
+		},
+	}}
+	factory := &testIsolatedFactory{backend: backend}
+	loaded, err := LoadIsolatedRuntime(
+		context.Background(),
+		writeIsolatedConfig(t, validGPUIsolatedConfig()), factory,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.Close()
+	if !factory.config.PermitGPU || factory.config.Limits.GPUDeviceCount != 1 ||
+		factory.config.GPUDevices["gpu-a"] != "nvidia.com/gpu=0" {
+		t.Fatalf("GPU backend config=%#v", factory.config)
+	}
+	capability := loaded.Adapter.Capability()
+	if capability.Admission.VRAMBytes != 1<<30 {
+		t.Fatalf("GPU capability=%#v", capability)
+	}
+	response, err := loaded.Adapter.Execute(
+		context.Background(), airuntime.Request{
+			RequestID: "gpu-request", Operation: capability.Operation,
+			Model: capability.Model, Payload: []byte("input"),
+			MaxOutputBytes: 1024,
+		},
+	)
+	if err != nil || string(response.Output) != "gpu-result" {
+		t.Fatalf("GPU execute response=%#v err=%v", response, err)
+	}
+	backend.mutex.Lock()
+	request := backend.request
+	backend.mutex.Unlock()
+	if !request.AllowGPU || request.Limits.GPUDeviceCount != 1 {
+		t.Fatalf("GPU request=%#v", request)
+	}
+}
+
 func TestLoadIsolatedRuntimeRejectsAuthorityExpansion(t *testing.T) {
 	valid := validIsolatedConfig()
 	tests := map[string]string{
@@ -195,6 +256,24 @@ func TestLoadIsolatedRuntimeRejectsAuthorityExpansion(t *testing.T) {
 		"excessive ram":         strings.Replace(valid, `"ramBytes":1048576`, `"ramBytes":1099511627777`, 1),
 		"host mount field":      strings.Replace(valid, `"network":"none"`, `"network":"none","hostMounts":[{"source":"/","target":"/host"}]`, 1),
 	}
+	gpu := validGPUIsolatedConfig()
+	tests["duplicate gpu alias"] = strings.Replace(
+		gpu, `{"alias":"gpu-a","cdiDevice":"nvidia.com/gpu=0"}`,
+		`{"alias":"gpu-a","cdiDevice":"nvidia.com/gpu=0"},{"alias":"gpu-a","cdiDevice":"nvidia.com/gpu=1"}`, 1,
+	)
+	tests["duplicate cdi device"] = strings.Replace(
+		gpu, `{"alias":"gpu-a","cdiDevice":"nvidia.com/gpu=0"}`,
+		`{"alias":"gpu-a","cdiDevice":"nvidia.com/gpu=0"},{"alias":"gpu-b","cdiDevice":"nvidia.com/gpu=0"}`, 1,
+	)
+	tests["request exceeds gpu pool"] = strings.Replace(
+		gpu, `"pids":32,"gpuDevices":1`, `"pids":32,"gpuDevices":2`, 1,
+	)
+	tests["unsafe cdi identifier"] = strings.Replace(
+		gpu, `nvidia.com/gpu=0`, `../../dev/nvidia0`, 1,
+	)
+	tests["aggregate cdi selector"] = strings.Replace(
+		gpu, `nvidia.com/gpu=0`, `nvidia.com/gpu=all`, 1,
+	)
 	for name, data := range tests {
 		t.Run(name, func(t *testing.T) {
 			factory := &testIsolatedFactory{backend: &testIsolatedBackend{}}

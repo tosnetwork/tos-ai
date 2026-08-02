@@ -101,8 +101,9 @@ The Go 1.24 module currently contains:
   requests and inputs, supplies the task deadline, preserves cancellation,
   contains backend panics/errors, requires an exact operator-owned network
   destination allowlist, and rejects oversized or invalid results. A bounded
-  CPU-only containerd driver exists, but no containerd backend is enabled by
-  default;
+  containerd driver supports bounded CPU execution and operator-fixed NVIDIA
+  CDI device injection behind an exclusive alias lease; no containerd backend
+  is enabled by default and callers cannot select a CDI identifier;
 - Ed25519-signed update manifest verification, SHA-256 artifact verification,
   expiry checks, target binding, and security-revision anti-rollback.
 
@@ -219,8 +220,12 @@ JSON cannot instantiate a backend by itself: the worker binary must inject an
 audited `IsolatedBackendFactory`. `ContainerdBackendFactory` now opens a real
 containerd 2.x SDK client only through an owner-private mode-0600 Unix socket,
 an exclusive private namespace/FIFO ownership lock, fixed `overlayfs`, and
-`io.containerd.runc.v2`. Its v0.1 execution subset is deliberately CPU-only,
-`network=none`, digest-qualified-reference and preloaded-image-only. The exact
+`io.containerd.runc.v2`. Its v0.1 execution subset is deliberately
+`network=none`, digest-qualified-reference and preloaded-image-only. It accepts
+either CPU-only execution or an operator-fixed alias-to-CDI device map; remote
+requests can state only the immutable capability's device count and cannot
+provide an alias, CDI name, GPU UUID or runtime selector. An exclusive lease
+prevents two process-local executions from sharing one configured alias. The exact
 reference is loaded as one object and its target digest is rechecked, avoiding
 an unbounded image-list operation. It constructs a
 read-only, non-root, no-new-privileges OCI process with no capabilities,
@@ -232,13 +237,15 @@ current and peak usage, and block-device write bytes are summed with overflow
 and device-count checks. Unknown, cgroup v1, missing, or malformed metrics fail
 closed instead of becoming zero usage. Startup fails closed on
 managed container, snapshot or FIFO residue. The worker binary compiles in
-this one CPU-only factory and opens it only when the operator explicitly sets
+this one fixed-policy factory and opens it only when the operator explicitly sets
 `-isolated-runtime-config`. That flag is mutually exclusive with `-dev-mock`,
 `-runtime-config`, and `-model-trust-config`; startup opens and validates the
 private daemon before the Worker socket begins serving. This is an integration
 path for certification and controlled deployments, not a claim that the
 privileged isolation launch gate has passed. See
-[docs/isolated-runtime-config.example.json](docs/isolated-runtime-config.example.json).
+[docs/isolated-runtime-config.example.json](docs/isolated-runtime-config.example.json)
+and
+[docs/isolated-gpu-runtime-config.example.json](docs/isolated-gpu-runtime-config.example.json).
 An isolated backend must also provide a bounded, cancellation-aware readiness
 probe. Every Worker preflight calls it before advertising the configured
 binding; backend errors and panics become a stable unavailable result and

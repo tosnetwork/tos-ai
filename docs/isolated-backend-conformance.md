@@ -1,8 +1,10 @@
 # Isolated backend conformance
 
-Status: reusable black-box lifecycle harness and CPU-only SDK driver candidate
-implemented with explicit production-binary composition; no privileged
-isolation certification is claimed.
+Status: reusable black-box lifecycle harness plus fixed-policy CPU and GPU-CDI
+SDK driver candidate implemented with explicit production-binary composition.
+The full lifecycle and MOCK-CDI device path have passed against real local
+containerd/runc; no target NVIDIA or privileged isolation certification is
+claimed.
 
 `pkg/executor/backendtest` gives every future isolated-execution backend one
 common minimum lifecycle test. A backend test supplies a `Factory`, an
@@ -98,9 +100,11 @@ configuration, bounded-output and generated-OCI-spec tests with a fake engine.
 Those tests verify fixed-capacity cancellation/close behavior, panic
 containment, digest-only identity, private socket/FIFO validation, capability
 removal, non-root/read-only/no-new-privileges policy, non-empty default seccomp
-generation, private networking and resource fields. They do not prove that the
-host runtime enforces seccomp and do not replace the private-daemon privileged
-suite above.
+generation, private networking, resource fields, exact operator alias-to-CDI
+translation, duplicate rejection and exclusive device release. A CDI-library
+test loads an isolated temporary specification and verifies its environment
+and device edits. These tests do not prove that the host runtime enforces
+seccomp and do not replace the private-daemon privileged suite above.
 
 The SDK driver accepts only cgroup v2 task metrics. CPU and memory records are
 mandatory; IO records have a 4,096-device ceiling and checked write-byte
@@ -151,3 +155,55 @@ go test -race -count=1 \
 This closes the live lifecycle gate only. Independent privileged tests must
 still verify namespace/cgroup/seccomp/LSM enforcement and adversarial resource
 limits from outside the workload.
+
+## GPU CDI execution and certification
+
+GPU configuration is local operator authority, not task authority. Each
+`backend.gpuDevices` entry binds a privacy-safe alias to one qualified CDI
+device name. The immutable container policy fixes the required device count;
+the Worker request contains neither alias nor CDI identity. The production
+factory sorts the configured aliases, acquires an exclusive in-process lease,
+translates only the leased aliases through the fixed map, refreshes the
+operator-selected CDI registry without a background watcher, and injects the
+result after the base isolation specification. Unknown aliases, duplicate
+physical CDI names, capacity exhaustion, missing CDI specifications and
+inconsistent GPU/VRAM policy fail closed.
+
+`TestContainerdBackendLiveMockCDIConformance` exercises this path through real
+containerd/runc with an isolated test CDI specification. The fixture adds one
+environment marker and one harmless character device, then verifies the
+workload sees both and that the lease is synchronously released. Set the five
+base live-suite variables plus:
+
+```text
+TOS_AI_CONTAINERD_TEST_CDI_SPEC_DIR
+```
+
+The current host passed this test and the complete lifecycle suite on
+2026-08-02 using an owner-private proxy socket and an isolated containerd
+namespace. No managed container, task or snapshot remained. This is real OCI
+device-injection and cleanup evidence, but the injected device is deliberately
+a MOCK fixture; it is not NVIDIA performance or hardware-isolation evidence.
+
+Target NVIDIA certification uses the same production path and the exact test
+`TestContainerdBackendLiveNVIDIAConformance`. It additionally requires one
+operator-selected qualified NVIDIA CDI device:
+
+```text
+TOS_AI_CONTAINERD_TEST_NVIDIA_CDI_DEVICE=nvidia.com/gpu=0
+```
+
+The digest-pinned certification image must contain `/bin/sh` and `nvidia-smi`
+and the CDI device must expose exactly one GPU inside the container. Run:
+
+```sh
+make nvidia-certification
+```
+
+The script fails before testing when any environment value, `nvidia-smi`, or a
+host-visible GPU is missing. A pass proves that this image and configured CDI
+identity expose exactly one device and that execution/lease cleanup succeeds;
+it does not by itself certify thermals, sustained inference, cross-process
+ownership, kernel isolation, or physical power-loss recovery. The CPU-only
+example remains `isolated-runtime-config.example.json`; the explicit GPU form
+is `isolated-gpu-runtime-config.example.json`.

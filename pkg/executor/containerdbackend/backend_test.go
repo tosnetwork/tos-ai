@@ -31,6 +31,7 @@ type fakeEngine struct {
 	lastID       string
 	lastRequest  executor.ContainerRequest
 	lastInput    []byte
+	lastDevices  []string
 	active       int
 	maximumAlive int
 }
@@ -62,6 +63,7 @@ func (e *fakeEngine) Run(
 	id string,
 	request executor.ContainerRequest,
 	input []byte,
+	devices []string,
 ) (executor.Result, error) {
 	if e.panicRun {
 		panic("runtime detail")
@@ -70,6 +72,7 @@ func (e *fakeEngine) Run(
 	e.lastID = id
 	e.lastRequest = request
 	e.lastInput = input
+	e.lastDevices = append([]string(nil), devices...)
 	e.active++
 	if e.active > e.maximumAlive {
 		e.maximumAlive = e.active
@@ -147,6 +150,49 @@ func TestBackendUsesDigestOnlyAndDefensiveCopies(t *testing.T) {
 		engine.lastRequest.Environment["MODEL"] != "fixed" ||
 		string(engine.lastInput) != "input" {
 		t.Fatal("runtime received mutable or externally correlated state")
+	}
+}
+
+func TestBackendMapsOnlyFixedGPUAliasesToCDIDevices(t *testing.T) {
+	engine := newFakeEngine()
+	devices := map[string]string{
+		"gpu-a": "nvidia.com/gpu=0",
+		"gpu-b": "nvidia.com/gpu=1",
+	}
+	backend, err := newBackendWithDevices(
+		context.Background(), engine, nil, 2, devices,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	devices["gpu-a"] = "attacker.example/gpu=changed"
+	request := validRequest(t, "gpu-task")
+	request.AllowGPU = true
+	request.Limits.GPUDeviceCount = 1
+	if _, err := backend.RunIsolatedOnDevices(
+		context.Background(), request, nil, []string{"gpu-a"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	engine.mutex.Lock()
+	received := append([]string(nil), engine.lastDevices...)
+	engine.mutex.Unlock()
+	if len(received) != 1 || received[0] != "nvidia.com/gpu=0" {
+		t.Fatalf("CDI assignment=%v", received)
+	}
+	for _, aliases := range [][]string{
+		{"missing"}, {"gpu-a", "gpu-a"}, nil,
+	} {
+		if _, err := backend.RunIsolatedOnDevices(
+			context.Background(), request, nil, aliases,
+		); err == nil {
+			t.Fatalf("unsafe GPU aliases accepted: %v", aliases)
+		}
+	}
+	if _, err := backend.RunIsolated(
+		context.Background(), request, nil,
+	); err == nil {
+		t.Fatal("GPU request without assigned devices accepted")
 	}
 }
 
@@ -289,9 +335,30 @@ func TestRequestRejectsNetworkGPUAndUnsafeBounds(t *testing.T) {
 		}(),
 	}
 	for _, request := range cases {
-		if err := validateRequest(request, nil); err == nil {
+		if err := validateRequest(request, nil, 0); err == nil {
 			t.Fatal("unsafe container request was accepted")
 		}
+	}
+}
+
+func TestGPUDeviceMapRejectsAmbiguousOrUnsafeBindings(t *testing.T) {
+	valid := map[string]string{"gpu-a": "nvidia.com/gpu=0"}
+	if err := validateGPUDeviceMap(valid, true, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, devices := range []map[string]string{
+		nil,
+		{"GPU-A": "nvidia.com/gpu=0"},
+		{"gpu-a": "not-qualified"},
+		{"gpu-a": "nvidia.com/gpu=all"},
+		{"gpu-a": "nvidia.com/gpu=0", "gpu-b": "nvidia.com/gpu=0"},
+	} {
+		if err := validateGPUDeviceMap(devices, true, 1); err == nil {
+			t.Fatalf("unsafe GPU map accepted: %#v", devices)
+		}
+	}
+	if err := validateGPUDeviceMap(valid, false, 0); err == nil {
+		t.Fatal("GPU map accepted without permission")
 	}
 }
 

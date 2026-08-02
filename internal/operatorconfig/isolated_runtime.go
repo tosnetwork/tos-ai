@@ -16,6 +16,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/admission"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 	airuntime "github.com/tosnetwork/tos-ai/pkg/runtime"
+	"tags.cncf.io/container-device-interface/pkg/parser"
 )
 
 const (
@@ -50,6 +51,7 @@ type IsolatedBackendConfig struct {
 	Limits         executor.Limits
 	ImageReference string
 	ImageDigest    string
+	GPUDevices     map[string]string
 }
 
 // IsolatedBackend is the narrow lifecycle owned by a future audited backend.
@@ -92,13 +94,19 @@ type isolatedRuntimeFile struct {
 }
 
 type isolatedBackendFile struct {
-	Type        string `json:"type"`
-	SocketPath  string `json:"socketPath"`
-	Namespace   string `json:"namespace"`
-	Snapshotter string `json:"snapshotter"`
-	Runtime     string `json:"runtime"`
-	FIFODir     string `json:"fifoDir"`
-	MaxActive   int    `json:"maxActive"`
+	Type        string                  `json:"type"`
+	SocketPath  string                  `json:"socketPath"`
+	Namespace   string                  `json:"namespace"`
+	Snapshotter string                  `json:"snapshotter"`
+	Runtime     string                  `json:"runtime"`
+	FIFODir     string                  `json:"fifoDir"`
+	MaxActive   int                     `json:"maxActive"`
+	GPUDevices  []isolatedGPUDeviceFile `json:"gpuDevices,omitempty"`
+}
+
+type isolatedGPUDeviceFile struct {
+	Alias     string `json:"alias"`
+	CDIDevice string `json:"cdiDevice"`
 }
 
 type isolatedCapabilityFile struct {
@@ -236,9 +244,12 @@ func buildIsolatedConfiguration(file isolatedRuntimeFile) (
 		len(file.Container.Environment) > MaxIsolatedEnvironment ||
 		len(file.Container.AllowedHosts) > MaxIsolatedHosts ||
 		(file.Capability.Admission.VRAMBytes > 0 &&
-			(!file.Container.AllowGPU || file.Container.GPUDevices == 0)) ||
+			(!file.Container.AllowGPU || file.Container.GPUDevices == 0 ||
+				len(file.Backend.GPUDevices) == 0 ||
+				file.Container.GPUDevices > uint32(len(file.Backend.GPUDevices)))) ||
 		(file.Capability.Admission.VRAMBytes == 0 &&
-			(file.Container.AllowGPU || file.Container.GPUDevices != 0)) {
+			(file.Container.AllowGPU || file.Container.GPUDevices != 0 ||
+				len(file.Backend.GPUDevices) != 0)) {
 		return IsolatedBackendConfig{}, airuntime.Capability{}, executor.Spec{}, executor.Policy{},
 			errors.New("isolated runtime configuration exceeds hard limits")
 	}
@@ -294,6 +305,10 @@ func buildIsolatedConfiguration(file isolatedRuntimeFile) (
 		return IsolatedBackendConfig{}, airuntime.Capability{}, executor.Spec{}, executor.Policy{},
 			errors.New("invalid isolated runtime container policy")
 	}
+	gpuDevices, err := validateGPUDeviceBindings(file.Backend.GPUDevices)
+	if err != nil {
+		return IsolatedBackendConfig{}, airuntime.Capability{}, executor.Spec{}, executor.Policy{}, err
+	}
 	return IsolatedBackendConfig{
 		Type: file.Backend.Type, SocketPath: file.Backend.SocketPath,
 		Namespace: file.Backend.Namespace, Snapshotter: file.Backend.Snapshotter,
@@ -301,8 +316,52 @@ func buildIsolatedConfiguration(file isolatedRuntimeFile) (
 		MaxActive: file.Backend.MaxActive, PermitGPU: file.Container.AllowGPU,
 		PermitNetwork: file.Container.Network != executor.NetworkNone,
 		Limits:        limits, ImageReference: file.Container.ImageReference,
-		ImageDigest: file.Container.ImageDigest,
+		ImageDigest: file.Container.ImageDigest, GPUDevices: gpuDevices,
 	}, capability, spec, policy, nil
+}
+
+func validateGPUDeviceBindings(
+	bindings []isolatedGPUDeviceFile,
+) (map[string]string, error) {
+	if len(bindings) > 64 {
+		return nil, errors.New("too many GPU device bindings")
+	}
+	if len(bindings) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(bindings))
+	devices := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if !validGPUAlias(binding.Alias) {
+			return nil, errors.New("invalid GPU device alias")
+		}
+		_, _, deviceName, err := parser.ParseQualifiedName(binding.CDIDevice)
+		if err != nil || strings.EqualFold(deviceName, "all") {
+			return nil, errors.New("invalid CDI device identifier")
+		}
+		if _, duplicate := result[binding.Alias]; duplicate {
+			return nil, errors.New("duplicate GPU device alias")
+		}
+		if _, duplicate := devices[binding.CDIDevice]; duplicate {
+			return nil, errors.New("duplicate CDI device identifier")
+		}
+		result[binding.Alias] = binding.CDIDevice
+		devices[binding.CDIDevice] = struct{}{}
+	}
+	return result, nil
+}
+
+func validGPUAlias(value string) bool {
+	if len(value) < 3 || len(value) > 64 || strings.Contains(value, "..") {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') &&
+			!(character >= '0' && character <= '9') && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

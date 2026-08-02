@@ -37,7 +37,8 @@ consumer execution, a public shell, validator work, or token issuance.
   residue cleanup, and optional Ollama GGUF activation.
 - Container isolation contract, immutable policy adapter, fixed task identity,
   duplicate-safe workload supervisor, reusable lifecycle conformance harness,
-  and an opt-in CPU-only preloaded-image containerd driver with `network=none`.
+  and an opt-in preloaded-image containerd driver with `network=none`, bounded
+  CPU execution and operator-fixed NVIDIA CDI device injection.
 - Immutable `tos.ai.text-generation` v0.1 mapper with canonical intent bytes,
   fixed vectors, exact service/model routing, and no request-selected runtime
   endpoint or resource policy.
@@ -74,10 +75,12 @@ consumer execution, a public shell, validator work, or token issuance.
 - Terminal-bound signed administrator activation/confirmation/rollback
   commands with durable exact replay, conflict and uncertain-outcome handling,
   exclusive bounded storage, and a privacy-minimized bounded history view.
-- The CPU-only containerd lifecycle conformance suite has run successfully on
-  this host against real containerd/runc, including success, cancellation,
-  duplicate identity, concurrency, and synchronous object cleanup. This is
-  local runtime evidence, not target-kernel or NVIDIA certification.
+- The containerd lifecycle conformance suite has run successfully on this host
+  against real containerd/runc, including success, cancellation, duplicate
+  identity, concurrency, and synchronous object cleanup. A separate real
+  containerd/runc MOCK-CDI run proves exact OCI device injection and lease
+  release. This is local runtime evidence, not target-kernel or NVIDIA
+  certification.
 - WorkerStreamService v0.2 result streaming over the private Unix socket, with
   durable execute-once semantics, bounded chunks, backpressure, exact retained
   resume and cross-repository client validation.
@@ -100,10 +103,11 @@ consumer execution, a public shell, validator work, or token issuance.
   release, policy and availability controllers; it never accepts paths, URLs,
   unit names, shell text or runtime endpoints. MOCK failures and panics fail
   closed.
-- An exclusive GPU alias lease layer for reviewed container backends, with
-  capacity rejection and synchronous release after success, error,
-  cancellation or panic. MOCK concurrency proves that one device is never
-  shared; actual NVIDIA OCI injection remains a target certification item.
+- An exclusive GPU alias lease layer bound to the production containerd CDI
+  injector, with operator-fixed alias mapping, capacity rejection and
+  synchronous release after success, error, cancellation or panic. MOCK
+  concurrency and real containerd/runc MOCK-CDI execution prove exact mapping,
+  injection and cleanup; physical NVIDIA execution remains target evidence.
 - Privacy-minimized signed benchmark evidence with deterministic MOCK runner
   fault injection, plus a bounded authenticated fleet metrics collector that
   retains only bearer-token digests and one fixed-size snapshot per configured
@@ -152,10 +156,10 @@ work is target-deployment evidence and operator policy:
    command, fixed-action, systemd, retry/replay and MOCK failure boundaries are
    complete; unit privileges and atomic policy reload semantics are
    installation policy.
-2. Bind the exclusive GPU lease client to the selected NVIDIA OCI backend and
-   certify exact device injection and cleanup on supported hardware. The local
-   concurrency/capacity/panic contract is complete and exposes no raw device
-   selector to callers.
+2. Run `make nvidia-certification` on each supported target image and record
+   the exact kernel/containerd/runc/driver/CDI matrix. The production lease-to-
+   CDI path and real-containerd MOCK device injection are complete; performance,
+   thermals and physical device isolation require the selected hardware.
 3. Add vendor-specific artifact activation only when that runtime exposes a
    reviewed atomic activation/rollback API. Fixed vLLM, llama.cpp and LocalAI
    execution identities are complete; no arbitrary Internet model pull is
@@ -190,7 +194,7 @@ This ROADMAP intentionally does not duplicate that ledger.
 | A0: private terminal foundation | Worker, admission, persistence, runtime adapters, model trust, text profile, isolation foundation, protocol compatibility and race tests | Completed |
 | A1: public non-streaming composition | `tos-ai-edge` completes the local discovery-to-receipt flow with complete fail-closed dependencies | Completed |
 | A2: Tier 1 production candidate | Packaging plus required chain, key, isolation, model, memory, and network evidence | In Progress |
-| A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Streaming and GPU lease MOCK gates complete; NVIDIA OCI certification remains |
+| A3: extended runtimes and streaming | Reviewed GPU/runtime backends and versioned streaming compatibility | Streaming plus production GPU CDI path complete locally; physical NVIDIA certification remains |
 | A4: physical terminal and fleet | Offline, real-time, update, device-safety, reconnect, and fleet acceptance | Fleet-control local gates complete; physical certification remains |
 
 ## Maintenance

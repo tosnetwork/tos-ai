@@ -36,6 +36,8 @@ const (
 	ownershipLockName       = ".containerd-backend.lock"
 )
 
+var defaultCDISpecDirs = []string{"/etc/cdi", "/var/run/cdi"}
+
 var runtimeIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,75}$`)
 
 type Config struct {
@@ -49,6 +51,8 @@ type Config struct {
 	CleanupTimeout   time.Duration
 	PermitGPU        bool
 	PermitNetwork    bool
+	GPUDevices       map[string]string
+	CDISpecDirs      []string
 	PolicyLimits     executor.Limits
 	ImageReference   string
 	ImageDigest      string
@@ -57,7 +61,7 @@ type Config struct {
 type engine interface {
 	CheckReady(context.Context) error
 	CheckResidue(context.Context) error
-	Run(context.Context, string, executor.ContainerRequest, []byte) (executor.Result, error)
+	Run(context.Context, string, executor.ContainerRequest, []byte, []string) (executor.Result, error)
 	Close() error
 }
 
@@ -68,9 +72,10 @@ type activeRun struct {
 // Backend is a bounded lifecycle boundary around one private containerd
 // namespace. It owns no queue and starts no goroutine of its own.
 type Backend struct {
-	engine    engine
-	ownership *dirlock.Lock
-	maximum   int
+	engine     engine
+	ownership  *dirlock.Lock
+	maximum    int
+	gpuDevices map[string]string
 
 	mutex     sync.Mutex
 	active    map[string]activeRun
@@ -111,7 +116,9 @@ func Open(ctx context.Context, config Config) (*Backend, error) {
 		_ = ownership.Close()
 		return nil, errors.New("open containerd backend")
 	}
-	backend, err := newBackend(ctx, runtimeEngine, ownership, config.MaxActive)
+	backend, err := newBackendWithDevices(
+		ctx, runtimeEngine, ownership, config.MaxActive, config.GPUDevices,
+	)
 	if err != nil {
 		_ = runtimeEngine.Close()
 		_ = ownership.Close()
@@ -126,6 +133,16 @@ func newBackend(
 	ownership *dirlock.Lock,
 	maximum int,
 ) (*Backend, error) {
+	return newBackendWithDevices(ctx, runtimeEngine, ownership, maximum, nil)
+}
+
+func newBackendWithDevices(
+	ctx context.Context,
+	runtimeEngine engine,
+	ownership *dirlock.Lock,
+	maximum int,
+	devices map[string]string,
+) (*Backend, error) {
 	if ctx == nil || nilcheck.IsNil(runtimeEngine) || maximum <= 0 ||
 		maximum > executor.MaxSupervisedActiveHard {
 		return nil, errors.New("invalid containerd backend")
@@ -138,7 +155,8 @@ func newBackend(
 	}
 	return &Backend{
 		engine: runtimeEngine, ownership: ownership, maximum: maximum,
-		active: make(map[string]activeRun, maximum),
+		gpuDevices: cloneDeviceMap(devices),
+		active:     make(map[string]activeRun, maximum),
 	}, nil
 }
 
@@ -171,13 +189,53 @@ func (b *Backend) RunIsolated(
 	request executor.ContainerRequest,
 	input []byte,
 ) (executor.Result, error) {
+	return b.runIsolated(ctx, request, input, nil)
+}
+
+// RunIsolatedOnDevices is the narrow operator-alias to CDI boundary used by
+// gpuisolation. It accepts only aliases fixed when the backend was opened and
+// never treats a remote request value as a CDI identifier.
+func (b *Backend) RunIsolatedOnDevices(
+	ctx context.Context,
+	request executor.ContainerRequest,
+	input []byte,
+	aliases []string,
+) (executor.Result, error) {
+	if b == nil {
+		return executor.Result{}, errors.New("invalid containerd backend request")
+	}
+	if len(aliases) == 0 || len(aliases) != int(request.Limits.GPUDeviceCount) {
+		return executor.Result{}, errors.New("invalid GPU device assignment")
+	}
+	seen := make(map[string]struct{}, len(aliases))
+	devices := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		device, exists := b.gpuDevices[alias]
+		if !exists {
+			return executor.Result{}, errors.New("unknown GPU device alias")
+		}
+		if _, duplicate := seen[alias]; duplicate {
+			return executor.Result{}, errors.New("duplicate GPU device alias")
+		}
+		seen[alias] = struct{}{}
+		devices = append(devices, device)
+	}
+	return b.runIsolated(ctx, request, input, devices)
+}
+
+func (b *Backend) runIsolated(
+	ctx context.Context,
+	request executor.ContainerRequest,
+	input []byte,
+	devices []string,
+) (executor.Result, error) {
 	if b == nil || b.engine == nil || ctx == nil {
 		return executor.Result{}, errors.New("invalid containerd backend request")
 	}
 	if err := ctx.Err(); err != nil {
 		return executor.Result{}, err
 	}
-	if err := validateRequest(request, input); err != nil {
+	if err := validateRequest(request, input, len(devices)); err != nil {
 		return executor.Result{}, err
 	}
 	runContext, cancel := context.WithCancel(ctx)
@@ -211,6 +269,7 @@ func (b *Backend) RunIsolated(
 	result, err := callRun(
 		runContext, b.engine, runtimeID(request.ExecutionDigest),
 		cloneRequest(request), append([]byte(nil), input...),
+		append([]string(nil), devices...),
 	)
 	if contextErr := ctx.Err(); contextErr != nil {
 		return executor.Result{}, contextErr
@@ -259,6 +318,9 @@ func withConfigDefaults(config Config) Config {
 	if config.CleanupTimeout == 0 {
 		config.CleanupTimeout = DefaultCleanupTimeout
 	}
+	if len(config.CDISpecDirs) == 0 {
+		config.CDISpecDirs = append([]string(nil), defaultCDISpecDirs...)
+	}
 	return config
 }
 
@@ -275,17 +337,36 @@ func validateConfig(config Config) error {
 		config.CleanupTimeout <= 0 || config.CleanupTimeout > MaxCleanupTimeout {
 		return errors.New("invalid containerd backend configuration")
 	}
+	if len(config.CDISpecDirs) == 0 || len(config.CDISpecDirs) > 8 {
+		return errors.New("invalid CDI spec directories")
+	}
+	seenDirectories := make(map[string]struct{}, len(config.CDISpecDirs))
+	for _, directory := range config.CDISpecDirs {
+		if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+			return errors.New("invalid CDI spec directory")
+		}
+		if _, duplicate := seenDirectories[directory]; duplicate {
+			return errors.New("duplicate CDI spec directory")
+		}
+		seenDirectories[directory] = struct{}{}
+	}
 	if config.Snapshotter != "overlayfs" || config.Runtime != "io.containerd.runc.v2" {
 		return errors.New("unsupported containerd isolation backend")
 	}
-	if config.PermitGPU || config.PermitNetwork ||
-		validateDriverLimits(config.PolicyLimits) != nil ||
+	if config.PermitNetwork ||
+		validateDriverLimits(config.PolicyLimits, config.PermitGPU) != nil ||
 		executor.ValidateExecutionDigest(config.ImageDigest) != nil ||
 		len(config.ImageReference) == 0 ||
 		len(config.ImageReference) > MaxStringBytesHard ||
 		strings.IndexByte(config.ImageReference, 0) >= 0 ||
 		!strings.HasSuffix(config.ImageReference, "@"+config.ImageDigest) {
 		return errors.New("unsupported containerd isolation policy")
+	}
+	if err := validateGPUDeviceMap(
+		config.GPUDevices, config.PermitGPU,
+		config.PolicyLimits.GPUDeviceCount,
+	); err != nil {
+		return err
 	}
 	return nil
 }
@@ -356,6 +437,17 @@ func cloneRequest(request executor.ContainerRequest) executor.ContainerRequest {
 	return request
 }
 
+func cloneDeviceMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for alias, device := range values {
+		result[alias] = device
+	}
+	return result
+}
+
 func callReady(ctx context.Context, runtimeEngine engine) (err error) {
 	defer func() {
 		if recover() != nil {
@@ -380,6 +472,7 @@ func callRun(
 	id string,
 	request executor.ContainerRequest,
 	input []byte,
+	devices []string,
 ) (result executor.Result, err error) {
 	defer func() {
 		if recover() != nil {
@@ -387,7 +480,7 @@ func callRun(
 			err = errors.New("containerd execution panicked")
 		}
 	}()
-	return runtimeEngine.Run(ctx, id, request, input)
+	return runtimeEngine.Run(ctx, id, request, input, devices)
 }
 
 func callClose(runtimeEngine engine) (err error) {

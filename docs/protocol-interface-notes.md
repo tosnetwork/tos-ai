@@ -6,7 +6,7 @@ Deployment certification is tracked separately in
 the [canonical production-gate ledger](https://github.com/tosnetwork/tos-protocol/blob/main/docs/non-streaming-v0.1-production-gates.md);
 it is not implied by interface completion or unit-test coverage.
 
-The active immutable `tos-ai` pin is `tos-protocol` revision `3d54e29e70a1`.
+The active immutable `tos-ai` pin is `tos-protocol` revision `3599a47099f6`.
 It includes the earlier non-streaming baseline from `c1e33bc6208e` plus the
 separate WorkerStreamService v0.2 contract and bounded ARD federation. It
 includes the priority-aware task-store statistics, atomic owner-reserved slot
