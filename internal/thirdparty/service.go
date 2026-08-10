@@ -116,16 +116,23 @@ func NewService(bindings operatorconfig.ThirdPartyBindings, completionStorePath 
 // yet. Called for every terminal (completed/failed) outcome from Invoke
 // and Query alike, so a later Query recovering the same request_id --
 // even after a tos-ai worker restart -- returns the identical millisecond
-// value Invoke (or an earlier Query) already did. A store error falls
-// back to the freshly observed value rather than failing the whole
-// RPC -- this is best-effort stabilization, not the primary source of
-// truth for the outcome itself.
-func (s *Service) stabilizeCompletedAt(requestID string, observed, retainUntil int64) int64 {
+// value Invoke (or an earlier Query) already did. worker.proto's own
+// doc comment describes this as worker-owned DURABLE state, not
+// best-effort, so a store error (disk full, I/O failure, a bbolt
+// transaction failure) here MUST fail the whole RPC rather than silently
+// returning the freshly observed value as if it had been durably
+// recorded -- returning success on a durability failure would let a
+// signed Receipt's completed_unix_millis rest on a timestamp this worker
+// never actually persisted, defeating the entire reason this store
+// exists. The caller propagates this as CodeUnavailable, which routes
+// tos-protocol into its existing UNCERTAIN/Query-recovery path -- no
+// economic state machine changes needed on that side.
+func (s *Service) stabilizeCompletedAt(requestID string, observed, retainUntil int64) (int64, error) {
 	stabilized, err := s.completions.stabilize(requestID, observed, retainUntil)
 	if err != nil {
-		return observed
+		return 0, fmt.Errorf("thirdparty: durably record completion time: %w", err)
 	}
-	return stabilized
+	return stabilized, nil
 }
 
 // terminalThirdPartyStatus reports whether status is a final outcome worth
@@ -217,7 +224,11 @@ func (s *Service) Invoke(
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 	if resp != nil && terminalThirdPartyStatus(resp.Status) {
-		resp.CompletedUnixMillis = s.stabilizeCompletedAt(req.Msg.RequestId, resp.CompletedUnixMillis, req.Msg.RetainUntilUnixMillis)
+		completedAt, stabilizeErr := s.stabilizeCompletedAt(req.Msg.RequestId, resp.CompletedUnixMillis, req.Msg.RetainUntilUnixMillis)
+		if stabilizeErr != nil {
+			return nil, connect.NewError(connect.CodeUnavailable, stabilizeErr)
+		}
+		resp.CompletedUnixMillis = completedAt
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -249,7 +260,11 @@ func (s *Service) Query(
 		// defaultQueryObservedRetention still bounds the record instead of
 		// retaining it forever.
 		retainUntil := time.Now().Add(defaultQueryObservedRetention).UnixMilli()
-		resp.Result.CompletedUnixMillis = s.stabilizeCompletedAt(req.Msg.RequestId, resp.Result.CompletedUnixMillis, retainUntil)
+		completedAt, stabilizeErr := s.stabilizeCompletedAt(req.Msg.RequestId, resp.Result.CompletedUnixMillis, retainUntil)
+		if stabilizeErr != nil {
+			return nil, connect.NewError(connect.CodeUnavailable, stabilizeErr)
+		}
+		resp.Result.CompletedUnixMillis = completedAt
 	}
 	return connect.NewResponse(resp), nil
 }

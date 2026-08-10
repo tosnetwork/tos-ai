@@ -179,3 +179,51 @@ func TestService_CompletedUnixMillisSurvivesRestart(t *testing.T) {
 			invoke.Msg.CompletedUnixMillis, query.Msg.Result.CompletedUnixMillis)
 	}
 }
+
+// TestService_Invoke_FailsClosedWhenCompletionStoreWriteFails proves a
+// completion-store write failure (disk full, I/O error, a closed/broken
+// bbolt handle) makes Invoke fail the RPC (CodeUnavailable) instead of
+// silently returning the provider's terminal result as if
+// completed_unix_millis had actually been durably recorded --
+// worker.proto describes this timestamp as worker-owned DURABLE state,
+// not best-effort, and a caller returning success here would let a
+// signed Receipt rest on a timestamp this worker never persisted. The
+// underlying store is closed directly (this test lives in package
+// thirdparty) to force a real bbolt write error, not a simulated one.
+func TestService_Invoke_FailsClosedWhenCompletionStoreWriteFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"completed","output":{"ok":true}}`))
+	}))
+	defer srv.Close()
+
+	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
+		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_failclosed_1",
+		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+	}), testCompletionStorePath(t))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	// Close only the completion store's underlying bbolt handle (not the
+	// whole Service, which would also tear down the dialers) so the next
+	// stabilize call hits a real, not simulated, write failure.
+	if err := svc.completions.close(); err != nil {
+		t.Fatalf("close completion store: %v", err)
+	}
+
+	binding := &edgev1.ThirdPartyBindingRef{
+		Transport:   edgev1.ThirdPartyTransport_THIRD_PARTY_TRANSPORT_HTTP,
+		EndpointRef: srv.URL, CapabilityId: "cap_failclosed_1",
+	}
+	_, err = svc.Invoke(context.Background(), connect.NewRequest(&edgev1.ThirdPartyInvokeRequest{
+		RequestId: "req-failclosed-1", JobId: "job-failclosed-1", Binding: binding, Input: []byte(`{}`),
+		DeadlineUnixMillis:    time.Now().Add(time.Minute).UnixMilli(),
+		RetainUntilUnixMillis: time.Now().Add(time.Hour).UnixMilli(),
+	}))
+	if err == nil {
+		t.Fatal("expected Invoke to fail when the completion store cannot durably record completed_unix_millis, not silently succeed")
+	}
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("error code = %v, want Unavailable", connect.CodeOf(err))
+	}
+}
