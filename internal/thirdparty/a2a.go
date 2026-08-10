@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -64,6 +65,8 @@ type a2aTaskIDParams struct {
 type a2aBinding struct {
 	endpointRef string
 	client      *http.Client
+	maxRequest  uint64
+	maxResponse uint64
 }
 
 func newA2ABinding(b operatorconfig.ThirdPartyBinding) (*a2aBinding, error) {
@@ -75,7 +78,10 @@ func newA2ABinding(b operatorconfig.ThirdPartyBinding) (*a2aBinding, error) {
 	if err != nil {
 		return nil, fmt.Errorf("thirdparty: build A2A binding: %w", err)
 	}
-	return &a2aBinding{endpointRef: b.EndpointRef, client: client}, nil
+	return &a2aBinding{
+		endpointRef: b.EndpointRef, client: client,
+		maxRequest: b.MaxRequestBytes, maxResponse: b.MaxResponseBytes,
+	}, nil
 }
 
 func (a *a2aBinding) close() { a.client.CloseIdleConnections() }
@@ -84,6 +90,9 @@ func (a *a2aBinding) call(ctx context.Context, method string, params any) (mcpRP
 	body, err := json.Marshal(mcpRPCRequest{JSONRPC: jsonRPCVersion, ID: 1, Method: method, Params: params})
 	if err != nil {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: encode A2A request: %w", err)
+	}
+	if uint64(len(body)) > a.maxRequest {
+		return mcpRPCResponse{}, fmt.Errorf("thirdparty: A2A request exceeds %d byte limit", a.maxRequest)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpointRef, bytes.NewReader(body))
 	if err != nil {
@@ -98,8 +107,16 @@ func (a *a2aBinding) call(ctx context.Context, method string, params any) (mcpRP
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: non-2xx A2A response: %d", resp.StatusCode)
 	}
+	limited := io.LimitReader(resp.Body, int64(a.maxResponse)+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return mcpRPCResponse{}, fmt.Errorf("thirdparty: read A2A response: %w", err)
+	}
+	if uint64(len(raw)) > a.maxResponse {
+		return mcpRPCResponse{}, fmt.Errorf("thirdparty: A2A response exceeded %d byte limit", a.maxResponse)
+	}
 	var rpcResp mcpRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: malformed A2A JSON-RPC response: %w", err)
 	}
 	return rpcResp, nil

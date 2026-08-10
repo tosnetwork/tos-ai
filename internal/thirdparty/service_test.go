@@ -65,10 +65,14 @@ func testBindings(t *testing.T, entries ...operatorconfig.ThirdPartyBinding) ope
 		if i > 0 {
 			config += ","
 		}
-		encoded, err := json.Marshal(map[string]any{
+		fixture := map[string]any{
 			"transport": e.Transport, "endpointRef": e.EndpointRef, "capabilityId": e.CapabilityID,
 			"timeoutMillis": e.Timeout.Milliseconds(), "maxRequestBytes": e.MaxRequestBytes, "maxResponseBytes": e.MaxResponseBytes,
-		})
+		}
+		if e.CapabilityVersion != "" {
+			fixture["capabilityVersion"] = e.CapabilityVersion
+		}
+		encoded, err := json.Marshal(fixture)
 		if err != nil {
 			t.Fatalf("marshal binding fixture: %v", err)
 		}
@@ -134,5 +138,99 @@ func TestService_HTTPGoldenPath(t *testing.T) {
 	}
 	if string(invoke.Msg.Output) != `{"ok":true}` {
 		t.Fatalf("output = %s, want the provider's echoed output", invoke.Msg.Output)
+	}
+}
+
+// TestService_WildcardCapabilityVersionResolves proves an allowlist entry
+// with CapabilityVersion "*" actually dispatches for a request naming a
+// concrete version -- Allowed() approving the request must not be
+// undermined by a dialer-lookup key built from the request's own version
+// instead of the matched (wildcard) entry's.
+func TestService_WildcardCapabilityVersionResolves(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"completed","output":{"ok":true}}`))
+	}))
+	defer srv.Close()
+
+	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
+		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_wild_1", CapabilityVersion: "*",
+		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+	}))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	defer svc.Close()
+
+	binding := &edgev1.ThirdPartyBindingRef{
+		Transport:   edgev1.ThirdPartyTransport_THIRD_PARTY_TRANSPORT_HTTP,
+		EndpointRef: srv.URL, CapabilityId: "cap_wild_1", CapabilityVersion: "2.3.4",
+	}
+	invoke, err := svc.Invoke(context.Background(), connect.NewRequest(&edgev1.ThirdPartyInvokeRequest{
+		RequestId: "req-wild-1", JobId: "job-wild-1", Binding: binding, Input: []byte(`{}`),
+		DeadlineUnixMillis: time.Now().Add(time.Minute).UnixMilli(),
+	}))
+	if err != nil {
+		t.Fatalf("Invoke: %v (a wildcard-version allowlist entry must resolve a concrete-version request)", err)
+	}
+	if invoke.Msg.Status != edgev1.ThirdPartyInvokeStatus_THIRD_PARTY_INVOKE_STATUS_COMPLETED {
+		t.Fatalf("status = %s, want completed", invoke.Msg.Status)
+	}
+}
+
+// TestService_CompletedUnixMillisStableAcrossInvokeAndQuery proves
+// worker.proto's own documented contract for ThirdPartyInvokeResponse/
+// ThirdPartyQueryResponse.completed_unix_millis: Invoke and a later Query
+// recovering the same request_id must return the identical millisecond
+// value, never one freshly generated per RPC call.
+func TestService_CompletedUnixMillisStableAcrossInvokeAndQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"completed","output":{"ok":true}}`))
+	}))
+	defer srv.Close()
+
+	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
+		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_stable_1",
+		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+	}))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	defer svc.Close()
+
+	binding := &edgev1.ThirdPartyBindingRef{
+		Transport:   edgev1.ThirdPartyTransport_THIRD_PARTY_TRANSPORT_HTTP,
+		EndpointRef: srv.URL, CapabilityId: "cap_stable_1",
+	}
+	invoke, err := svc.Invoke(context.Background(), connect.NewRequest(&edgev1.ThirdPartyInvokeRequest{
+		RequestId: "req-stable-1", JobId: "job-stable-1", Binding: binding, Input: []byte(`{}`),
+		DeadlineUnixMillis: time.Now().Add(time.Minute).UnixMilli(),
+	}))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if invoke.Msg.CompletedUnixMillis == 0 {
+		t.Fatal("expected a non-zero completed_unix_millis from Invoke")
+	}
+
+	time.Sleep(5 * time.Millisecond) // force wall-clock drift if it isn't actually cached
+
+	query, err := svc.Query(context.Background(), connect.NewRequest(&edgev1.ThirdPartyQueryRequest{
+		RequestId: "req-stable-1", Binding: binding,
+	}))
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if !query.Msg.Found {
+		t.Fatal("expected Query to find the request Invoke just completed")
+	}
+	if query.Msg.Result.CompletedUnixMillis != invoke.Msg.CompletedUnixMillis {
+		t.Fatalf("completed_unix_millis drifted: Invoke=%d Query=%d, want identical per worker.proto's own contract",
+			invoke.Msg.CompletedUnixMillis, query.Msg.Result.CompletedUnixMillis)
 	}
 }

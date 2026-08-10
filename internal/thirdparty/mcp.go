@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -69,9 +70,11 @@ type mcpStructuredOutcome struct {
 
 // mcpBinding is one operator-approved MCP binding's built transport.
 type mcpBinding struct {
-	serverURL string
-	tool      string
-	client    *http.Client
+	serverURL   string
+	tool        string
+	client      *http.Client
+	maxRequest  uint64
+	maxResponse uint64
 }
 
 func newMCPBinding(b operatorconfig.ThirdPartyBinding) (*mcpBinding, error) {
@@ -90,7 +93,10 @@ func newMCPBinding(b operatorconfig.ThirdPartyBinding) (*mcpBinding, error) {
 	if err != nil {
 		return nil, fmt.Errorf("thirdparty: build MCP binding: %w", err)
 	}
-	return &mcpBinding{serverURL: serverURL, tool: tool, client: client}, nil
+	return &mcpBinding{
+		serverURL: serverURL, tool: tool, client: client,
+		maxRequest: b.MaxRequestBytes, maxResponse: b.MaxResponseBytes,
+	}, nil
 }
 
 func (m *mcpBinding) close() { m.client.CloseIdleConnections() }
@@ -112,6 +118,9 @@ func (m *mcpBinding) call(ctx context.Context, method string, params any) (mcpRP
 	if err != nil {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: encode MCP request: %w", err)
 	}
+	if uint64(len(body)) > m.maxRequest {
+		return mcpRPCResponse{}, fmt.Errorf("thirdparty: MCP request exceeds %d byte limit", m.maxRequest)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.serverURL, bytes.NewReader(body))
 	if err != nil {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: build MCP request: %w", err)
@@ -125,8 +134,16 @@ func (m *mcpBinding) call(ctx context.Context, method string, params any) (mcpRP
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: non-2xx MCP response: %d", resp.StatusCode)
 	}
+	limited := io.LimitReader(resp.Body, int64(m.maxResponse)+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return mcpRPCResponse{}, fmt.Errorf("thirdparty: read MCP response: %w", err)
+	}
+	if uint64(len(raw)) > m.maxResponse {
+		return mcpRPCResponse{}, fmt.Errorf("thirdparty: MCP response exceeded %d byte limit", m.maxResponse)
+	}
 	var rpcResp mcpRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
 		return mcpRPCResponse{}, fmt.Errorf("thirdparty: malformed MCP JSON-RPC response: %w", err)
 	}
 	if rpcResp.JSONRPC != jsonRPCVersion {
