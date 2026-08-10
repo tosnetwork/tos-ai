@@ -21,6 +21,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/tosnetwork/tos-ai/internal/operatorconfig"
 	"github.com/tosnetwork/tos-ai/internal/resourceguard"
+	"github.com/tosnetwork/tos-ai/internal/thirdparty"
 	"github.com/tosnetwork/tos-ai/internal/unixserver"
 	"github.com/tosnetwork/tos-ai/internal/worker"
 	"github.com/tosnetwork/tos-ai/pkg/adapters/mock"
@@ -74,6 +75,7 @@ func run() error {
 	var taskStoreOwnerReserved int
 	var taskStoreMaxRetainedBytes uint64
 	var internalResourceProbe bool
+	var thirdPartyBindingsConfigPath string
 	flag.StringVar(&socketPath, "socket", defaultSocket(), "private Unix socket")
 	flag.IntVar(&workers, "workers", defaultWorkers, "development concurrent runtime workers")
 	flag.IntVar(&maxQueue, "max-queue", defaultMaxQueue, "development maximum queued work items")
@@ -127,10 +129,35 @@ func run() error {
 		&internalResourceProbe, "internal-resource-probe", false,
 		"internal resource probe subprocess",
 	)
+	flag.StringVar(
+		&thirdPartyBindingsConfigPath, "third-party-bindings-config", "",
+		"private administrator allowlist of third-party HTTP/MCP/A2A provider bindings this worker may dial",
+	)
 	flag.Parse()
 	if internalResourceProbe {
 		return runInternalResourceProbe(flag.Args(), os.Stdout)
 	}
+	// Third-party bindings are loaded and the service built up front,
+	// independent of the model-serving runtime/task-store/resource-monitor
+	// chain below: neither depends on the other, and a worker with no
+	// third-party config simply serves an empty (fail-closed) allowlist.
+	var thirdPartyBindings operatorconfig.ThirdPartyBindings
+	if thirdPartyBindingsConfigPath != "" {
+		var err error
+		thirdPartyBindings, err = operatorconfig.LoadThirdPartyBindings(thirdPartyBindingsConfigPath)
+		if err != nil {
+			return fmt.Errorf("load third-party bindings configuration: %w", err)
+		}
+	}
+	thirdPartyCompletionsPath := filepath.Join(filepath.Dir(socketPath), "third-party-completions.db")
+	if err := unixserver.PreparePrivateFileTarget(thirdPartyCompletionsPath); err != nil {
+		return errors.New("prepare third-party completion store directory")
+	}
+	thirdPartyService, err := thirdparty.NewService(thirdPartyBindings, thirdPartyCompletionsPath)
+	if err != nil {
+		return fmt.Errorf("build third-party execution service: %w", err)
+	}
+	defer thirdPartyService.Close()
 	if taskStorePath == "" {
 		taskStorePath = filepath.Join(filepath.Dir(socketPath), "worker-tasks.db")
 	}
@@ -277,6 +304,13 @@ func run() error {
 		connect.WithInterceptors(operationalMetrics.Interceptor()),
 	)
 	mux.Handle(streamPath, streamHandler)
+	thirdPartyPath, thirdPartyHandler := edgev1connect.NewThirdPartyExecutionServiceHandler(
+		thirdPartyService,
+		connect.WithReadMaxBytes(2<<20),
+		connect.WithSendMaxBytes(2<<20),
+		connect.WithInterceptors(operationalMetrics.Interceptor()),
+	)
+	mux.Handle(thirdPartyPath, thirdPartyHandler)
 	mux.Handle(worker.MetricsPath, operationalMetrics.Handler(service))
 	server := &http.Server{
 		Handler:           mux,

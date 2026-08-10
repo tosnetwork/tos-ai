@@ -151,6 +151,14 @@ github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 h1:kdXcSzyDtse
 github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635/go.mod h1:hkRG7XYTFWNJGYcbNJQlaLq0fg1yr4J4t/NcTQtrfww=
 github.com/tosnetwork/tos-protocol v0.0.0-20260802095318-3599a47099f6 h1:GCyeRKAOIwnMZtpqLYvXxRpKC+ucXkuC9aaIYPaOfZw=
 github.com/tosnetwork/tos-protocol v0.0.0-20260802095318-3599a47099f6/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810023639-ef5fb21551e4 h1:6rHssvELAIN4KqHBqZwxtSitzaCP8K/AcJfBaQex7Wc=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810023639-ef5fb21551e4/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810034241-2086d7b4c18e h1:/j7aSEvk8KnPitFbRcOhVylXLWJDR+OhzZ2bndcbpK4=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810034241-2086d7b4c18e/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810042647-575d41dd1eb8 h1:QU9MtRtO9PzoeggfDIkAGgyuvu7Qsw+QnBiS/Wt7axc=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810042647-575d41dd1eb8/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810045335-cf64ae9a83d5 h1:63pToh3gpaurSiL1Li86povO4lUw/7Ox99lxjAvGTjI=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810045335-cf64ae9a83d5/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
 github.com/urfave/cli v1.19.1/go.mod h1:70zkFmudgCuE/ngEzBv17Jvp/497gISqfk5gWijbERA=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
