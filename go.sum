@@ -153,6 +153,8 @@ github.com/tosnetwork/tos-protocol v0.0.0-20260802095318-3599a47099f6 h1:GCyeRKA
 github.com/tosnetwork/tos-protocol v0.0.0-20260802095318-3599a47099f6/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
 github.com/tosnetwork/tos-protocol v0.0.0-20260810023639-ef5fb21551e4 h1:6rHssvELAIN4KqHBqZwxtSitzaCP8K/AcJfBaQex7Wc=
 github.com/tosnetwork/tos-protocol v0.0.0-20260810023639-ef5fb21551e4/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810034241-2086d7b4c18e h1:/j7aSEvk8KnPitFbRcOhVylXLWJDR+OhzZ2bndcbpK4=
+github.com/tosnetwork/tos-protocol v0.0.0-20260810034241-2086d7b4c18e/go.mod h1:9XcMRGbK87BU0HVazLv/cuZ5SvVAcKsyTMtAfcgaqYQ=
 github.com/urfave/cli v1.19.1/go.mod h1:70zkFmudgCuE/ngEzBv17Jvp/497gISqfk5gWijbERA=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
