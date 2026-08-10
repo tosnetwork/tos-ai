@@ -27,7 +27,7 @@ func TestService_MCPGoldenPath(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "mcp", EndpointRef: endpointRef, CapabilityID: "cap_mcp_1",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestService_MCPRejectsOversizedResponse(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "mcp", EndpointRef: endpointRef, CapabilityID: "cap_mcp_2",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 512,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

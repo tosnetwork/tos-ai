@@ -17,12 +17,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/tosnetwork/tos-ai/internal/operatorconfig"
 	edgev1 "github.com/tosnetwork/tos-protocol/gen/tos/edge/v1"
 )
+
+// defaultQueryObservedRetention bounds a completion record whose first
+// observation came from Query rather than Invoke (see the Query RPC's own
+// comment on why -- ThirdPartyQueryRequest carries no retain_until of its
+// own), mirroring the native path's DefaultWorkerMaxTaskRetention.
+const defaultQueryObservedRetention = 48 * time.Hour
 
 func transportName(t edgev1.ThirdPartyTransport) (string, error) {
 	switch t {
@@ -55,30 +61,27 @@ type Service struct {
 	bindings operatorconfig.ThirdPartyBindings
 	dialers  map[bindingKey]dialer
 
-	// completions caches the first observed completion time per
-	// request_id -- worker.proto's own doc comment requires Invoke and
-	// Query to return the SAME millisecond value for a given request so
-	// receipt replay is independent of RPC latency, but none of the
-	// http/mcp/a2a dialers own any durable per-request state to source
-	// that from (unlike the native model-serving path's WorkerTaskStore).
-	// This closes that gap for the common case (no tos-ai worker restart
-	// between the first observation and a later recovery Query); a lost
-	// in-memory entry after a restart still returns a legitimate
-	// completion time, just not necessarily byte-identical to what an
-	// earlier, now-forgotten observation returned.
-	completionsMu sync.Mutex
-	completions   map[string]int64
+	// completions durably records the first observed completion time per
+	// request_id, bounded by each record's own retain_until_unix_millis --
+	// worker.proto's own doc comment requires Invoke and Query to return
+	// the SAME millisecond value for a given request so receipt replay is
+	// independent of RPC latency, and unlike an in-memory-only cache this
+	// survives a tos-ai worker restart between the first observation and
+	// a later recovery Query. See completionStore's doc comment.
+	completions *completionStore
 }
 
 type bindingKey struct {
 	transport, endpointRef, capabilityID, capabilityVersion string
 }
 
-// NewService builds bound dialers for every approved binding. A binding
-// whose transport-specific construction fails (e.g. an invalid endpoint_ref
-// URL) fails the whole call -- an operator's allowlist is not something
-// this worker silently starts with entries missing from.
-func NewService(bindings operatorconfig.ThirdPartyBindings) (*Service, error) {
+// NewService builds bound dialers for every approved binding, and opens a
+// durable completion-time journal at completionStorePath (see
+// completionStore's doc comment). A binding whose transport-specific
+// construction fails (e.g. an invalid endpoint_ref URL) fails the whole
+// call -- an operator's allowlist is not something this worker silently
+// starts with entries missing from.
+func NewService(bindings operatorconfig.ThirdPartyBindings, completionStorePath string) (*Service, error) {
 	dialers := make(map[bindingKey]dialer, bindings.Len())
 	for _, entry := range bindings.Entries() {
 		var d dialer
@@ -100,22 +103,29 @@ func NewService(bindings operatorconfig.ThirdPartyBindings) (*Service, error) {
 		}
 		dialers[bindingKey{entry.Transport, entry.EndpointRef, entry.CapabilityID, entry.CapabilityVersion}] = d
 	}
-	return &Service{bindings: bindings, dialers: dialers, completions: make(map[string]int64)}, nil
+	completions, err := openCompletionStore(completionStorePath)
+	if err != nil {
+		closeAll(dialers)
+		return nil, err
+	}
+	return &Service{bindings: bindings, dialers: dialers, completions: completions}, nil
 }
 
 // stabilizeCompletedAt returns the first-ever observed completion time for
-// requestID, recording observed as that value if none was cached yet.
-// Called for every terminal (completed/failed) outcome from Invoke and
-// Query alike, so a later Query recovering the same request_id returns the
-// identical millisecond value Invoke (or an earlier Query) already did.
-func (s *Service) stabilizeCompletedAt(requestID string, observed int64) int64 {
-	s.completionsMu.Lock()
-	defer s.completionsMu.Unlock()
-	if existing, ok := s.completions[requestID]; ok {
-		return existing
+// requestID, durably recording observed as that value if none was stored
+// yet. Called for every terminal (completed/failed) outcome from Invoke
+// and Query alike, so a later Query recovering the same request_id --
+// even after a tos-ai worker restart -- returns the identical millisecond
+// value Invoke (or an earlier Query) already did. A store error falls
+// back to the freshly observed value rather than failing the whole
+// RPC -- this is best-effort stabilization, not the primary source of
+// truth for the outcome itself.
+func (s *Service) stabilizeCompletedAt(requestID string, observed, retainUntil int64) int64 {
+	stabilized, err := s.completions.stabilize(requestID, observed, retainUntil)
+	if err != nil {
+		return observed
 	}
-	s.completions[requestID] = observed
-	return observed
+	return stabilized
 }
 
 // terminalThirdPartyStatus reports whether status is a final outcome worth
@@ -137,9 +147,11 @@ func closeAll(dialers map[bindingKey]dialer) {
 	}
 }
 
-// Close releases every bound transport's idle connections.
+// Close releases every bound transport's idle connections and the
+// completion-time journal's underlying file handle.
 func (s *Service) Close() {
 	closeAll(s.dialers)
+	_ = s.completions.close()
 }
 
 // resolve is the sole authorization gate: it looks up the allowlist entry
@@ -205,7 +217,7 @@ func (s *Service) Invoke(
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 	if resp != nil && terminalThirdPartyStatus(resp.Status) {
-		resp.CompletedUnixMillis = s.stabilizeCompletedAt(req.Msg.RequestId, resp.CompletedUnixMillis)
+		resp.CompletedUnixMillis = s.stabilizeCompletedAt(req.Msg.RequestId, resp.CompletedUnixMillis, req.Msg.RetainUntilUnixMillis)
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -228,7 +240,16 @@ func (s *Service) Query(
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 	if resp != nil && resp.Found && resp.Result != nil && terminalThirdPartyStatus(resp.Result.Status) {
-		resp.Result.CompletedUnixMillis = s.stabilizeCompletedAt(req.Msg.RequestId, resp.Result.CompletedUnixMillis)
+		// ThirdPartyQueryRequest carries no retain_until_unix_millis of its
+		// own (unlike ThirdPartyInvokeRequest) -- a Query that observes a
+		// terminal outcome before any Invoke on this worker ever recorded
+		// one (e.g. tos-protocol crashed between dispatching Invoke and
+		// receiving its response, then recovered via Query) has no
+		// caller-supplied retention boundary to persist. Falling back to
+		// defaultQueryObservedRetention still bounds the record instead of
+		// retaining it forever.
+		retainUntil := time.Now().Add(defaultQueryObservedRetention).UnixMilli()
+		resp.Result.CompletedUnixMillis = s.stabilizeCompletedAt(req.Msg.RequestId, resp.Result.CompletedUnixMillis, retainUntil)
 	}
 	return connect.NewResponse(resp), nil
 }

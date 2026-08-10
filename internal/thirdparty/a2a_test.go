@@ -26,7 +26,7 @@ func TestService_A2AGoldenPath(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "a2a", EndpointRef: srv.URL, CapabilityID: "cap_a2a_1",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestService_A2ARejectsOversizedResponse(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "a2a", EndpointRef: srv.URL, CapabilityID: "cap_a2a_2",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 512,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

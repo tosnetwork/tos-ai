@@ -149,7 +149,11 @@ func run() error {
 			return fmt.Errorf("load third-party bindings configuration: %w", err)
 		}
 	}
-	thirdPartyService, err := thirdparty.NewService(thirdPartyBindings)
+	thirdPartyCompletionsPath := filepath.Join(filepath.Dir(socketPath), "third-party-completions.db")
+	if err := unixserver.PreparePrivateFileTarget(thirdPartyCompletionsPath); err != nil {
+		return errors.New("prepare third-party completion store directory")
+	}
+	thirdPartyService, err := thirdparty.NewService(thirdPartyBindings, thirdPartyCompletionsPath)
 	if err != nil {
 		return fmt.Errorf("build third-party execution service: %w", err)
 	}

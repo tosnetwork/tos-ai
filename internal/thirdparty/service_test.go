@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestService_RejectsBindingNotOnAllowlist(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_approved",
 		Timeout: time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -56,6 +57,14 @@ func TestService_RejectsBindingNotOnAllowlist(t *testing.T) {
 	if dialed {
 		t.Fatal("provider was dialed for a binding that was never approved")
 	}
+}
+
+// testCompletionStorePath returns an isolated, per-test completion-store
+// path so NewService's durable journal (see completions.go) never shares
+// state across tests.
+func testCompletionStorePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "completions.db")
 }
 
 func testBindings(t *testing.T, entries ...operatorconfig.ThirdPartyBinding) operatorconfig.ThirdPartyBindings {
@@ -107,7 +116,7 @@ func TestService_HTTPGoldenPath(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_1",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -160,7 +169,7 @@ func TestService_WildcardCapabilityVersionResolves(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_wild_1", CapabilityVersion: "*",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -197,7 +206,7 @@ func TestService_CompletedUnixMillisStableAcrossInvokeAndQuery(t *testing.T) {
 	svc, err := NewService(testBindings(t, operatorconfig.ThirdPartyBinding{
 		Transport: "http", EndpointRef: srv.URL, CapabilityID: "cap_stable_1",
 		Timeout: 5 * time.Second, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20,
-	}))
+	}), testCompletionStorePath(t))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
