@@ -10,7 +10,7 @@ certification gates are maintained in [`ROADMAP.md`](ROADMAP.md).
 
 ## Implemented foundation
 
-The Go 1.24 module currently contains:
+The Go 1.26.5 module currently contains:
 
 - `tos-ai-worker`, a private ConnectRPC worker served only on an exclusively
   owned mode-0600 Unix socket, with bounded connections and no public

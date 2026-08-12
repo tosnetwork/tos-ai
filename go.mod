@@ -1,6 +1,6 @@
 module github.com/tosnetwork/tos-ai
 
-go 1.24.0
+go 1.26.5
 
 require (
 	connectrpc.com/connect v1.19.1
