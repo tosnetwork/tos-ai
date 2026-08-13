@@ -1,565 +1,69 @@
-# TOS AI
+# TOS AI Execution Foundation
 
-`tos-ai` is the vertical AI Edge Computing Terminal implementation for TOS
-Network. It turns owner-operated hardware into bounded AI services while
-preserving local resource authority. It is not a validator, bare GPU rental
-daemon, public shell, or wallet process.
+`tos-ai` contains the reusable local execution substrate for the Native ATOS
+software-work market. It is not a second registry, an authority over payments,
+or a public A2A protocol implementation. Finalized TOS state remains canonical;
+this module will execute work bound by a future Accepted Quote and produce
+off-chain outputs and evidence for a TOS-committed receipt.
 
-Current implementation status, ordered product work, and deployment-only
-certification gates are maintained in [`ROADMAP.md`](ROADMAP.md).
+The normative product direction lives in
+[`tosnetwork/atos-spec`](https://github.com/tosnetwork/atos-spec).
 
-## Implemented foundation
+## Current scope
 
-The Go 1.26.5 module currently contains:
+This cleanup intentionally leaves a library foundation, not a runnable worker
+protocol. The retained code provides:
 
-- `tos-ai-worker`, a private ConnectRPC worker served only on an exclusively
-  owned mode-0600 Unix socket, with bounded connections and no public
-  listener;
-- `tos-ai-cli`, with `health`, `capabilities`, privacy-minimized `ard-catalog`,
-  `metrics`, `quote`, `invoke`, `get-task`, and exact-identity `cancel`
-  diagnostics;
-- a private Prometheus text snapshot on the same Unix socket, with a 16 KiB
-  response cap and only fixed method, outcome, state, limit, and resource
-  labels. It does not emit request IDs, model names, endpoints, credentials,
-  host identifiers, or hardware identifiers;
-- CPU, RAM, OS, and architecture discovery plus NVIDIA/go-nvml GPU, VRAM,
-  driver, CUDA capability, temperature, and power probes. On Linux, reported
-  CPU is bounded by scheduler affinity, while CPU and RAM both honor strict,
-  bounded cgroup v1 or v2 ancestor limits rather than blindly advertising
-  host totals;
-- graceful `unavailable` or `no-devices` NVIDIA states when NVML or a GPU is
-  absent;
-- a bounded continuous resource-liveness guard that runs host/NVML probes in
-  deadline-killable subprocesses, applies failure/recovery hysteresis, and
-  blocks new capabilities, quotes, and invocations if the configured host
-  class disappears;
-- a bounded local `AdmissionController` for concurrency, queue slots, RAM,
-  VRAM, KV cache, context, batch, output, execution time, owner reserve, and
-  the three accepted inference priorities;
-- scheduler-level owner worker reservation, so external/background saturation
-  cannot consume every execution slot while local asynchronous work may still
-  use the full pool when capacity is idle;
-- idempotent Quote handling plus a mode-0600 bounded bbolt Worker task store
-  that durably binds task ID, request digest, retention, lifecycle, and final
-  result; exact Invoke replay cannot execute twice, `GetTask` survives a
-  worker restart, interrupted synchronous executions fail closed before the
-  listener reopens, and reservation cleanup covers success, failure,
-  cancellation, deadline, disconnect, adapter failure, panic, and shutdown;
-- a signed, SHA-256-addressed model-manager library with verifying, ready,
-  active, draining, failed, and absent states, bounded LRU storage, protected
-  active/pinned/in-use entries, atomic artifact/metadata activation,
-  restart-time integrity recovery, crash-residue cleanup, and exclusive
-  process ownership of each private cache;
-- path-free model artifact leases plus a bounded runtime activation
-  coordinator with activation-time SHA-256 verification, health gating,
-  known-good preservation, rollback, retryable cleanup, and optional
-  crash-safe activation intent with explicit startup recovery and exclusive
-  process ownership of each persistent state directory;
-- an opt-in Ollama GGUF activation backend that uploads only an already-open
-  signed-cache artifact, creates a digest-scoped private runtime model,
-  verifies its exact source blob, preloads it before readiness, and
-  synchronously unloads and deletes it during shutdown;
-- optional worker model-approval guards that bind configured runtime digests
-  to recovered, signed local cache artifacts, retain bounded leases, and
-  rehash them before every runtime preflight;
-- deterministic mock, Ollama, and generic OpenAI-compatible HTTP adapters;
-- an immutable `tos.ai.text-generation` v0.1.0 profile mapper that accepts
-  only the profile's RFC 8785 canonical JSON bytes, rejects ambiguous Unicode,
-  duplicate/unknown fields and trailing data, and selects only
-  operator-reviewed `serviceId + model` routes; loaded operator configuration
-  captures a private immutable capability snapshot and production worker
-  startup retains a fail-closed Edge deployment plan built only from
-  externally callable `generate` capabilities, atomically binding the
-  installed mapper to the exact selector intended for advertisement;
-- `pkg/edgeintegration`, a fail-closed deployment bridge that reads one fresh,
-  fully validated capability snapshot through the private
-  `tos-protocol/localrpc.WorkerClient` and installs only its currently
-  externally callable text-generation routes into the immutable Edge plan.
-  Its readiness check requires the structured Worker, admission, resource,
-  runtime, model-binding, and task-store components and recomputes an
-  order-independent commitment to every public service/model/digest/runtime
-  identity. Route drift fails closed before another paid action; dynamic
-  capacity remains governed by Quote/Invoke. The bridge does not own the
-  Worker client, add a public listener, retry work, or grant session, payment,
-  wallet, or signing authority;
-- bounded runtime/model preflight before advertisement, Quote, and Invoke,
-  with a single process monitor, bounded refresh concurrency, fixed-size
-  singleflight state, expiring success/failure caches, and stable redacted
-  failures;
-- strict administrator-owned JSON runtime configuration with bounded defaults,
-  duplicate/unknown-field rejection, and private credential-file loading;
-- a separate immutable terminal policy that is mandatory outside development
-  mock mode and bounds scheduler capacity, socket connections, replay state,
-  deadlines, runtime health work, admission resources, and owner reserve;
-- bounded HTTP transports with administrator-selected endpoints, HTTPS for
-  remote endpoints, strict private-CA and optional mTLS identities, whole-range
-  validation for explicit local-CIDR plaintext exceptions, loopback-pinned
-  `localhost` resolution, deadline propagation, and stable redacted runtime
-  error categories;
-- a fail-closed container execution policy and narrow containerd client
-  contract, plus an immutable policy-enforcing adapter that defensively copies
-  requests and inputs, supplies the task deadline, preserves cancellation,
-  contains backend panics/errors, requires an exact operator-owned network
-  destination allowlist, and rejects oversized or invalid results. A bounded
-  containerd driver supports bounded CPU execution and operator-fixed NVIDIA
-  CDI device injection behind an exclusive alias lease; no containerd backend
-  is enabled by default and callers cannot select a CDI identifier;
-- Ed25519-signed update manifest verification, SHA-256 artifact verification,
-  expiry checks, target binding, and security-revision anti-rollback.
+- a fail-closed container execution policy with digest-pinned images,
+  non-root execution, read-only roots, no-new-privileges, bounded CPU/RAM/disk,
+  PID, time and output limits, and network-none or exact host allowlists;
+- a bounded supervisor that rejects duplicate execution identities, contains
+  backend panics, propagates cancellation, and synchronously drains on close;
+- a containerd backend with private socket/FIFO validation, cgroup v2 metrics,
+  OCI hardening and cleanup checks;
+- operator-fixed CDI GPU mappings behind exclusive local leases;
+- a reusable black-box backend conformance harness and optional live
+  containerd/NVIDIA tests;
+- privacy-minimized host/GPU probes and a resource-liveness guard;
+- private Unix listener, metrics export, signed update/rollback, and bounded
+  systemd helper libraries suitable for a future worker process.
 
-Resource reports deliberately omit GPU serials and UUIDs, PCI identifiers,
-MAC addresses, hostnames, and other stable hardware fingerprints. Probe claims
-carry explicit evidence levels such as `declared`, `locally-observed`, and
-`benchmarked`; the current live probes are `locally-observed`.
+The previous text-generation Worker RPC, model adapters, old Edge gateway,
+Managed payment path, legacy discovery integration and generalized third-party
+execution adapters were removed. They encoded the retired protocol and must not
+be treated as compatibility requirements for the new software-work schema.
 
-## Development
+## Build and test
 
-The module pins an exact `tos-protocol` revision, so a standalone clone builds
-normally:
+The module uses Go 1.26.5.
 
-```sh
-make all
-make test-race
+```bash
+go test ./...
 ```
 
-Contributors changing both repositories together may optionally use a local Go
-workspace with `go work init ./tos-protocol ./tos-ai`.
+No production command is currently shipped. A new worker entry point should be
+added only after `atos-spec` freezes the software-work request, artifact,
+execution, escrow and receipt contracts. That worker should adapt those frozen
+types to `pkg/executor`; it should not resurrect the deleted inference RPC.
 
-The code-complete candidate boundary and the real-chain, key-custody,
-container-isolation, model-supply-chain, load/RSS and public-perimeter evidence
-still required for a production claim are tracked only in the
-[canonical production-gate ledger](https://github.com/tosnetwork/tos-protocol/blob/main/docs/non-streaming-v0.1-production-gates.md).
+## Repository layout
 
-## Run the development worker
-
-```sh
-go run ./cmd/tos-ai-worker \
-  -dev-mock \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock
-
-go run ./cmd/tos-ai-cli \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock health
-
-go run ./cmd/tos-ai-cli \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock capabilities
-
-go run ./cmd/tos-ai-cli \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock \
-  -ard-identifier urn:air:edge.example:tos:ai-terminal \
-  -ard-service-name "Example TOS AI Edge Terminal" \
-  -ard-host-name "Example Edge Operator" \
-  -ard-host-id did:web:edge.example \
-  -ard-service-url https://edge.example/.well-known/tos-service.json \
-  -ard-entry-version 0.1.0 \
-  -ard-output ./ai-catalog.json \
-  ard-catalog
-
-go run ./cmd/tos-ai-cli \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock metrics
-
-go run ./cmd/tos-ai-cli \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock quote hello
-
-go run ./cmd/tos-ai-cli \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock invoke hello
+```text
+pkg/executor/                    policy, supervision and backend contract
+pkg/executor/containerdbackend/ containerd implementation
+pkg/executor/backendtest/       reusable lifecycle conformance suite
+executor/gpuisolation/          exclusive operator-named GPU leases
+pkg/probe/                      privacy-minimized local resource probes
+internal/resourceguard/         continuous fail-closed resource gating
+internal/unixserver/            bounded private Unix listeners
+pkg/metricsexport/              bounded metrics delivery
+pkg/update/                     signed artifact manifests
+pkg/softwareupdate/             crash-safe two-slot update state machine
+pkg/servicemanager/             fixed-unit bounded systemd operations
 ```
 
-The worker fails closed unless exactly one runtime mode is selected:
-`-runtime-config /absolute/private/runtime.json` for configured Ollama and
-OpenAI-compatible adapters, or explicit `-dev-mock` for the deterministic
-development adapter. `-dev-mock`, `-mock-delay`, production runtime
-configuration, and model trust cannot be ambiguously mixed. An invocation
-payload can never select or override an endpoint. Model import similarly
-accepts a bounded reader and an approved signed manifest, not an arbitrary
-Internet URL.
-
-Production adapters may additionally be constrained to the signed local model
-cache:
-
-```sh
-go run ./cmd/tos-ai-worker \
-  -socket /run/user/$(id -u)/tos-ai/worker.sock \
-  -terminal-policy-config /etc/tos-ai/terminal-policy.json \
-  -runtime-config /etc/tos-ai/runtime.json \
-  -model-trust-config /etc/tos-ai/model-trust.json
-```
-
-Production mode requires `-terminal-policy-config`. This private, strict JSON
-file is the single authority for worker and queue counts, connection and
-replay bounds, deadlines, preflight cadence, aggregate admission capacity,
-owner-reserved worker slots and resources, and per-request maxima. It is
-capped at 64 KiB and uses the same regular-file, ownership, mode,
-duplicate-key, nesting, and unknown-field checks as other operator
-configuration. In version 3, `ownerReservedWorkers` must be explicit,
-non-negative, and less than `workers`; setting it to zero is supported for
-single-worker or best-effort installations but provides no execution-slot
-isolation. Version 3 also requires a bounded `resourceMonitor` interval,
-subprocess timeout, and failure/recovery thresholds. External and background
-work runs only on general workers, while local asynchronous work can use both
-general and owner-reserved workers. Startup rejects RAM
-capacity above 75 percent of locally observed effective RAM or VRAM capacity
-above the currently observed free VRAM, before creating the listener. On
-Linux, effective RAM is the smaller of physical RAM and every applicable
-cgroup ancestor hard limit. A nonzero
-resource owner reserve is mandatory for RAM, context, batch, and output, and
-for VRAM when VRAM capacity is enabled. The policy is immutable for the
-process lifetime; changing it requires a restart. See
-[docs/terminal-policy-config.example.json](docs/terminal-policy-config.example.json)
-and size it for the actual host and configured adapters.
-
-The isolated-executor path also has a separate strict configuration and
-factory-gated composition API. It binds one operator-approved container image,
-entrypoint, environment, non-root identity, network allowlist and complete
-resource ceiling to one Worker capability. The generated executor policy is
-exactly as restrictive as that fixed spec; invocation data can supply only
-input bytes and a smaller output bound. The Worker task ID is domain-separated
-and hashed into a fixed `sha256:` execution digest before crossing the backend
-boundary; raw caller IDs never become container, snapshot, task, or filesystem
-names. A backend must reject a second live workload using the same digest.
-JSON cannot instantiate a backend by itself: the worker binary must inject an
-audited `IsolatedBackendFactory`. `ContainerdBackendFactory` now opens a real
-containerd 2.x SDK client only through an owner-private mode-0600 Unix socket,
-an exclusive private namespace/FIFO ownership lock, fixed `overlayfs`, and
-`io.containerd.runc.v2`. Its v0.1 execution subset is deliberately
-`network=none`, digest-qualified-reference and preloaded-image-only. It accepts
-either CPU-only execution or an operator-fixed alias-to-CDI device map; remote
-requests can state only the immutable capability's device count and cannot
-provide an alias, CDI name, GPU UUID or runtime selector. An exclusive lease
-prevents two process-local executions from sharing one configured alias. The exact
-reference is loaded as one object and its target digest is rechecked, avoiding
-an unbounded image-list operation. It constructs a
-read-only, non-root, no-new-privileges OCI process with no capabilities,
-containerd's non-empty default seccomp allowlist, and bounded CPU, RAM, PIDs,
-tmpfs and combined output. Spec construction fails if that seccomp profile is
-unavailable. Successful execution also requires bounded cgroup v2 metrics:
-CPU microseconds are rounded up to milliseconds, memory uses the greater of
-current and peak usage, and block-device write bytes are summed with overflow
-and device-count checks. Unknown, cgroup v1, missing, or malformed metrics fail
-closed instead of becoming zero usage. Startup fails closed on
-managed container, snapshot or FIFO residue. The worker binary compiles in
-this one fixed-policy factory and opens it only when the operator explicitly sets
-`-isolated-runtime-config`. That flag is mutually exclusive with `-dev-mock`,
-`-runtime-config`, and `-model-trust-config`; startup opens and validates the
-private daemon before the Worker socket begins serving. This is an integration
-path for certification and controlled deployments, not a claim that the
-privileged isolation launch gate has passed. See
-[docs/isolated-runtime-config.example.json](docs/isolated-runtime-config.example.json)
-and
-[docs/isolated-gpu-runtime-config.example.json](docs/isolated-gpu-runtime-config.example.json).
-An isolated backend must also provide a bounded, cancellation-aware readiness
-probe. Every Worker preflight calls it before advertising the configured
-binding; backend errors and panics become a stable unavailable result and
-cannot leak runtime details. Static JSON alone therefore cannot make a dead
-backend appear ready.
-Every factory result is wrapped in a process-local `SupervisedBackend` before
-it reaches the policy executor. Its mandatory `backend.maxActive` setting is
-bounded to 256, fixes both the semaphore and active-digest map capacity at
-startup, rejects excess work without creating internal waiters, and rejects a
-duplicate live digest before the driver. Shutdown atomically stops admission,
-closes the driver, and waits for registered executions to finish cleanup. The
-supervisor creates no goroutine and is not a substitute for inspecting
-containerd residue after process restart.
-Future backend implementations must also pass the reusable lifecycle suite in
-`pkg/executor/backendtest`, which checks bounded readiness, success,
-cancellation, duplicate-identity rejection, concurrency, and zero
-container/task/snapshot residue in a fresh test namespace. This is a minimum
-conformance gate, not proof of kernel,
-network, GPU, or filesystem isolation; see
-[docs/isolated-backend-conformance.md](docs/isolated-backend-conformance.md).
-
-The worker also opens `-task-store`, a separate mode-0600 bbolt database in a
-mode-0700 non-symlink directory. When omitted it is placed beside the private
-socket as `worker-tasks.db`. It uses the protocol default of 10,000 retained
-tasks; `-task-store-max-tasks` may select a stricter positive bound up to the
-one-million hard ceiling. `-task-store-owner-reserved` defaults to 64 and
-reserves those durable identities for `LOCAL_ASYNC`; external-service and
-background work cannot consume them. `-task-store-max-retained-bytes` defaults
-to 8 GiB and bounds conservative live reservations. Claim atomically charges
-the encoded request, a maximum result, maximum metadata, and fixed logical
-key/index bytes until retention cleanup. Owner-reserved slots imply the same
-number of maximum-sized owner byte reservations. The reserves must fit their
-total capacities. Request/result bytes, retention, execution duration,
-priority, and cleanup work retain independent protocol hard limits. The store
-contains invocation payloads and successful outputs until retention expiry,
-so production deployments should use owner-controlled encrypted storage and
-exclude it from backups that outlive task retention.
-The retained-byte budget is not an exact bbolt file-size ceiling because page
-and freelist overhead is additional and deleted pages remain allocated.
-Production deployments must also use a dedicated filesystem/project quota,
-free-space alerting, and a separately reviewed offline compaction procedure.
-
-Startup first removes expired records through bounded cleanup pages, then
-scans every retained task through bounded payload-free pages. Because the
-current adapters expose no durable runtime job handle, each interrupted
-`ACCEPTED/RUNNING` identity becomes `FAILED/RUNTIME_FAILED` before the private
-listener is created. It is never resubmitted and remains available through
-exact `GetTask` until retention expiry. Private fixed metrics report only the
-number of expired records removed and interrupted identities failed; they do
-not expose task identities, cursors, payloads, paths, or runtime errors.
-
-The current policy schema is version 3. Versions 1 and 2 remain accepted for
-upgrade compatibility with fixed safe monitor defaults of a ten-second
-interval, five-second timeout, and two-sample failure/recovery thresholds.
-Version 1 maps to zero reserved workers. Older versions cannot carry newer
-fields; operators should migrate deliberately to version 3.
-
-The resource monitor owns exactly one goroutine and at most one probe
-subprocess at a time. Probe output is strict and capped at 64 KiB; Linux
-cgroup membership, mount metadata, scalar files, hierarchy depth, controller
-count, and mount count all have independent hard bounds. A timeout kills the
-subprocess, so a stuck NVML call cannot pin worker shutdown. Each fresh child
-re-observes scheduler affinity plus cgroup v1/v2 memory, CPU-quota, and cpuset
-constraints without returning cgroup paths. After
-the configured failure threshold, readiness reports `resources=degraded`,
-capabilities become empty, and new Quote/Invoke owners receive unavailable.
-Exact Quote retries and exact durable task observations preserve their
-idempotent result, and already-running work is not preempted. Admission
-reopens only after the configured recovery threshold. CPU-only policies treat
-a missing GPU as normal. A positive VRAM policy requires the configured GPU
-class, driver, devices, and total VRAM to remain present.
-
-The `-workers`, `-max-queue`, `-max-connections`,
-`-runtime-health-interval`, and `-runtime-health-workers` flags are retained
-only for explicit `-dev-mock` diagnostics without a terminal policy. They
-cannot be mixed with a policy file, avoiding two competing resource
-authorities.
-
-The model-trust file is private, strict JSON containing the cache path, target,
-security revision, capacity bounds, verification timeout, and canonical
-base64 Ed25519 public keys. It never contains a private signing key. Every
-configured adapter digest must already be present as an approved
-`pkg/modelmanager` cache entry or startup fails. The worker retains one
-path-free lease per adapter and rehashes the full artifact before each runtime
-preflight; graceful shutdown releases all leases and then the cache ownership
-lock. A second process using the same cache fails startup immediately. There
-is no model upload or download RPC, and the default mock mode rejects
-`-model-trust-config`. See
-[docs/model-trust-config.example.json](docs/model-trust-config.example.json);
-the example public key is a structural placeholder and must be replaced with
-the operator's approved Ed25519 public key.
-
-An Ollama adapter may additionally opt into controlled startup activation.
-This requires both the global `activation` policy and an adapter-local fixed
-slot, plus `-model-trust-config`. Startup synchronously recovers the bounded
-private intent, rehashes the signed-cache GGUF, uploads that open artifact to
-Ollama's content-addressed blob endpoint when absent, creates a private model
-named from the slot and SHA-256 digest, verifies `/api/show` resolves to that
-exact blob, and preloads it before the worker listens. It never calls a model
-pull API, accepts a URL or host path, or exposes the private runtime model name
-to task payloads. Shutdown drains inference, unloads and deletes the private
-runtime model, releases all artifact leases, and leaves only the desired
-slot/digest intent for bounded restart recovery. The activation state
-directory must be private, absolute, and separate from the model cache. One
-controller holds it exclusively; a concurrent controller fails closed. See
-[docs/ollama-activation-config.example.json](docs/ollama-activation-config.example.json).
-Each activation slot namespace and its Ollama endpoint are a single-worker
-operator boundary; concurrently managed workers must use isolated runtimes or
-distinct slot IDs.
-
-The worker preflights configured runtimes at startup, refreshes them through
-one process-owned periodic monitor, refreshes stale bindings for capabilities
-and Quote, and performs an authoritative recheck for every new Invoke owner.
-A separately managed Ollama model name and SHA-256 digest are matched against
-its bounded `/api/tags` inventory. An activated Ollama slot instead verifies
-that `/api/show` identifies the exact approved GGUF source blob. Both are
-reported as `locally-observed`.
-OpenAI-compatible `/v1/models` can prove only that the configured model ID is
-present; its configured content digest remains `declared`. A failed or stale
-runtime is omitted from capabilities and cannot reach admission or execution.
-Preflight responses are capped at 1 MiB and 256 models, and per-adapter
-concurrent waiters are capped at 256. Periodic full refresh uses at most 16
-workers across at most 64 fixed adapter slots; it does not create an
-unbounded watcher per request or retry.
-
-The current runtime configuration schema is version 2; version 1 remains
-accepted when no `tls` object is present. The configuration must be a regular,
-non-symlink file owned by the worker user with no group or other permissions.
-It is capped at 1 MiB and 64 adapters. OpenAI-compatible credentials are
-referenced through `apiKeyFile`; that file is subject to the same ownership and
-permission checks and is capped at 8 KiB. Credentials must contain only
-printable non-space ASCII bytes, with no trailing newline. Inline credentials
-are not accepted. See
-[docs/runtime-config.example.json](docs/runtime-config.example.json).
-
-Omitted adapter bounds default to 1 MiB input/output, 8 MiB encoded
-request/response, eight connections, 16 KiB response headers, a two-minute
-request/execution timeout, a five-second connect timeout, 1 GiB RAM, 8,192
-context tokens, and batch size one. Configured worker adapters cannot exceed
-1 MiB input/output, 8 MiB encoded request/response, 32 connections each or 256
-connections in aggregate, 64 KiB headers, one-hour execution, or a one-minute
-connect timeout. Admission validation may impose lower observed-capacity
-bounds. Invalid or ambiguous configuration fails worker startup.
-
-Remote runtime endpoints require HTTPS. Plaintext endpoints must use a
-loopback literal, `localhost`, or a literal address inside one of at most 16
-administrator-configured local CIDRs. Every configured CIDR must be wholly
-contained in loopback, RFC 1918 private, link-local, or IPv6 ULA space; a wide
-prefix that crosses into public address space fails startup. `localhost`
-resolution accepts at most 16 addresses, requires every result to be
-loopback, binds the configured port, and includes resolution plus connection
-attempts in the configured connect timeout. Every runtime transport also pins
-dials to the configured host and port; redirects remain disabled. HTTPS uses a
-TLS 1.2 minimum and normal hostname verification. Version 2 can replace system
-trust with up to 64 private CA certificates and can present one client identity
-with a chain of at most eight certificates. The CA and client-certificate files
-are each capped at 1 MiB; the client-key file is capped at 256 KiB. These files
-use the same private regular-file policy as credentials, reject duplicate or
-extraneous PEM material, and must be rotated by restarting the worker. A
-restricted DNS `serverName` override supports an IP-pinned endpoint whose
-certificate uses an administrator-selected internal name. TLS identity fields
-on a plaintext endpoint and partial client identities fail worker startup. The
-same TLS policy is used for Ollama activation and request traffic. A runtime
-client key authenticates only to the configured model runtime; it is not and
-must never be a wallet owner key.
-
-Development mock defaults are one concurrent task, 64 queued tasks, 128
-private socket connections, 1 MiB output per request, a 15-minute execution
-deadline, zero reserved workers, and capacity derived conservatively from
-locally observed RAM/VRAM. Production values come only from the terminal
-policy. Hard limits reject more than 128 workers, a worker reserve equal to or
-larger than the total pool, 4096 queued tasks, 4096 socket connections, a
-one-hour admission deadline, or oversized resource configuration. The owner
-resource reserve is removed from external/background capacity before it is
-advertised or admitted, and reserved workers never execute external or
-background work. The development health defaults are a five-second check
-timeout, a two-minute success TTL, a two-second failure TTL, and a five-second
-refresh with four workers. Policy validation rejects refresh intervals below
-250 milliseconds or above five minutes, more than 16 health workers, or any
-timeout/interval combination that could leave a freshness gap before the
-success TTL after accounting for every configured adapter batch.
-The resource-liveness defaults are a ten-second interval, five-second probe
-timeout, and two consecutive observations for both failure and recovery.
-Hard limits permit intervals from one second through five minutes, timeouts
-from 100 milliseconds through 30 seconds and no longer than the interval, and
-thresholds from one through ten.
-
-## Security boundaries
-
-- `tos-ai-edge` composes the `tos-protocol` authentication, payment, receipt
-  and settlement control plane; the private Worker still owns no wallet key.
-- The text-generation mapper accepts only the exact v0.1.0 profile selector
-  with no extensions. It cannot set Worker identity, payment, priority,
-  deadline, output, retention, endpoint, credential, or runtime fields; Edge
-  Core continues to derive and durably bind all of them.
-- The worker has no wallet owner key, public TCP listener, arbitrary model
-  upload, arbitrary downloader, shell, host mount, privileged container, or
-  raw accelerator API.
-- External inference accepts only `EXTERNAL_SERVICE`; approved local callers
-  may use `LOCAL_ASYNC`, and maintenance may use `BACKGROUND`. Network work
-  cannot claim emergency, control, or real-time priority.
-- Owner-reserved workers protect only correctly classified `LOCAL_ASYNC`
-  work. The private socket is a trusted local boundary: Edge Core must never
-  map an external request to this class, and deployments should isolate the
-  worker and Edge Core under a dedicated Unix identity. The worker still
-  loads no wallet or owner private key.
-- Go scheduling is not a hard real-time or physical-safety loop.
-- Quote is an expiring capability observation, not a permanent reservation.
-  Invoke repeats local admission before adapter execution.
-- Every Invoke is claimed durably before executor admission. `GetTask` is
-  read-only, cancellation is bound to request ID, task ID, and request digest,
-  and an accepted/running task stranded by process failure is failed closed
-  before the listener reopens; it is never silently resubmitted.
-- Durable task capacity is advertised as `storage.task_slots` and conservative
-  `storage.task_bytes`, included in every capability and Quote commitment, and
-  exposed through fixed private metrics. Exhausting either bound removes
-  routable capabilities and rejects new Quote owners; exact Quote replay and
-  atomic `ClaimTask` retain
-  their existing semantics.
-- `ard-catalog` reads one fresh validated private capability snapshot and emits
-  one service entry whose explicit operator-approved ARD identifier can be
-  bound by the TOS descriptor. Its bounded TOS extension contains only
-  externally callable selectors; live capacity, evidence attributes, local
-  endpoints, paths, hostnames, and hardware identifiers are omitted. It
-  neither publishes the catalog nor opens a public listener. With
-  `-ard-output`, it atomically replaces a mode-0600 regular file suitable for
-  explicit loading by `tos-edge` or `tos-ard-registry`; symlink targets are
-  rejected. A compatible Registry can consume that replacement through an
-  explicit all-or-nothing `SIGHUP` reload while retaining its last valid
-  generation on failure. It validates the known TOS extension once and makes
-  its model, operation, runtime, digest, and Worker service ID available to
-  bounded lexical search and same-capability exact `x-tos.*` filters. The
-  cross-repository compatibility test exercises this through the Registry's
-  actual bounded HTTP `POST /search` handler.
-- Production admission and process-capacity values come only from a private
-  startup policy and are checked against effective observed RAM/free VRAM
-  before the socket is created. On Linux, host totals are reduced by
-  applicable cgroup ancestor hard limits. Task payloads cannot increase or
-  replace them.
-- Host-class liveness is continuously re-probed in a bounded subprocess. A
-  degraded observation gates new work without dynamically shrinking budgets
-  underneath existing reservations or preempting in-flight work.
-- Runtime errors exposed across RPC are stable categories and do not include
-  internal endpoints, paths, or credentials.
-- Operational metrics are available only as `GET /metrics` on the same
-  mode-0600 Unix socket. The snapshot is capped at 16 KiB, uses a fixed set of
-  low-cardinality series, and never uses request, model, endpoint, error, or
-  hardware data as labels. Counters live only for the worker process lifetime;
-  this endpoint is neither a public listener nor a durable audit journal.
-- Cached runtime readiness expires; stale adapters are not advertised or
-  admitted until a bounded preflight succeeds again.
-- Runtime health checks are tied to the worker lifecycle. Shutdown stops new
-  checks, cancels the monitor, drains scheduler work, and waits for in-flight
-  checks before closing adapter pools exactly once. A timed-out drain is
-  reported as incomplete and does not close an adapter still in use or run
-  model cleanup concurrently with it.
-- The private socket name has an adjacent current-user mode-0600 advisory lock.
-  A second worker cannot unlink or replace a live socket. A pre-lock legacy
-  socket is removed only when a bounded local connection probe proves it is
-  stale; ambiguous probe errors fail closed. Repeated or concurrent listener
-  close calls cannot remove a successor's socket.
-- On Linux, model caches and persistent activation-state directories use
-  non-blocking advisory `flock` ownership on private, current-user, mode-0600
-  regular lock files. Locks survive for the manager/controller lifetime,
-  remain held while cleanup is retryable, and are released by the kernel after
-  a process crash. Deploy these directories on a local filesystem with
-  reliable `flock` semantics; this is not a distributed lock or protection
-  against a hostile process running as the same user.
-- Optional activation state contains only fixed administrator slot IDs and
-  SHA-256 digests in a private local file. It is crash-recovery intent, not a
-  remote trust assertion or substitute for signed model verification.
-- A signed local cache approval proves only that an administrator-approved
-  artifact is available to this worker. Generic OpenAI-compatible runtime
-  model IDs remain `declared`; the guard does not claim remote content
-  attestation.
-- Ollama activation is restricted to administrator-configured GGUF artifacts
-  already present in the signed cache. It does not authorize Internet
-  downloads, task-selected models, arbitrary Modelfiles, or arbitrary runtime
-  creation.
-
-## Not implemented
-
-Controlled activation is currently implemented only for an
-administrator-configured Ollama endpoint and a signed-cache GGUF artifact.
-There is no activation backend for LocalAI, vLLM, llama.cpp, or vendor
-runtimes, no live activation-management RPC, no arbitrary Modelfile support,
-and no Internet model pull/download. Separately managed Ollama models remain
-supported through bounded inventory preflight. Generic OpenAI-compatible
-model-list APIs expose an ID but do not attest their configured content
-digest.
-
-The repository now includes the bounded `tos-ai-edge` deployment composition,
-TOS authorization/payment/Receipt flow, ARD handoff, unary and versioned
-streaming Worker RPC, durable offline fleet control, fixed-action controller
-bridges, a bounded authenticated metrics exporter/collector pair, signed
-benchmark evidence, CPU containerd execution and an exclusive GPU-alias lease
-boundary within one worker process. A fixed-unit, no-shell systemd adapter supplies bounded
-restart/reload/readiness operations. These implementations do not by themselves certify a particular
-public TLS perimeter, operator authentication/custody policy, service manager,
-policy loader, physical safety controller, privileged target kernel or NVIDIA
-OCI runtime/device mapping. It does not support
-arbitrary consumer containers/programs/models, unrestricted fine-tuning,
-training, token issuance, or bare GPU rental.
-
-Terminal policy reload and dynamic RAM/VRAM capacity rebalancing are not
-implemented. The current monitor verifies that configured RAM backing,
-including Linux cgroup hard limits, and any required
-GPU/driver/device/total-VRAM class still exist; it intentionally does not
-resize admission from current memory consumption, pressure signals,
-fluctuating free memory, or coordinate capacity across multiple worker
-processes.
-
-The non-streaming WorkerService v0.1 alignment and the deliberately separate
-streaming gap are recorded in
-[docs/protocol-interface-notes.md](docs/protocol-interface-notes.md).
+See [isolated backend conformance](docs/isolated-backend-conformance.md) for
+the security and live-test gates. Passing unit or lifecycle tests is not a
+hardware-isolation attestation.
 
 Licensed under the [GNU General Public License v3.0](LICENSE).

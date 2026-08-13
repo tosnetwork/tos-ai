@@ -11,6 +11,12 @@ import (
 
 const MaxSupervisedActiveHard = 256
 
+// RuntimeReadiness performs a bounded, cancellation-aware local health check
+// without creating or mutating a workload.
+type RuntimeReadiness interface {
+	CheckReady(context.Context) error
+}
+
 // BackendDriver is the narrow runtime-specific implementation beneath the
 // process-local workload supervisor. Close must synchronously stop and clean
 // every driver workload before it returns.

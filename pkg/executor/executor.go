@@ -326,7 +326,7 @@ func (e *PolicyExecutor) Execute(
 	return result, nil
 }
 
-// ExecutionDigest maps an externally correlated Worker task identity to a
+// ExecutionDigest maps an externally correlated execution request identity to a
 // fixed, path-safe backend identity. Backends must use this digest, never the
 // caller-provided task ID, when naming runtime objects or cleanup records.
 func ExecutionDigest(executionID string) (string, error) {

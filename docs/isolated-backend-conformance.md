@@ -89,11 +89,11 @@ privileged platform tests that independently verify at least:
   failure and cancellation storms.
 
 Passing this suite is therefore a required launch gate for a backend, not an
-isolation attestation. The production Worker remains fail closed until an
-audited backend is explicitly compiled in through `IsolatedBackendFactory`.
-Factory results are wrapped by the fixed-capacity `executor.SupervisedBackend`
-before use; conformance tests for a driver must still exercise the driver
-directly so the wrapper cannot hide driver cleanup or collision defects.
+isolation attestation. A future software-work worker must explicitly compose an
+audited backend and wrap it with the fixed-capacity
+`executor.SupervisedBackend`. Conformance tests for a driver must still
+exercise the driver directly so the wrapper cannot hide cleanup or collision
+defects.
 
 `pkg/executor/containerdbackend` currently passes its non-privileged lifecycle,
 configuration, bounded-output and generated-OCI-spec tests with a fake engine.
@@ -113,13 +113,12 @@ overflow fail closed. Privileged fixtures must additionally show that the
 daemon reports final metrics after process exit and before task deletion, and
 that the observed values cannot exceed policy without rejecting the result.
 
-`tos-ai-worker -isolated-runtime-config <private-file>` is the only production
-binary entry point for this driver. It is mutually exclusive with the HTTP
-runtime, HTTP model-trust and development-mock modes. The binary opens and
-validates the private socket, namespace, image binding and residue state before
-starting its Worker listener, and closes the owned backend synchronously during
-shutdown. Operators must not describe this composition as certified until the
-privileged suite in this document passes on every supported deployment image.
+No production worker command is currently shipped. The future Native
+software-work worker must open and validate the private socket, namespace,
+image binding and residue state before accepting work, and must close the owned
+backend synchronously during shutdown. Operators must not describe that future
+composition as certified until the privileged suite in this document passes on
+every supported deployment image.
 
 ## Live lifecycle suite
 
@@ -158,16 +157,14 @@ limits from outside the workload.
 
 ## GPU CDI execution and certification
 
-GPU configuration is local operator authority, not task authority. Each
-`backend.gpuDevices` entry binds a privacy-safe alias to one qualified CDI
-device name. The immutable container policy fixes the required device count;
-the Worker request contains neither alias nor CDI identity. The production
-factory sorts the configured aliases, acquires an exclusive in-process lease,
-translates only the leased aliases through the fixed map, refreshes the
-operator-selected CDI registry without a background watcher, and injects the
-result after the base isolation specification. Unknown aliases, duplicate
-physical CDI names, capacity exhaustion, missing CDI specifications and
-inconsistent GPU/VRAM policy fail closed.
+GPU configuration is local operator authority, not task authority. A future
+worker configuration must bind privacy-safe aliases to qualified CDI device
+names. The immutable container policy fixes the required device count; remote
+requests must contain neither aliases nor CDI identities. The retained lease
+and containerd layers sort operator aliases, acquire exclusive in-process
+leases and translate only those aliases through the fixed map. Unknown aliases,
+duplicate physical CDI names, capacity exhaustion, missing CDI specifications
+and inconsistent GPU policy fail closed.
 
 `TestContainerdBackendLiveMockCDIConformance` exercises this path through real
 containerd/runc with an isolated test CDI specification. The fixture adds one
@@ -194,16 +191,9 @@ TOS_AI_CONTAINERD_TEST_NVIDIA_CDI_DEVICE=nvidia.com/gpu=0
 ```
 
 The digest-pinned certification image must contain `/bin/sh` and `nvidia-smi`
-and the CDI device must expose exactly one GPU inside the container. Run:
-
-```sh
-make nvidia-certification
-```
-
-The script fails before testing when any environment value, `nvidia-smi`, or a
-host-visible GPU is missing. A pass proves that this image and configured CDI
+and the CDI device must expose exactly one GPU inside the container. Run the
+named Go test with the base live-suite variables and the NVIDIA CDI device
+variable configured explicitly. A pass proves that this image and configured CDI
 identity expose exactly one device and that execution/lease cleanup succeeds;
-it does not by itself certify thermals, sustained inference, cross-process
-ownership, kernel isolation, or physical power-loss recovery. The CPU-only
-example remains `isolated-runtime-config.example.json`; the explicit GPU form
-is `isolated-gpu-runtime-config.example.json`.
+it does not by itself certify thermals, sustained compute, cross-process
+ownership, kernel isolation, or physical power-loss recovery.
