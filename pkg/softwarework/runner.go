@@ -96,7 +96,11 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Outcome, error) 
 	spec := executor.Spec{
 		ImageDigest: r.contract.ToolchainDigest, Entrypoint: append([]string{r.contract.Executable}, r.contract.Arguments...),
 		WorkingDirectory: r.contract.WorkingDirectory, WorkspaceArchive: true,
-		Environment:  map[string]string{"GOROOT": "/usr/local/go", "HOME": "/workspace/scratch", "GOCACHE": "/workspace/scratch/go-cache", "GOTMPDIR": "/workspace/scratch/tmp", "TMPDIR": "/workspace/scratch/tmp", "CGO_ENABLED": "0"},
+		Environment: map[string]string{
+			"GOROOT": "/usr/local/go", "HOME": "/workspace",
+			"GOCACHE": "/workspace/go-cache", "GOTMPDIR": "/workspace",
+			"TMPDIR": "/workspace", "CGO_ENABLED": "0", "GOMAXPROCS": "2",
+		},
 		ReadOnlyRoot: true, Network: executor.NetworkNone, UserID: r.contract.UserID, GroupID: r.contract.GroupID,
 		NoNewPrivileges: true, Limits: r.contract.Limits,
 	}

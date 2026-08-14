@@ -69,6 +69,9 @@ func TestRunnerBindsExactContractAndReturnsImmutableArtifacts(t *testing.T) {
 	if backend.calls != 1 || !backend.spec.WorkspaceArchive || backend.spec.Network != executor.NetworkNone ||
 		backend.spec.WorkingDirectory != "/workspace/source" || backend.spec.Entrypoint[0] != "/usr/local/bin/go" ||
 		backend.spec.Environment["GOROOT"] != "/usr/local/go" || backend.spec.Environment["CGO_ENABLED"] != "0" ||
+		backend.spec.Environment["HOME"] != "/workspace" || backend.spec.Environment["GOCACHE"] != "/workspace/go-cache" ||
+		backend.spec.Environment["GOTMPDIR"] != "/workspace" || backend.spec.Environment["TMPDIR"] != "/workspace" ||
+		backend.spec.Environment["GOMAXPROCS"] != "2" ||
 		!bytes.Equal(backend.input, request.SourceArchive) || outcome.Artifact.MediaType != ArtifactMediaType || outcome.Report.MediaType != ReportMediaType {
 		t.Fatalf("contract mapping or outcome mismatch: %#v %#v", backend.spec, outcome)
 	}
