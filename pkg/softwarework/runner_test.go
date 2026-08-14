@@ -44,7 +44,7 @@ func fixture(t *testing.T) (*Runner, *fakeExecutor, *Journal, Request) {
 	}
 	backend := &fakeExecutor{}
 	contract := Contract{
-		ManifestDigest: digest([]byte("manifest")), ToolchainDigest: digest([]byte("toolchain")), SandboxDigest: digest([]byte("sandbox")),
+		ManifestDigest: digest([]byte("manifest")), ToolchainDigest: digest([]byte("toolchain")), SandboxDigest: digest([]byte("manifest")),
 		Executable: "/usr/local/bin/go", Arguments: []string{"test", "./...", "-count=1"}, WorkingDirectory: "/workspace/source",
 		Limits: executor.Limits{CPUMillis: 1000, MemoryBytes: 1 << 20, DiskBytes: 1 << 20, PIDs: 32, ExecutionTime: time.Second, OutputBytes: 1 << 16},
 		UserID: 65532, GroupID: 65532,
@@ -90,6 +90,16 @@ func TestRunnerRejectsConflictingExecutionIdentity(t *testing.T) {
 	request.InputDigest = digest([]byte("other input"))
 	if _, err := runner.Execute(context.Background(), request); err == nil || !strings.Contains(err.Error(), "conflicts") || backend.calls != 1 {
 		t.Fatalf("conflict err=%v calls=%d", err, backend.calls)
+	}
+}
+
+func TestRunnerRejectsUnboundSandboxIdentity(t *testing.T) {
+	runner, _, journal, _ := fixture(t)
+	defer journal.Close()
+	contract := runner.contract
+	contract.SandboxDigest = digest([]byte("uncommitted sandbox"))
+	if _, err := NewRunner(runner.executor, runner.store, journal, contract); err == nil {
+		t.Fatal("accepted a sandbox identity not bound by the manifest")
 	}
 }
 

@@ -150,7 +150,7 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Outcome, error) 
 
 func validateContract(value Contract) error {
 	if !executionIDPattern.MatchString(value.ManifestDigest) || !executionIDPattern.MatchString(value.ToolchainDigest) ||
-		!executionIDPattern.MatchString(value.SandboxDigest) || value.Executable == "" || len(value.Arguments) == 0 ||
+		value.SandboxDigest != value.ManifestDigest || value.Executable == "" || len(value.Arguments) == 0 ||
 		len(value.Arguments) > 64 || !strings.HasPrefix(value.Executable, "/") || path.Clean(value.Executable) != value.Executable ||
 		forbiddenExecutable(value.Executable) || value.WorkingDirectory != "/workspace/source" || value.UserID == 0 || value.GroupID == 0 ||
 		value.Limits.CPUMillis == 0 || value.Limits.MemoryBytes == 0 || value.Limits.DiskBytes == 0 || value.Limits.PIDs == 0 ||
