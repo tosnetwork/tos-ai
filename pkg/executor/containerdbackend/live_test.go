@@ -26,8 +26,8 @@ func TestContainerdBackendLiveWorkspace(t *testing.T) {
 		t.Skip("private containerd live-test environment is not configured")
 	}
 	limits := executor.Limits{
-		CPUMillis: 30_000, MemoryBytes: 512 << 20, DiskBytes: 64 << 20,
-		PIDs: 64, ExecutionTime: 30 * time.Second, OutputBytes: 4096,
+		CPUMillis: 30_000, MemoryBytes: 512 << 20, DiskBytes: 1 << 30,
+		PIDs: 64, ExecutionTime: 30 * time.Second, OutputBytes: 1 << 20,
 	}
 	backend, err := containerdbackend.Open(context.Background(), containerdbackend.Config{
 		SocketPath: configuration.socket, Namespace: configuration.namespace,
@@ -47,7 +47,7 @@ func TestContainerdBackendLiveWorkspace(t *testing.T) {
 		ExecutionDigest: digest, ImageDigest: configuration.imageDigest,
 		Entrypoint:       []string{"/usr/local/bin/go", "test", "./...", "-count=1"},
 		WorkingDirectory: "/workspace/source", WorkspaceArchive: true,
-		Environment: map[string]string{"GOROOT": "/usr/local/go", "HOME": "/workspace/scratch", "GOCACHE": "/workspace/scratch/go-cache", "GOTMPDIR": "/workspace/scratch/tmp", "TMPDIR": "/workspace/scratch/tmp", "CGO_ENABLED": "0"},
+		Environment: map[string]string{"GOROOT": "/usr/local/go", "HOME": "/workspace", "GOCACHE": "/workspace/go-cache", "GOTMPDIR": "/workspace", "TMPDIR": "/workspace", "CGO_ENABLED": "0", "GOMAXPROCS": "2"},
 		UserID:      65532, GroupID: 65532, ReadOnlyRoot: true, NoNewPrivileges: true,
 		Network: executor.NetworkNone, Limits: limits,
 	}

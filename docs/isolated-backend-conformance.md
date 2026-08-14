@@ -197,3 +197,24 @@ variable configured explicitly. A pass proves that this image and configured CDI
 identity expose exactly one device and that execution/lease cleanup succeeds;
 it does not by itself certify thermals, sustained compute, cross-process
 ownership, kernel isolation, or physical power-loss recovery.
+
+## Protocol-pinned Go workspace image
+
+The V1 software-work toolchain is built from
+`build/software-work-go-1.26.5`. Its lock file fixes the Linux/amd64 platform,
+Debian base manifest, Go toolchain module ZIP checksum, normalized build epoch,
+and resulting OCI index digest. The build rejects either a source ZIP or OCI
+index that differs from those commitments.
+
+Two clean output archives built on 2026-08-14 were byte-identical with archive
+SHA-256 `e1dfc88b5a5bfe4c33342f0684a901ac3975bda5ba4c912996ea808c105f509d`
+and OCI index digest
+`sha256:9624bca74096f810c5b24e489521dde124fadcfa1808581648b38bdc1ba1b105`.
+The digest-pinned image then passed `TestContainerdBackendLiveWorkspace` on a
+private containerd/runc instance. That test ran the exact provider-fixed
+`/usr/local/bin/go test ./... -count=1` command as UID/GID 65532 with an empty
+capability set, no-new-privileges, a read-only root, private network namespace,
+seccomp, device denial, resource cgroups, a read-only/no-exec source mount, and
+a bounded writable tmpfs. `GOMAXPROCS=2` prevents host CPU count from defeating
+the 64-PID limit; the 1-GiB aggregate temporary-storage policy gives each of
+four bounded tmpfs mounts 256 MiB for compiler work and cache data.
