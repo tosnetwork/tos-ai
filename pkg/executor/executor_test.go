@@ -115,6 +115,11 @@ func TestPolicyRejectsUnsafeContainerCapabilities(t *testing.T) {
 		{"runtime socket", func(value *Spec) { value.ExposeRuntimeSocket = true }},
 		{"new privileges", func(value *Spec) { value.NoNewPrivileges = false }},
 		{"resource overflow", func(value *Spec) { value.Limits.MemoryBytes++ }},
+		{"workspace traversal", func(value *Spec) {
+			value.WorkspaceArchive = true
+			value.WorkingDirectory = "/workspace/source/../escape"
+		}},
+		{"workspace without archive", func(value *Spec) { value.WorkingDirectory = "/workspace/source" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

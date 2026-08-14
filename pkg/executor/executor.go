@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,7 +46,9 @@ type Limits struct {
 type Spec struct {
 	ImageDigest         string
 	Entrypoint          []string
+	WorkingDirectory    string
 	Environment         map[string]string
+	WorkspaceArchive    bool
 	ReadOnlyRoot        bool
 	Network             NetworkMode
 	AllowedHosts        []string
@@ -94,18 +97,20 @@ type ContainerdClient interface {
 }
 
 type ContainerRequest struct {
-	ExecutionDigest string
-	ImageDigest     string
-	Entrypoint      []string
-	Environment     map[string]string
-	UserID          uint32
-	GroupID         uint32
-	ReadOnlyRoot    bool
-	NoNewPrivileges bool
-	Network         NetworkMode
-	AllowedHosts    []string
-	AllowGPU        bool
-	Limits          Limits
+	ExecutionDigest  string
+	ImageDigest      string
+	Entrypoint       []string
+	WorkingDirectory string
+	Environment      map[string]string
+	WorkspaceArchive bool
+	UserID           uint32
+	GroupID          uint32
+	ReadOnlyRoot     bool
+	NoNewPrivileges  bool
+	Network          NetworkMode
+	AllowedHosts     []string
+	AllowGPU         bool
+	Limits           Limits
 }
 
 // Policy is a terminal-owned ceiling. A remote task may request less, never
@@ -177,6 +182,13 @@ func (p Policy) Validate(spec Spec) error {
 		if invalidContainerString(argument, p.MaxStringBytes, false) {
 			return errors.New("executor argument is invalid")
 		}
+	}
+	if spec.WorkspaceArchive {
+		if !validWorkspaceDirectory(spec.WorkingDirectory) {
+			return errors.New("workspace execution requires a bounded working directory")
+		}
+	} else if spec.WorkingDirectory != "" && spec.WorkingDirectory != "/" {
+		return errors.New("working directory requires a workspace archive")
 	}
 	for key, value := range spec.Environment {
 		if invalidContainerString(key, p.MaxStringBytes, false) ||
@@ -287,18 +299,20 @@ func (e *PolicyExecutor) Execute(
 		return Result{}, err
 	}
 	request := ContainerRequest{
-		ExecutionDigest: executionDigest,
-		ImageDigest:     spec.ImageDigest,
-		Entrypoint:      append([]string(nil), spec.Entrypoint...),
-		Environment:     cloneStringsMap(spec.Environment),
-		UserID:          spec.UserID,
-		GroupID:         spec.GroupID,
-		ReadOnlyRoot:    spec.ReadOnlyRoot,
-		NoNewPrivileges: spec.NoNewPrivileges,
-		Network:         spec.Network,
-		AllowedHosts:    append([]string(nil), spec.AllowedHosts...),
-		AllowGPU:        spec.AllowGPU,
-		Limits:          spec.Limits,
+		ExecutionDigest:  executionDigest,
+		ImageDigest:      spec.ImageDigest,
+		Entrypoint:       append([]string(nil), spec.Entrypoint...),
+		WorkingDirectory: spec.WorkingDirectory,
+		Environment:      cloneStringsMap(spec.Environment),
+		WorkspaceArchive: spec.WorkspaceArchive,
+		UserID:           spec.UserID,
+		GroupID:          spec.GroupID,
+		ReadOnlyRoot:     spec.ReadOnlyRoot,
+		NoNewPrivileges:  spec.NoNewPrivileges,
+		Network:          spec.Network,
+		AllowedHosts:     append([]string(nil), spec.AllowedHosts...),
+		AllowGPU:         spec.AllowGPU,
+		Limits:           spec.Limits,
 	}
 	// The runtime client receives a deadline even when the caller did not set
 	// one. A concrete backend must honor context cancellation while stopping
@@ -324,6 +338,14 @@ func (e *PolicyExecutor) Execute(
 	}
 	result.Output = append([]byte(nil), result.Output...)
 	return result, nil
+}
+
+func validWorkspaceDirectory(value string) bool {
+	if value != "/workspace/source" && !strings.HasPrefix(value, "/workspace/source/") {
+		return false
+	}
+	cleaned := path.Clean(value)
+	return cleaned == value && len(value) <= 4096
 }
 
 // ExecutionDigest maps an externally correlated execution request identity to a

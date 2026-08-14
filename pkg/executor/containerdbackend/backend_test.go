@@ -311,6 +311,38 @@ func TestFixedIsolationSpecEnforcesCPUOnlySandbox(t *testing.T) {
 	}
 }
 
+func TestFixedIsolationSpecBindsOnlyRuntimeSelectedWorkspace(t *testing.T) {
+	request := validRequest(t, "workspace-spec")
+	request.WorkspaceArchive = true
+	request.WorkingDirectory = "/workspace/source"
+	ctx := namespaces.WithNamespace(context.Background(), "tos-ai-test")
+	spec, err := oci.GenerateSpec(
+		ctx, nil, &containers.Container{ID: runtimeID(request.ExecutionDigest)},
+		fixedIsolationSpec(request, "/private/runtime/workspace"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Process.Cwd != "/workspace/source" {
+		t.Fatalf("working directory = %q", spec.Process.Cwd)
+	}
+	var workspace, source *specs.Mount
+	for index := range spec.Mounts {
+		mount := &spec.Mounts[index]
+		switch mount.Destination {
+		case "/workspace":
+			workspace = mount
+		case "/workspace/source":
+			source = mount
+		}
+	}
+	if workspace == nil || workspace.Type != "tmpfs" || contains(workspace.Options, "noexec") ||
+		source == nil || source.Type != "bind" || source.Source != "/private/runtime/workspace" ||
+		!contains(source.Options, "ro") || !contains(source.Options, "noexec") {
+		t.Fatalf("workspace mounts are not hardened: workspace=%#v source=%#v", workspace, source)
+	}
+}
+
 func TestRequestRejectsNetworkGPUAndUnsafeBounds(t *testing.T) {
 	base := validRequest(t, "invalid")
 	cases := []executor.ContainerRequest{

@@ -118,6 +118,23 @@ func (e *sdkEngine) Run(
 	if err := e.ensureIdentityAbsent(ctx, id); err != nil {
 		return executor.Result{}, err
 	}
+	var workspaceSource []string
+	if request.WorkspaceArchive {
+		directory, cleanupWorkspace, err := prepareWorkspace(
+			e.fifoDir, id, input, request.Limits.DiskBytes,
+		)
+		if err != nil {
+			return executor.Result{}, err
+		}
+		defer func() {
+			if cleanupErr := cleanupWorkspace(); cleanupErr != nil {
+				result = executor.Result{}
+				returnedErr = errors.Join(returnedErr, cleanupErr)
+			}
+		}()
+		workspaceSource = []string{directory}
+		input = nil
+	}
 
 	container, err := e.client.NewContainer(
 		ctx, id,
@@ -134,7 +151,7 @@ func (e *sdkEngine) Run(
 		// execute in order, so specification construction must follow snapshot
 		// creation or it fails before runc starts.
 		containerd.WithNewSpec(
-			oci.WithImageConfig(image), fixedIsolationSpec(request),
+			oci.WithImageConfig(image), fixedIsolationSpec(request, workspaceSource...),
 			e.cdi.specOpt(devices),
 		),
 	)

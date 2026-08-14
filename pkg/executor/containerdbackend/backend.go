@@ -408,9 +408,36 @@ func validateFIFODir(path string) error {
 		return errors.New("inspect containerd FIFO directory")
 	}
 	for _, name := range names {
+		if name == workspaceRootName {
+			if err := validateEmptyWorkspaceRoot(filepath.Join(path, name)); err != nil {
+				return err
+			}
+			continue
+		}
 		if name != ownershipLockName {
 			return errors.New("containerd FIFO residue is present")
 		}
+	}
+	return nil
+}
+
+func validateEmptyWorkspaceRoot(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm() != 0o700 || !ownedByCurrentUser(info) {
+		return errors.New("containerd workspace residue is invalid")
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return errors.New("inspect containerd workspace residue")
+	}
+	defer directory.Close()
+	names, err := directory.Readdirnames(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return errors.New("inspect containerd workspace residue")
+	}
+	if len(names) != 0 {
+		return errors.New("containerd workspace residue is present")
 	}
 	return nil
 }

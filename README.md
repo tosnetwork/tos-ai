@@ -11,8 +11,8 @@ The normative product direction lives in
 
 ## Current scope
 
-This cleanup intentionally leaves a library foundation, not a runnable worker
-protocol. The retained code provides:
+This repository intentionally exposes a library foundation, not a public
+worker protocol. The retained code provides:
 
 - a fail-closed container execution policy with digest-pinned images,
   non-root execution, read-only roots, no-new-privileges, bounded CPU/RAM/disk,
@@ -24,6 +24,10 @@ protocol. The retained code provides:
 - operator-fixed CDI GPU mappings behind exclusive local leases;
 - a reusable black-box backend conformance harness and optional live
   containerd/NVIDIA tests;
+- a source-archive workspace boundary that rejects links and traversal, mounts
+  source read-only, and runs the manifest's exact working directory;
+- an at-most-once software-work runner with a crash-safe execution journal;
+- bounded, tamper-detecting content-addressed report and artifact storage;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
   systemd helper libraries suitable for a future worker process.
@@ -41,10 +45,12 @@ The module uses Go 1.26.5.
 go test ./...
 ```
 
-No production command is currently shipped. A new worker entry point should be
-added only after `atos-spec` freezes the software-work request, artifact,
-execution, escrow and receipt contracts. That worker should adapt those frozen
-types to `pkg/executor`; it should not resurrect the deleted inference RPC.
+No production command or public worker RPC is currently shipped. The
+provider-local execution and artifact contract is frozen in
+`atos-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md`. A public worker entry point may
+be added only after its methods and authoritative chain-verification inputs are
+frozen in the Native protobuf. It must adapt those types to `pkg/softwarework`;
+it must not resurrect the deleted inference RPC.
 
 ## Repository layout
 
@@ -53,6 +59,8 @@ pkg/executor/                    policy, supervision and backend contract
 pkg/executor/containerdbackend/ containerd implementation
 pkg/executor/backendtest/       reusable lifecycle conformance suite
 executor/gpuisolation/          exclusive operator-named GPU leases
+pkg/softwarework/               bound jobs and at-most-once outcome journal
+pkg/artifactstore/              immutable content-addressed output storage
 pkg/probe/                      privacy-minimized local resource probes
 internal/resourceguard/         continuous fail-closed resource gating
 internal/unixserver/            bounded private Unix listeners

@@ -3,6 +3,7 @@ package containerdbackend
 import (
 	"context"
 	"errors"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,8 @@ func validateRequest(
 		len(request.Environment) > MaxEnvironmentHard ||
 		request.UserID == 0 || request.GroupID == 0 ||
 		!request.ReadOnlyRoot || !request.NoNewPrivileges ||
+		(request.WorkspaceArchive && !validWorkspaceWorkingDirectory(request.WorkingDirectory)) ||
+		(!request.WorkspaceArchive && request.WorkingDirectory != "" && request.WorkingDirectory != "/") ||
 		request.Network != executor.NetworkNone || len(request.AllowedHosts) != 0 ||
 		validateDriverLimits(request.Limits, request.AllowGPU) != nil {
 		return errors.New("unsupported or invalid containerd execution request")
@@ -48,6 +51,11 @@ func validateRequest(
 		}
 	}
 	return nil
+}
+
+func validWorkspaceWorkingDirectory(value string) bool {
+	return (value == "/workspace/source" || strings.HasPrefix(value, "/workspace/source/")) &&
+		path.Clean(value) == value && len(value) <= MaxStringBytesHard
 }
 
 func validateDriverLimits(limits executor.Limits, permitGPU bool) error {
@@ -118,7 +126,7 @@ func invalidRuntimeString(value string, allowEmpty bool) bool {
 		strings.IndexByte(value, 0) >= 0
 }
 
-func fixedIsolationSpec(request executor.ContainerRequest) oci.SpecOpts {
+func fixedIsolationSpec(request executor.ContainerRequest, workspaceSource ...string) oci.SpecOpts {
 	return func(
 		_ context.Context,
 		_ oci.Client,
@@ -134,7 +142,10 @@ func fixedIsolationSpec(request executor.ContainerRequest) oci.SpecOpts {
 		}
 		spec.Process.Args = append([]string(nil), request.Entrypoint...)
 		spec.Process.Env = environment(request.Environment)
-		spec.Process.Cwd = "/"
+		spec.Process.Cwd = request.WorkingDirectory
+		if spec.Process.Cwd == "" {
+			spec.Process.Cwd = "/"
+		}
 		spec.Process.Terminal = false
 		spec.Process.User = specs.User{UID: request.UserID, GID: request.GroupID}
 		spec.Process.NoNewPrivileges = true
@@ -163,7 +174,20 @@ func fixedIsolationSpec(request executor.ContainerRequest) oci.SpecOpts {
 		if !hasPrivateNetworkNamespace(spec.Linux.Namespaces) {
 			return errors.New("containerd OCI specification lacks a private network namespace")
 		}
-		if err := boundTmpfsMounts(spec, request.Limits.DiskBytes); err != nil {
+		if request.WorkspaceArchive {
+			if len(workspaceSource) != 1 || workspaceSource[0] == "" {
+				return errors.New("containerd workspace source is unavailable")
+			}
+			spec.Mounts = append(spec.Mounts,
+				specs.Mount{Destination: "/workspace", Type: "tmpfs", Source: "tmpfs", Options: []string{
+					"nosuid", "nodev", "mode=0700", "uid=" + strconv.FormatUint(uint64(request.UserID), 10), "gid=" + strconv.FormatUint(uint64(request.GroupID), 10),
+				}},
+				specs.Mount{Destination: "/workspace/source", Type: "bind", Source: workspaceSource[0], Options: []string{"rbind", "ro", "nosuid", "nodev", "noexec"}},
+			)
+		} else if len(workspaceSource) != 0 {
+			return errors.New("unexpected containerd workspace source")
+		}
+		if err := boundTmpfsMounts(spec, request.Limits.DiskBytes, request.WorkspaceArchive); err != nil {
 			return err
 		}
 		return nil
@@ -205,9 +229,12 @@ func hasPrivateNetworkNamespace(namespaces []specs.LinuxNamespace) bool {
 	return false
 }
 
-func boundTmpfsMounts(spec *oci.Spec, total uint64) error {
-	const expected = 3
-	perMount := total / expected
+func boundTmpfsMounts(spec *oci.Spec, total uint64, workspace bool) error {
+	expected := 3
+	if workspace {
+		expected++
+	}
+	perMount := total / uint64(expected)
 	if perMount < 4096 {
 		return errors.New("containerd disk limit is too small")
 	}
@@ -216,7 +243,7 @@ func boundTmpfsMounts(spec *oci.Spec, total uint64) error {
 		mount := &spec.Mounts[index]
 		if mount.Type != "tmpfs" ||
 			(mount.Destination != "/dev" && mount.Destination != "/dev/shm" &&
-				mount.Destination != "/run") {
+				mount.Destination != "/run" && (!workspace || mount.Destination != "/workspace")) {
 			continue
 		}
 		options := make([]string, 0, len(mount.Options)+2)
@@ -225,7 +252,7 @@ func boundTmpfsMounts(spec *oci.Spec, total uint64) error {
 				options = append(options, option)
 			}
 		}
-		if !contains(options, "noexec") {
+		if mount.Destination != "/workspace" && !contains(options, "noexec") {
 			options = append(options, "noexec")
 		}
 		options = append(options, "size="+strconv.FormatUint(perMount, 10))

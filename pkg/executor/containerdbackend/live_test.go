@@ -1,6 +1,8 @@
 package containerdbackend_test
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -17,6 +19,66 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/executor/backendtest"
 	"github.com/tosnetwork/tos-ai/pkg/executor/containerdbackend"
 )
+
+func TestContainerdBackendLiveWorkspace(t *testing.T) {
+	configuration, enabled := liveTestConfiguration(t)
+	if !enabled {
+		t.Skip("private containerd live-test environment is not configured")
+	}
+	limits := executor.Limits{
+		CPUMillis: 30_000, MemoryBytes: 512 << 20, DiskBytes: 64 << 20,
+		PIDs: 64, ExecutionTime: 30 * time.Second, OutputBytes: 4096,
+	}
+	backend, err := containerdbackend.Open(context.Background(), containerdbackend.Config{
+		SocketPath: configuration.socket, Namespace: configuration.namespace,
+		Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
+		FIFODir: configuration.fifoDir, MaxActive: 1, PolicyLimits: limits,
+		ImageReference: configuration.imageReference, ImageDigest: configuration.imageDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	digest, err := executor.ExecutionDigest("containerd-live-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := executor.ContainerRequest{
+		ExecutionDigest: digest, ImageDigest: configuration.imageDigest,
+		Entrypoint:       []string{"/usr/local/bin/go", "test", "./...", "-count=1"},
+		WorkingDirectory: "/workspace/source", WorkspaceArchive: true,
+		Environment: map[string]string{"GOROOT": "/usr/local/go", "HOME": "/workspace/scratch", "GOCACHE": "/workspace/scratch/go-cache", "GOTMPDIR": "/workspace/scratch/tmp", "TMPDIR": "/workspace/scratch/tmp", "CGO_ENABLED": "0"},
+		UserID:      65532, GroupID: 65532, ReadOnlyRoot: true, NoNewPrivileges: true,
+		Network: executor.NetworkNone, Limits: limits,
+	}
+	result, err := backend.RunIsolated(context.Background(), request, liveWorkspaceArchive(t))
+	if err != nil || result.ExitCode != 0 || !bytes.Contains(result.Output, []byte("ok")) {
+		t.Fatalf("workspace result exit=%d output=%q err=%v", result.ExitCode, result.Output, err)
+	}
+}
+
+func liveWorkspaceArchive(t *testing.T) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	files := []struct{ name, body string }{
+		{"go.mod", "module example.test/live\n\ngo 1.26.5\n"},
+		{"live_test.go", "package live\nimport \"testing\"\nfunc TestLive(t *testing.T) {}\n"},
+	}
+	for _, file := range files {
+		header := &tar.Header{Name: file.name, Mode: 0o444, Size: int64(len(file.body)), Format: tar.FormatUSTAR}
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write([]byte(file.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
 
 const (
 	liveSocketEnv     = "TOS_AI_CONTAINERD_TEST_SOCKET"
