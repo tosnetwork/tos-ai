@@ -13,12 +13,15 @@ import (
 	"encoding/json"
 	"errors"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 )
+
+var quoteCommitmentPattern = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 
 const (
 	ArtifactMediaType = "application/vnd.atos.software-artifact.v1+tar"
@@ -175,7 +178,7 @@ func forbiddenExecutable(value string) bool {
 }
 
 func validateRequest(contract Contract, value Request) error {
-	if !executionIDPattern.MatchString(value.QuoteCommitment) || !executionIDPattern.MatchString(value.ExecutionID) ||
+	if !quoteCommitmentPattern.MatchString(value.QuoteCommitment) || !executionIDPattern.MatchString(value.ExecutionID) ||
 		!executionIDPattern.MatchString(value.InputDigest) || !executionIDPattern.MatchString(value.SourceDigest) ||
 		digest(value.SourceArchive) != value.SourceDigest || uint64(len(value.SourceArchive)) > contract.Limits.DiskBytes {
 		return errors.New("software-work request does not match its commitments")

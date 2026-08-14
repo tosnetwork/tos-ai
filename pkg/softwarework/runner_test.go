@@ -50,7 +50,7 @@ func fixture(t *testing.T) (*Runner, *fakeExecutor, *Journal, Request) {
 		UserID: 65532, GroupID: 65532,
 	}
 	archive := testArchive(t)
-	request := Request{QuoteCommitment: digest([]byte("quote")), ExecutionID: digest([]byte("execution")), InputDigest: digest([]byte("input")), SourceDigest: digest(archive), SourceArchive: archive}
+	request := Request{QuoteCommitment: "tvm-cell-" + digest([]byte("quote")), ExecutionID: digest([]byte("execution")), InputDigest: digest([]byte("input")), SourceDigest: digest(archive), SourceArchive: archive}
 	runner, err := NewRunner(backend, store, journal, contract)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +109,15 @@ func TestRunnerRejectsCommitmentMismatchBeforeExecution(t *testing.T) {
 	request.SourceDigest = digest([]byte("different"))
 	if _, err := runner.Execute(context.Background(), request); err == nil || backend.calls != 0 {
 		t.Fatalf("mismatch err=%v calls=%d", err, backend.calls)
+	}
+}
+
+func TestRunnerRejectsNonTVMQuoteCommitmentBeforeExecution(t *testing.T) {
+	runner, backend, journal, request := fixture(t)
+	defer journal.Close()
+	request.QuoteCommitment = digest([]byte("not a TVM cell"))
+	if _, err := runner.Execute(context.Background(), request); err == nil || backend.calls != 0 {
+		t.Fatalf("quote grammar err=%v calls=%d", err, backend.calls)
 	}
 }
 
