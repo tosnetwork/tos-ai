@@ -8,6 +8,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/tosnetwork/tos-ai/pkg/adapterhttp"
 )
 
 // NewRequestHandler binds the deliberately narrow synchronous ATOS profile to
@@ -17,6 +18,16 @@ func NewRequestHandler(adapter *Adapter) (a2asrv.RequestHandler, error) {
 		return nil, errors.New("missing A2A adapter")
 	}
 	return &requestHandler{adapter: adapter}, nil
+}
+
+// NewPublicServer composes the official A2A transport with the mandatory ATOS
+// TLS, authentication, request-size, and concurrency boundary.
+func NewPublicServer(adapter *Adapter, config adapterhttp.ServerConfig, options ...a2asrv.TransportOption) (*http.Server, error) {
+	handler, err := NewJSONRPCHandler(adapter, options...)
+	if err != nil {
+		return nil, err
+	}
+	return adapterhttp.NewServer(handler, config)
 }
 
 // NewJSONRPCHandler exposes the narrow profile through the official A2A

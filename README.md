@@ -34,6 +34,9 @@ worker protocol. The retained code provides:
   use that Gate and never treat A2A metadata as payment authority;
 - an official MCP 2026-07-28 typed tool mapper with the same finalized,
   atomic single-execution claim boundary and stateless streamable-HTTP handler;
+- a shared public-adapter boundary that requires TLS 1.3 and a strong bearer
+  credential, rejects browser origins, and bounds request bodies, headers,
+  concurrent calls, read time, and idle connections;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
   systemd helper libraries suitable for a future worker process.
@@ -54,9 +57,12 @@ go test ./...
 ```
 
 The provider-local `software-work-execute` command composes the frozen V1 job
-with the bounded executor. Reusable official-SDK A2A and MCP HTTP handlers are
-available, but no opinionated public listener, TLS, or authentication process
-is shipped. The execution contract and adapter mappings are frozen in
+with the bounded executor. Reusable official-SDK A2A and MCP handlers expose
+`NewPublicServer`, which composes them with the mandatory `pkg/adapterhttp`
+TLS and authentication boundary. Operators provide protected absolute
+certificate/key paths and start the returned server with
+`adapterhttp.ListenAndServe`; bypassing this boundary is not a supported public
+deployment. The execution contract and adapter mappings are frozen in
 `atos-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md` and
 `atos-spec/docs/A2A_ADAPTER_V1.md`, `atos-spec/docs/MCP_ADAPTER_V1.md`, and
 `atos-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. A production entry point must
@@ -82,8 +88,9 @@ pkg/executor/backendtest/       reusable lifecycle conformance suite
 executor/gpuisolation/          exclusive operator-named GPU leases
 pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/artifactstore/              immutable content-addressed output storage
-pkg/a2aadapter/                 gated A2A mapping and JSON-RPC handler
-pkg/mcpadapter/                 gated MCP tool and streamable-HTTP handler
+pkg/a2aadapter/                 gated A2A mapping and hardened JSON-RPC server
+pkg/mcpadapter/                 gated MCP tool and hardened streamable-HTTP server
+pkg/adapterhttp/                shared TLS/auth/resource public boundary
 pkg/probe/                      privacy-minimized local resource probes
 internal/resourceguard/         continuous fail-closed resource gating
 internal/unixserver/            bounded private Unix listeners

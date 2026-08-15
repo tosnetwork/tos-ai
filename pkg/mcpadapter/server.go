@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tosnetwork/tos-ai/pkg/adapterhttp"
 )
 
 // NewStreamableHTTPHandler binds the tool to the official MCP streamable HTTP
@@ -24,4 +25,14 @@ func NewStreamableHTTPHandler(adapter *Adapter) (http.Handler, error) {
 		Stateless: true, JSONResponse: true, PropagateRequestCancellation: true,
 	}
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, options), nil
+}
+
+// NewPublicServer composes the official MCP transport with the mandatory ATOS
+// TLS, authentication, request-size, and concurrency boundary.
+func NewPublicServer(adapter *Adapter, config adapterhttp.ServerConfig) (*http.Server, error) {
+	handler, err := NewStreamableHTTPHandler(adapter)
+	if err != nil {
+		return nil, err
+	}
+	return adapterhttp.NewServer(handler, config)
 }
