@@ -31,6 +31,8 @@ worker protocol. The retained code provides:
 - an official A2A 1.0 Task/result mapper that requires a finalized ATOS
   authorization adapter before execution and never treats A2A metadata as
   payment authority;
+- an official MCP 2026-07-28 typed tool mapper with the same finalized,
+  atomic single-execution claim boundary;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
   systemd helper libraries suitable for a future worker process.
@@ -79,6 +81,7 @@ executor/gpuisolation/          exclusive operator-named GPU leases
 pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/artifactstore/              immutable content-addressed output storage
 pkg/a2aadapter/                 authority-gated A2A Task/result mapping
+pkg/mcpadapter/                 purchase-bound MCP tool mapping
 pkg/probe/                      privacy-minimized local resource probes
 internal/resourceguard/         continuous fail-closed resource gating
 internal/unixserver/            bounded private Unix listeners

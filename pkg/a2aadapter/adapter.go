@@ -38,8 +38,10 @@ type FinalizedEvidence struct {
 	FinalizedCheckpoint uint64 `json:"finalized_checkpoint"`
 }
 
-type FinalizedAuthorizer interface {
-	AuthorizeExecution(context.Context, softwarework.Request) (FinalizedEvidence, error)
+type FinalizedExecutionGate interface {
+	// ClaimExecution atomically binds one Quote/escrow to this execution and
+	// input before returning finalized authorization evidence.
+	ClaimExecution(context.Context, softwarework.Request) (FinalizedEvidence, error)
 }
 
 type Runner interface {
@@ -51,7 +53,7 @@ type ArtifactLocator interface {
 }
 
 type Adapter struct {
-	authorizer FinalizedAuthorizer
+	authorizer FinalizedExecutionGate
 	runner     Runner
 	locator    ArtifactLocator
 	now        func() time.Time
@@ -88,7 +90,7 @@ type objectBinding struct {
 	URL       string `json:"url"`
 }
 
-func New(authorizer FinalizedAuthorizer, runner Runner, locator ArtifactLocator) (*Adapter, error) {
+func New(authorizer FinalizedExecutionGate, runner Runner, locator ArtifactLocator) (*Adapter, error) {
 	if authorizer == nil || runner == nil || locator == nil {
 		return nil, errors.New("invalid A2A software-work adapter configuration")
 	}
@@ -123,7 +125,7 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	if err != nil {
 		return nil, err
 	}
-	evidence, err := a.authorizer.AuthorizeExecution(ctx, work)
+	evidence, err := a.authorizer.ClaimExecution(ctx, work)
 	if err != nil {
 		return nil, errors.New("A2A execution lacks finalized ATOS authorization")
 	}

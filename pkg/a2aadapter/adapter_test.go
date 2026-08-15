@@ -16,7 +16,7 @@ type authorizerFake struct {
 	fail  bool
 }
 
-func (f *authorizerFake) AuthorizeExecution(_ context.Context, request softwarework.Request) (FinalizedEvidence, error) {
+func (f *authorizerFake) ClaimExecution(_ context.Context, request softwarework.Request) (FinalizedEvidence, error) {
 	f.calls++
 	if f.fail {
 		return FinalizedEvidence{}, errors.New("not funded")
