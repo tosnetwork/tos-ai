@@ -30,25 +30,25 @@ containerd access is equivalent to host-root authority.
 Review both template files, then install them as root:
 
 ```bash
-install -d -o root -g root -m 0755 /etc/atos
+install -d -o root -g root -m 0755 /etc/tos-service
 install -o root -g root -m 0600 deploy/provider/containerd.toml \
-  /etc/atos/containerd.toml
-install -o root -g root -m 0644 deploy/provider/atos-containerd.service \
-  /etc/systemd/system/atos-containerd.service
+  /etc/tos-service/containerd.toml
+install -o root -g root -m 0644 deploy/provider/tos-service-containerd.service \
+  /etc/systemd/system/tos-service-containerd.service
 systemctl daemon-reload
-systemctl enable --now atos-containerd.service
+systemctl enable --now tos-service-containerd.service
 ```
 
 Before proceeding, require all of these checks to pass:
 
 ```bash
-systemctl is-active --quiet atos-containerd.service
-test "$(stat -c '%U:%G:%a' /run/atos-containerd)" = root:root:700
-test "$(stat -c '%U:%G:%a' /run/atos-containerd/containerd.sock)" = root:root:600
-ctr --address /run/atos-containerd/containerd.sock plugins ls
+systemctl is-active --quiet tos-service-containerd.service
+test "$(stat -c '%U:%G:%a' /run/tos-service-containerd)" = root:root:700
+test "$(stat -c '%U:%G:%a' /run/tos-service-containerd/containerd.sock)" = root:root:600
+ctr --address /run/tos-service-containerd/containerd.sock plugins ls
 ```
 
-Import the reproducible OCI archive into namespace `atos-paid-work`, verify its
+Import the reproducible OCI archive into namespace `tos-service-paid-work`, verify its
 index digest independently, and unpack it for `overlayfs`. Never use a mutable
 tag without the manifest's exact `sha256:` digest.
 
@@ -59,18 +59,18 @@ its own identity. For each job, create a new private directory and copy—not
 link—the already content-verified source archive into it:
 
 ```bash
-install -d -o root -g root -m 0700 /var/lib/atos-provider/job-UNIQUE
+install -d -o root -g root -m 0700 /var/lib/tos-service-provider/job-UNIQUE
 install -o root -g root -m 0600 SOURCE.tar \
-  /var/lib/atos-provider/job-UNIQUE/source.tar
+  /var/lib/tos-service-provider/job-UNIQUE/source.tar
 install -d -o root -g root -m 0700 \
-  /var/lib/atos-provider/job-UNIQUE/state \
-  /run/atos-containerd/job-UNIQUE-fifos
+  /var/lib/tos-service-provider/job-UNIQUE/state \
+  /run/tos-service-containerd/job-UNIQUE-fifos
 
-/usr/local/libexec/atos/software-work-execute \
-  --containerd-socket /run/atos-containerd/containerd.sock \
-  --fifo-dir /run/atos-containerd/job-UNIQUE-fifos \
-  --state-dir /var/lib/atos-provider/job-UNIQUE/state \
-  --source /var/lib/atos-provider/job-UNIQUE/source.tar \
+/usr/local/libexec/tos-service/software-work-execute \
+  --containerd-socket /run/tos-service-containerd/containerd.sock \
+  --fifo-dir /run/tos-service-containerd/job-UNIQUE-fifos \
+  --state-dir /var/lib/tos-service-provider/job-UNIQUE/state \
+  --source /var/lib/tos-service-provider/job-UNIQUE/source.tar \
   --quote tvm-cell-sha256:ACCEPTED_QUOTE_COMMITMENT \
   --execution-id sha256:UNIQUE_EXECUTION_ID \
   --input-digest sha256:CANONICAL_INPUT_DIGEST
@@ -83,7 +83,7 @@ no signing credential.
 
 Review the settlement intent outside this root boundary and sign its exact
 32-byte payload through `tosctl`. Never copy a mnemonic, vault export, private
-key, or vault master key into `/var/lib/atos-provider`, `/run/atos-containerd`,
+key, or vault master key into `/var/lib/tos-service-provider`, `/run/tos-service-containerd`,
 the source archive, or executor environment.
 
 ## Acceptance checks

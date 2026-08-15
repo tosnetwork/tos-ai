@@ -14,11 +14,11 @@ import (
 	"strings"
 
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/agentpacket"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
-const PayloadSchema = "atos.native.agent-packet-work.v1"
+const PayloadSchema = "tos.service.agent-packet-work.v1"
 
 type Gate interface {
 	ClaimExecution(context.Context, executiongate.Request) (executiongate.Evidence, error)
@@ -89,7 +89,7 @@ func (a *Adapter) Execute(ctx context.Context, packet agentpacket.Packet) (softw
 	}
 	evidence, err := a.gate.ClaimExecution(ctx, claim)
 	if err != nil {
-		return softwarework.Outcome{}, executiongate.Evidence{}, errors.New("Agent Packet lacks finalized ATOS authorization")
+		return softwarework.Outcome{}, executiongate.Evidence{}, errors.New("Agent Packet lacks finalized TOS Service Protocol authorization")
 	}
 	if evidence.QuoteCommitment != claim.QuoteCommitment || evidence.EscrowAddress != claim.EscrowAddress || evidence.CapabilityID != packet.CapabilityID {
 		return softwarework.Outcome{}, executiongate.Evidence{}, errors.New("execution evidence does not match Agent Packet")

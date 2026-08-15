@@ -9,7 +9,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
 type authorizerFake struct {

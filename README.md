@@ -1,13 +1,13 @@
 # TOS AI Execution Foundation
 
-`tos-ai` contains the reusable local execution substrate for the Native ATOS
+`tos-ai` contains the reusable local execution substrate for the Native TOS Service Protocol
 software-work market. It is not a second registry, an authority over payments,
 or a public network authority. Finalized TOS state remains canonical; this module
 executes work bound by an Accepted Quote and produces off-chain outputs and
 evidence for a TOS-committed Receipt.
 
 The normative product direction lives in
-[`tosnetwork/atos-spec`](https://github.com/tosnetwork/atos-spec).
+[`tosnetwork/tos-service-spec`](https://github.com/tosnetwork/tos-service-spec).
 
 ## Current scope
 
@@ -65,9 +65,9 @@ TLS and authentication boundary. Operators provide protected absolute
 certificate/key paths and start the returned server with
 `adapterhttp.ListenAndServe`; bypassing this boundary is not a supported public
 deployment. The execution contract and adapter mappings are frozen in
-`atos-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md` and
-`atos-spec/docs/A2A_ADAPTER_V1.md`, `atos-spec/docs/MCP_ADAPTER_V1.md`, and
-`atos-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. A production entry point must
+`tos-service-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md` and
+`tos-service-spec/docs/A2A_ADAPTER_V1.md`, `tos-service-spec/docs/MCP_ADAPTER_V1.md`, and
+`tos-service-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. A production entry point must
 configure the finalized-chain resolvers and retain the operator's hardened
 listener boundary. It must not resurrect the deleted inference RPC.
 

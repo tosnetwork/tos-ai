@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/agentpacket"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
 type gateFake struct{ calls int }

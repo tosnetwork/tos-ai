@@ -1,5 +1,5 @@
 // Package adapterhttp provides the mandatory public HTTP boundary shared by
-// the ATOS A2A and MCP adapters. It authenticates transport access only; it
+// the TOS Service Protocol A2A and MCP adapters. It authenticates transport access only; it
 // never decides payment, identity, execution, or settlement semantics.
 package adapterhttp
 
@@ -50,7 +50,7 @@ func NewBoundary(next http.Handler, config BoundaryConfig) (http.Handler, error)
 		}
 		provided, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
 		if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(config.BearerToken)) != 1 {
-			writer.Header().Set("WWW-Authenticate", `Bearer realm="atos-native-provider"`)
+			writer.Header().Set("WWW-Authenticate", `Bearer realm="tos-service-provider"`)
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}

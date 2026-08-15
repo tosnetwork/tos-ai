@@ -16,7 +16,7 @@ func NewStreamableHTTPHandler(adapter *Adapter) (http.Handler, error) {
 		return nil, errors.New("missing MCP adapter")
 	}
 	server := mcp.NewServer(&mcp.Implementation{
-		Name: "atos-native-provider", Title: "ATOS Native provider", Version: "1.0.0",
+		Name: "tos-service-provider", Title: "TOS Service Provider", Version: "1.0.0",
 	}, nil)
 	if err := adapter.AddTo(server); err != nil {
 		return nil, err
@@ -27,7 +27,7 @@ func NewStreamableHTTPHandler(adapter *Adapter) (http.Handler, error) {
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, options), nil
 }
 
-// NewPublicServer composes the official MCP transport with the mandatory ATOS
+// NewPublicServer composes the official MCP transport with the mandatory TOS Service Protocol
 // TLS, authentication, request-size, and concurrency boundary.
 func NewPublicServer(adapter *Adapter, config adapterhttp.ServerConfig) (*http.Server, error) {
 	handler, err := NewStreamableHTTPHandler(adapter)

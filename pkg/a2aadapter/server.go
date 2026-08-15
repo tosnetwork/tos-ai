@@ -11,7 +11,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/adapterhttp"
 )
 
-// NewRequestHandler binds the deliberately narrow synchronous ATOS profile to
+// NewRequestHandler binds the deliberately narrow synchronous TOS Service Protocol profile to
 // the official transport-neutral A2A server boundary.
 func NewRequestHandler(adapter *Adapter) (a2asrv.RequestHandler, error) {
 	if adapter == nil {
@@ -20,7 +20,7 @@ func NewRequestHandler(adapter *Adapter) (a2asrv.RequestHandler, error) {
 	return &requestHandler{adapter: adapter}, nil
 }
 
-// NewPublicServer composes the official A2A transport with the mandatory ATOS
+// NewPublicServer composes the official A2A transport with the mandatory TOS Service Protocol
 // TLS, authentication, request-size, and concurrency boundary.
 func NewPublicServer(adapter *Adapter, config adapterhttp.ServerConfig, options ...a2asrv.TransportOption) (*http.Server, error) {
 	handler, err := NewJSONRPCHandler(adapter, options...)

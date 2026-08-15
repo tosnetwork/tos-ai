@@ -24,8 +24,8 @@ import (
 var quoteCommitmentPattern = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 
 const (
-	ArtifactMediaType = "application/vnd.atos.software-artifact.v1+tar"
-	ReportMediaType   = "application/vnd.atos.test-report.v1+json"
+	ArtifactMediaType = "application/vnd.tos.service.software-artifact.v1+tar"
+	ReportMediaType   = "application/vnd.tos.service.test-report.v1+json"
 )
 
 type Contract struct {
@@ -123,7 +123,7 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Outcome, error) 
 		ExitCode        int            `json:"exit_code"`
 		Usage           executor.Usage `json:"usage"`
 		CompletedAtUnix uint64         `json:"completed_at_unix"`
-	}{"atos.software-work-report.v1", request.ExecutionID, resultDigest, result.ExitCode, result.Usage, uint64(completed.Unix())})
+	}{"tos.service.software-work-report.v1", request.ExecutionID, resultDigest, result.ExitCode, result.Usage, uint64(completed.Unix())})
 	if err != nil {
 		return Outcome{}, errors.New("encode software-work report")
 	}

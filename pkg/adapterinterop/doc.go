@@ -1,3 +1,3 @@
 // Package adapterinterop contains cross-transport acceptance tests for the
-// shared ATOS execution-claim boundary.
+// shared TOS Service Protocol execution-claim boundary.
 package adapterinterop

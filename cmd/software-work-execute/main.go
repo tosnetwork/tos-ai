@@ -50,7 +50,7 @@ func main() {
 	limits := executor.Limits{CPUMillis: 120_000, MemoryBytes: 1 << 30, DiskBytes: 2 << 30,
 		PIDs: 64, ExecutionTime: 180 * time.Second, OutputBytes: 16 << 20}
 	backend, err := containerdbackend.Open(context.Background(), containerdbackend.Config{
-		SocketPath: *socket, Namespace: "atos-paid-work", Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
+		SocketPath: *socket, Namespace: "tos-service-paid-work", Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
 		FIFODir: *fifo, MaxActive: 1, PolicyLimits: limits,
 		ImageReference: "docker.io/tosnetwork/software-work-go:1.26.5@" + image, ImageDigest: image,
 	})

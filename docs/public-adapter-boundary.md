@@ -1,6 +1,6 @@
 # Public A2A and MCP boundary
 
-`pkg/adapterhttp` is the required network boundary for public ATOS A2A and MCP
+`pkg/adapterhttp` is the required network boundary for public TOS Service Protocol A2A and MCP
 handlers. It grants transport access only. The shared execution Gate still
 derives every commercial decision from finalized TOS state and its durable
 purchase-intent journal.
@@ -11,12 +11,12 @@ Construct an A2A server with `a2aadapter.NewPublicServer`, or an MCP server with
 ```go
 server, err := a2aadapter.NewPublicServer(adapter, adapterhttp.ServerConfig{
     Address: ":8443",
-    CertificateFile: "/etc/atos/tls/provider.crt",
-    PrivateKeyFile: "/etc/atos/tls/provider.key",
+    CertificateFile: "/etc/tos-service/tls/provider.crt",
+    PrivateKeyFile: "/etc/tos-service/tls/provider.key",
     // Set ClientCAFile to require and verify mTLS client certificates.
-    ClientCAFile: "/etc/atos/tls/client-ca.crt",
+    ClientCAFile: "/etc/tos-service/tls/client-ca.crt",
     Boundary: adapterhttp.BoundaryConfig{
-        BearerToken: os.Getenv("ATOS_ADAPTER_BEARER_TOKEN"),
+        BearerToken: os.Getenv("TOS_SERVICE_ADAPTER_BEARER_TOKEN"),
         MaxRequestBytes: 16 << 20,
         MaxConcurrent: 32,
     },

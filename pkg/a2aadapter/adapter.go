@@ -1,5 +1,5 @@
 // Package a2aadapter maps the official A2A 1.0 Task model into the single
-// finalized-authority ATOS software-work lifecycle. It adds no payment or
+// finalized-authority TOS Service Protocol software-work lifecycle. It adds no payment or
 // execution authority to A2A metadata.
 package a2aadapter
 
@@ -19,14 +19,14 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
 const (
-	ExtensionURI    = "https://atos.im/extensions/native-software-work/v1"
-	TaskMediaType   = "application/vnd.atos.a2a.software-work-task.v1+json"
-	SourceMediaType = "application/vnd.atos.software-source.v1+tar"
-	ResultMediaType = "application/vnd.atos.a2a.software-work-result.v1+json"
+	ExtensionURI    = "urn:tos:service:extension:native-software-work:v1"
+	TaskMediaType   = "application/vnd.tos.service.a2a.software-work-task.v1+json"
+	SourceMediaType = "application/vnd.tos.service.software-source.v1+tar"
+	ResultMediaType = "application/vnd.tos.service.a2a.software-work-result.v1+json"
 )
 
 type FinalizedEvidence = executiongate.Evidence
@@ -110,7 +110,7 @@ func NewTaskRequest(messageID, contextID, escrowAddress, quoteCommitment, execut
 		!shaDigestValid(executionID) || len(sourceArchive) == 0 {
 		return nil, errors.New("invalid A2A software-work task input")
 	}
-	binding := taskBinding{Protocol: "atos_native_v1", EscrowAddress: escrowAddress, QuoteCommitment: quoteCommitment,
+	binding := taskBinding{Protocol: "tos_service_v1", EscrowAddress: escrowAddress, QuoteCommitment: quoteCommitment,
 		ExecutionID: executionID, SourceDigest: digest(sourceArchive)}
 	binding.InputDigest = inputDigest(binding)
 	bindingPart := a2a.NewDataPart(binding)
@@ -135,7 +135,7 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	}
 	evidence, err := a.authorizer.ClaimExecution(ctx, claim)
 	if err != nil {
-		return nil, errors.New("A2A execution lacks finalized ATOS authorization")
+		return nil, errors.New("A2A execution lacks finalized TOS Service Protocol authorization")
 	}
 	if err := validateEvidence(evidence, claim); err != nil {
 		return nil, err
@@ -163,7 +163,7 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	if err != nil || !artifactURLValid(reportURL) {
 		return nil, errors.New("invalid A2A report retrieval URL")
 	}
-	result := resultBinding{Protocol: "atos_native_v1", Evidence: evidence,
+	result := resultBinding{Protocol: "tos_service_v1", Evidence: evidence,
 		QuoteCommitment: outcome.QuoteCommitment, ExecutionID: outcome.ExecutionID,
 		InputDigest: outcome.InputDigest, ResultDigest: outcome.ResultDigest, SourceDigest: outcome.SourceDigest,
 		ToolchainDigest: outcome.ToolchainDigest, SandboxDigest: outcome.SandboxDigest,
@@ -175,8 +175,8 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	part := a2a.NewDataPart(result)
 	part.MediaType = ResultMediaType
 	artifactID := sha256.Sum256([]byte(work.ExecutionID + "\x00" + outcome.ResultDigest))
-	task.Artifacts = []*a2a.Artifact{{ID: a2a.ArtifactID("atos-" + hex.EncodeToString(artifactID[:])),
-		Name: "ATOS software-work result", Extensions: []string{ExtensionURI}, Parts: a2a.ContentParts{part}}}
+	task.Artifacts = []*a2a.Artifact{{ID: a2a.ArtifactID("tos-service-" + hex.EncodeToString(artifactID[:])),
+		Name: "TOS Service Protocol software-work result", Extensions: []string{ExtensionURI}, Parts: a2a.ContentParts{part}}}
 	task.Status = a2a.TaskStatus{State: a2a.TaskStateCompleted, Timestamp: &completed}
 	return task, nil
 }
@@ -221,7 +221,7 @@ func decodeRequest(request *a2a.SendMessageRequest) (softwarework.Request, execu
 		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A task binding data")
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || binding.Protocol != "atos_native_v1" {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || binding.Protocol != "tos_service_v1" {
 		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A task binding protocol")
 	}
 	source := append([]byte(nil), sourcePart.Raw()...)
@@ -241,17 +241,17 @@ func inputDigest(binding taskBinding) string {
 	raw, _ := json.Marshal(struct {
 		Protocol, EscrowAddress, QuoteCommitment, ExecutionID, SourceDigest string
 	}{binding.Protocol, binding.EscrowAddress, binding.QuoteCommitment, binding.ExecutionID, binding.SourceDigest})
-	return digest(append([]byte("atos.a2a.software-work-input.v1\x00"), raw...))
+	return digest(append([]byte("tos.service.a2a.software-work-input.v1\x00"), raw...))
 }
 
 func submittedTask(message *a2a.Message, work softwarework.Request, now time.Time) *a2a.Task {
-	id := sha256.Sum256([]byte("atos.a2a.task.v1\x00" + work.QuoteCommitment + "\x00" + work.ExecutionID))
+	id := sha256.Sum256([]byte("tos.service.a2a.task.v1\x00" + work.QuoteCommitment + "\x00" + work.ExecutionID))
 	contextID := message.ContextID
 	if contextID == "" {
-		contextID = "atos-" + hex.EncodeToString(id[:])
+		contextID = "tos-service-" + hex.EncodeToString(id[:])
 	}
-	return &a2a.Task{ID: a2a.TaskID("atos-" + hex.EncodeToString(id[:])), ContextID: contextID,
-		History: []*a2a.Message{message}, Metadata: map[string]any{"atos_extension": ExtensionURI},
+	return &a2a.Task{ID: a2a.TaskID("tos-service-" + hex.EncodeToString(id[:])), ContextID: contextID,
+		History: []*a2a.Message{message}, Metadata: map[string]any{"tos_service_extension": ExtensionURI},
 		Status: a2a.TaskStatus{State: a2a.TaskStateWorking, Timestamp: &now}}
 }
 
@@ -265,7 +265,7 @@ func validateEvidence(value FinalizedEvidence, request executiongate.Request) er
 		!shaDigestValid(value.EscrowTransactionHash) || !shaDigestValid(value.AgentTransactionHash) ||
 		!shaDigestValid(value.CapabilityTransactionHash) ||
 		value.EscrowFinalizedCheckpoint == 0 || value.AgentFinalizedCheckpoint == 0 || value.CapabilityFinalizedCheckpoint == 0 {
-		return errors.New("invalid finalized ATOS execution evidence")
+		return errors.New("invalid finalized TOS Service Protocol execution evidence")
 	}
 	return nil
 }

@@ -1,12 +1,12 @@
 [Unit]
-Description=ATOS private software-work containerd
+Description=TOS Service Protocol private software-work containerd
 Documentation=https://github.com/tosnetwork/tos-ai/tree/main/deploy/provider
 After=local-fs.target
 Wants=local-fs.target
 
 [Service]
 Type=notify
-ExecStart=/usr/bin/containerd --config /etc/atos/containerd.toml
+ExecStart=/usr/bin/containerd --config /etc/tos-service/containerd.toml
 Restart=on-failure
 RestartSec=5s
 Delegate=yes
@@ -18,9 +18,9 @@ UMask=0077
 # Ubuntu's containerd build appends /etc/containerd/conf.d/*.toml even when
 # imports is empty. Hide that host-global directory inside this unit.
 TemporaryFileSystem=/etc/containerd/conf.d:ro
-RuntimeDirectory=atos-containerd
+RuntimeDirectory=tos-service-containerd
 RuntimeDirectoryMode=0700
-StateDirectory=atos-containerd
+StateDirectory=tos-service-containerd
 StateDirectoryMode=0700
 
 [Install]

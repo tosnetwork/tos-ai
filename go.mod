@@ -12,7 +12,7 @@ require (
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-protocol v0.0.0-20260815020450-92d8d1f114f9
+	github.com/tosnetwork/tos-service-protocol v0.0.0-20260815145921-010ad335688d
 	google.golang.org/protobuf v1.36.11
 	tags.cncf.io/container-device-interface v1.0.0
 )

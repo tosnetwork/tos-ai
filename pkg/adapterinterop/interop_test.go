@@ -28,7 +28,7 @@ import (
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/mcpadapter"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
 const bearerToken = "0123456789abcdef0123456789abcdef"
@@ -130,7 +130,7 @@ func TestTLSA2AThenMCPCannotExecuteOnePurchaseTwice(t *testing.T) {
 	}
 	mcpURL, stopMCP := serveTLS(t, mcpServer)
 	defer stopMCP()
-	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "atos-interop", Version: "1.0.0"}, nil)
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "tos-service-interop", Version: "1.0.0"}, nil)
 	session, err := mcpClient.Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint: mcpURL, HTTPClient: client, DisableStandaloneSSE: true, MaxRetries: -1}, nil)
 	if err != nil {

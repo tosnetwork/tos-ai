@@ -126,7 +126,7 @@ A root-owned containerd socket is host-root authority, even when filesystem
 permissions make the connecting client appear unprivileged. Operators must not
 `chown` that socket to a gateway account, make it group-accessible, or expose it
 through a proxy available to remote requests. Doing so would let that account
-bypass the fixed ATOS execution policy and call containerd directly.
+bypass the fixed TOS Service Protocol execution policy and call containerd directly.
 
 For a privileged private daemon, run `software-work-execute` as the same
 dedicated executor identity that owns the socket and its `0700` parent. Before

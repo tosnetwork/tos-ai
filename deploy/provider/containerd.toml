@@ -1,8 +1,8 @@
 version = 3
 
-# Dedicated ATOS runtime state. Do not reuse the host Docker/Kubernetes daemon.
-root = '/var/lib/atos-containerd'
-state = '/run/atos-containerd'
+# Dedicated TOS Service Protocol runtime state. Do not reuse the host Docker/Kubernetes daemon.
+root = '/var/lib/tos-service-containerd'
+state = '/run/tos-service-containerd'
 # The systemd unit hides the distribution import directory with an empty,
 # read-only mount namespace before containerd parses its compiled default glob.
 imports = []
@@ -21,7 +21,7 @@ required_plugins = [
 ]
 
 [grpc]
-  address = '/run/atos-containerd/containerd.sock'
+  address = '/run/tos-service-containerd/containerd.sock'
   uid = 0
   gid = 0
   max_recv_message_size = 16777216

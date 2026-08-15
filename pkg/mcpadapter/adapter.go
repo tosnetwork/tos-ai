@@ -16,16 +16,16 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
-const ToolName = "atos_native_software_work"
+const ToolName = "tos_service_software_work"
 
 type Input struct {
 	EscrowAddress       string `json:"escrow_address" jsonschema:"exact funded escrow raw address"`
 	QuoteCommitment     string `json:"quote_commitment" jsonschema:"exact finalized Accepted Quote commitment"`
 	ExecutionID         string `json:"execution_id" jsonschema:"nonzero sha256 execution identity"`
-	InputDigest         string `json:"input_digest" jsonschema:"ATOS MCP input commitment"`
+	InputDigest         string `json:"input_digest" jsonschema:"TOS Service Protocol MCP input commitment"`
 	SourceDigest        string `json:"source_digest" jsonschema:"sha256 of exact source archive bytes"`
 	SourceArchiveBase64 string `json:"source_archive_base64" jsonschema:"canonical standard base64 uncompressed POSIX tar"`
 }
@@ -95,7 +95,7 @@ func NewSettling(gate ExecutionGate, runner Runner, locator Locator, settler Set
 
 func Tool() *mcp.Tool {
 	return &mcp.Tool{Name: ToolName, Title: "Purchase-bound Native software work",
-		Description: "Executes one already-funded ATOS Native software-work Quote. MCP metadata never authorizes payment or execution."}
+		Description: "Executes one already-funded TOS Service Protocol software-work Quote. MCP metadata never authorizes payment or execution."}
 }
 
 func (a *Adapter) AddTo(server *mcp.Server) error {
@@ -132,7 +132,7 @@ func (a *Adapter) Call(ctx context.Context, _ *mcp.CallToolRequest, input Input)
 		ExecutionID: work.ExecutionID, InputDigest: work.InputDigest, SourceDigest: work.SourceDigest}
 	evidence, err := a.gate.ClaimExecution(ctx, claim)
 	if err != nil || !validEvidence(evidence, claim) {
-		return nil, Output{}, errors.New("MCP execution lacks a unique finalized ATOS authorization")
+		return nil, Output{}, errors.New("MCP execution lacks a unique finalized TOS Service Protocol authorization")
 	}
 	outcome, err := a.runner.Execute(ctx, work)
 	if err != nil {
@@ -154,7 +154,7 @@ func (a *Adapter) Call(ctx context.Context, _ *mcp.CallToolRequest, input Input)
 	if err != nil || !httpsURL(reportURL) {
 		return nil, Output{}, errors.New("invalid report retrieval URL")
 	}
-	return nil, Output{Protocol: "atos_native_v1", Evidence: evidence, QuoteCommitment: outcome.QuoteCommitment,
+	return nil, Output{Protocol: "tos_service_v1", Evidence: evidence, QuoteCommitment: outcome.QuoteCommitment,
 		ExecutionID: outcome.ExecutionID, InputDigest: outcome.InputDigest, ResultDigest: outcome.ResultDigest,
 		Artifact:     Object{outcome.Artifact.Digest, outcome.Artifact.MediaType, outcome.Artifact.SizeBytes, artifactURL},
 		Report:       Object{outcome.Report.Digest, outcome.Report.MediaType, outcome.Report.SizeBytes, reportURL},
@@ -164,8 +164,8 @@ func (a *Adapter) Call(ctx context.Context, _ *mcp.CallToolRequest, input Input)
 
 func inputDigest(v Input) string {
 	raw, _ := json.Marshal(struct{ Protocol, EscrowAddress, QuoteCommitment, ExecutionID, SourceDigest string }{
-		"atos_native_v1", v.EscrowAddress, v.QuoteCommitment, v.ExecutionID, v.SourceDigest})
-	return digest(append([]byte("atos.mcp.software-work-input.v1\x00"), raw...))
+		"tos_service_v1", v.EscrowAddress, v.QuoteCommitment, v.ExecutionID, v.SourceDigest})
+	return digest(append([]byte("tos.service.mcp.software-work-input.v1\x00"), raw...))
 }
 func validEvidence(v Evidence, r executiongate.Request) bool {
 	return v.NetworkID != "" && agentID(v.ProviderAgentID) && capabilityID(v.CapabilityID) &&

@@ -8,7 +8,7 @@ import (
 
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
-	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
+	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
 type gateFake struct {
@@ -61,7 +61,7 @@ func TestMCPAdapterExecutesOnlyCommittedInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Protocol != "atos_native_v1" || out.Evidence.EscrowFinalizedCheckpoint != 7 || out.Artifact.URL == "" || gate.calls != 1 || runner.calls != 1 {
+	if out.Protocol != "tos_service_v1" || out.Evidence.EscrowFinalizedCheckpoint != 7 || out.Artifact.URL == "" || gate.calls != 1 || runner.calls != 1 {
 		t.Fatal("MCP result lost Native evidence")
 	}
 	input.SourceArchiveBase64 = "Y2hhbmdlZA=="

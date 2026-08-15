@@ -51,7 +51,7 @@ func (j *Journal) Claim(executionID, fingerprint string) (bool, journalRecord, e
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 	path := j.path(executionID)
-	record := journalRecord{Schema: "atos.software-work-journal.v1", Fingerprint: fingerprint, State: "running"}
+	record := journalRecord{Schema: "tos.service.software-work-journal.v1", Fingerprint: fingerprint, State: "running"}
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return false, journalRecord{}, err
@@ -167,7 +167,7 @@ func readJournalRecord(path string) (journalRecord, error) {
 		return journalRecord{}, errors.New("read software-work journal record")
 	}
 	var record journalRecord
-	if err := json.Unmarshal(value, &record); err != nil || record.Schema != "atos.software-work-journal.v1" || !executionIDPattern.MatchString(record.Fingerprint) || (record.State != "running" && record.State != "complete") {
+	if err := json.Unmarshal(value, &record); err != nil || record.Schema != "tos.service.software-work-journal.v1" || !executionIDPattern.MatchString(record.Fingerprint) || (record.State != "running" && record.State != "complete") {
 		return journalRecord{}, errors.New("invalid software-work journal record")
 	}
 	return record, nil
