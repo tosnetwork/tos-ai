@@ -19,6 +19,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
+	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
 )
 
 const (
@@ -28,20 +29,12 @@ const (
 	ResultMediaType = "application/vnd.atos.a2a.software-work-result.v1+json"
 )
 
-type FinalizedEvidence struct {
-	NetworkID           string `json:"network_id"`
-	CapabilityID        string `json:"capability_id"`
-	CapabilityVersion   string `json:"capability_version"`
-	ManifestDigest      string `json:"manifest_digest"`
-	QuoteCommitment     string `json:"quote_commitment"`
-	EscrowAddress       string `json:"escrow_address"`
-	FinalizedCheckpoint uint64 `json:"finalized_checkpoint"`
-}
+type FinalizedEvidence = executiongate.Evidence
 
 type FinalizedExecutionGate interface {
 	// ClaimExecution atomically binds one Quote/escrow to this execution and
 	// input before returning finalized authorization evidence.
-	ClaimExecution(context.Context, softwarework.Request) (FinalizedEvidence, error)
+	ClaimExecution(context.Context, executiongate.Request) (executiongate.Evidence, error)
 }
 
 type Runner interface {
@@ -61,6 +54,7 @@ type Adapter struct {
 
 type taskBinding struct {
 	Protocol        string `json:"protocol"`
+	EscrowAddress   string `json:"escrow_address"`
 	QuoteCommitment string `json:"quote_commitment"`
 	ExecutionID     string `json:"execution_id"`
 	InputDigest     string `json:"input_digest"`
@@ -97,12 +91,12 @@ func New(authorizer FinalizedExecutionGate, runner Runner, locator ArtifactLocat
 	return &Adapter{authorizer: authorizer, runner: runner, locator: locator, now: time.Now}, nil
 }
 
-func NewTaskRequest(messageID, contextID, quoteCommitment, executionID string, sourceArchive []byte) (*a2a.SendMessageRequest, error) {
-	if messageID == "" || len(messageID) > 256 || !cellDigestValid(quoteCommitment) ||
+func NewTaskRequest(messageID, contextID, escrowAddress, quoteCommitment, executionID string, sourceArchive []byte) (*a2a.SendMessageRequest, error) {
+	if messageID == "" || len(messageID) > 256 || !rawAddressValid(escrowAddress) || !cellDigestValid(quoteCommitment) ||
 		!shaDigestValid(executionID) || len(sourceArchive) == 0 {
 		return nil, errors.New("invalid A2A software-work task input")
 	}
-	binding := taskBinding{Protocol: "atos_native_v1", QuoteCommitment: quoteCommitment,
+	binding := taskBinding{Protocol: "atos_native_v1", EscrowAddress: escrowAddress, QuoteCommitment: quoteCommitment,
 		ExecutionID: executionID, SourceDigest: digest(sourceArchive)}
 	binding.InputDigest = inputDigest(binding)
 	bindingPart := a2a.NewDataPart(binding)
@@ -121,15 +115,15 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	if a == nil || ctx == nil {
 		return nil, errors.New("invalid A2A software-work request")
 	}
-	work, message, err := decodeRequest(request)
+	work, claim, message, err := decodeRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	evidence, err := a.authorizer.ClaimExecution(ctx, work)
+	evidence, err := a.authorizer.ClaimExecution(ctx, claim)
 	if err != nil {
 		return nil, errors.New("A2A execution lacks finalized ATOS authorization")
 	}
-	if err := validateEvidence(evidence, work); err != nil {
+	if err := validateEvidence(evidence, claim); err != nil {
 		return nil, err
 	}
 	task := submittedTask(message, work, a.now().UTC())
@@ -168,64 +162,66 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	return task, nil
 }
 
-func decodeRequest(request *a2a.SendMessageRequest) (softwarework.Request, *a2a.Message, error) {
+func decodeRequest(request *a2a.SendMessageRequest) (softwarework.Request, executiongate.Request, *a2a.Message, error) {
 	if request == nil || request.Message == nil || request.Message.Role != a2a.MessageRoleUser ||
 		request.Message.ID == "" || len(request.Message.ID) > 256 || len(request.Message.Parts) != 2 ||
 		len(request.Message.Extensions) != 1 || request.Message.Extensions[0] != ExtensionURI {
-		return softwarework.Request{}, nil, errors.New("invalid A2A software-work message envelope")
+		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A software-work message envelope")
 	}
 	var bindingPart, sourcePart *a2a.Part
 	for _, part := range request.Message.Parts {
 		if part == nil || len(part.Metadata) != 0 {
-			return softwarework.Request{}, nil, errors.New("invalid A2A software-work part")
+			return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A software-work part")
 		}
 		switch part.MediaType {
 		case TaskMediaType:
 			if bindingPart != nil || part.Data() == nil {
-				return softwarework.Request{}, nil, errors.New("invalid A2A task binding part")
+				return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A task binding part")
 			}
 			bindingPart = part
 		case SourceMediaType:
 			if sourcePart != nil || len(part.Raw()) == 0 || part.Filename != "source.tar" {
-				return softwarework.Request{}, nil, errors.New("invalid A2A source part")
+				return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A source part")
 			}
 			sourcePart = part
 		default:
-			return softwarework.Request{}, nil, errors.New("unsupported A2A software-work media type")
+			return softwarework.Request{}, executiongate.Request{}, nil, errors.New("unsupported A2A software-work media type")
 		}
 	}
 	if bindingPart == nil || sourcePart == nil {
-		return softwarework.Request{}, nil, errors.New("incomplete A2A software-work message")
+		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("incomplete A2A software-work message")
 	}
 	raw, err := json.Marshal(bindingPart.Data())
 	if err != nil || len(raw) > 4096 {
-		return softwarework.Request{}, nil, errors.New("invalid A2A task binding data")
+		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A task binding data")
 	}
 	var binding taskBinding
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&binding); err != nil {
-		return softwarework.Request{}, nil, errors.New("invalid A2A task binding data")
+		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A task binding data")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || binding.Protocol != "atos_native_v1" {
-		return softwarework.Request{}, nil, errors.New("invalid A2A task binding protocol")
+		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("invalid A2A task binding protocol")
 	}
 	source := append([]byte(nil), sourcePart.Raw()...)
 	work := softwarework.Request{QuoteCommitment: binding.QuoteCommitment, ExecutionID: binding.ExecutionID,
 		InputDigest: binding.InputDigest, SourceDigest: binding.SourceDigest, SourceArchive: source}
-	if !cellDigestValid(work.QuoteCommitment) || !shaDigestValid(work.ExecutionID) ||
+	if !rawAddressValid(binding.EscrowAddress) || !cellDigestValid(work.QuoteCommitment) || !shaDigestValid(work.ExecutionID) ||
 		!shaDigestValid(work.InputDigest) || !shaDigestValid(work.SourceDigest) ||
 		digest(source) != work.SourceDigest || inputDigest(binding) != work.InputDigest {
-		return softwarework.Request{}, nil, errors.New("A2A task bytes do not match their commitments")
+		return softwarework.Request{}, executiongate.Request{}, nil, errors.New("A2A task bytes do not match their commitments")
 	}
-	return work, request.Message, nil
+	claim := executiongate.Request{EscrowAddress: binding.EscrowAddress, QuoteCommitment: work.QuoteCommitment,
+		ExecutionID: work.ExecutionID, InputDigest: work.InputDigest, SourceDigest: work.SourceDigest}
+	return work, claim, request.Message, nil
 }
 
 func inputDigest(binding taskBinding) string {
 	raw, _ := json.Marshal(struct {
-		Protocol, QuoteCommitment, ExecutionID, SourceDigest string
-	}{binding.Protocol, binding.QuoteCommitment, binding.ExecutionID, binding.SourceDigest})
+		Protocol, EscrowAddress, QuoteCommitment, ExecutionID, SourceDigest string
+	}{binding.Protocol, binding.EscrowAddress, binding.QuoteCommitment, binding.ExecutionID, binding.SourceDigest})
 	return digest(append([]byte("atos.a2a.software-work-input.v1\x00"), raw...))
 }
 
@@ -240,14 +236,23 @@ func submittedTask(message *a2a.Message, work softwarework.Request, now time.Tim
 		Status: a2a.TaskStatus{State: a2a.TaskStateWorking, Timestamp: &now}}
 }
 
-func validateEvidence(value FinalizedEvidence, request softwarework.Request) error {
+func validateEvidence(value FinalizedEvidence, request executiongate.Request) error {
 	if value.NetworkID == "" || len(value.NetworkID) > 64 || strings.TrimSpace(value.NetworkID) != value.NetworkID ||
-		!capabilityIDValid(value.CapabilityID) || value.CapabilityVersion == "" || len(value.CapabilityVersion) > 64 ||
+		!agentIDValid(value.ProviderAgentID) || !capabilityIDValid(value.CapabilityID) ||
+		value.CapabilityVersion == "" || len(value.CapabilityVersion) > 64 ||
 		!shaDigestValid(value.ManifestDigest) || value.QuoteCommitment != request.QuoteCommitment ||
-		!rawAddressValid(value.EscrowAddress) || value.FinalizedCheckpoint == 0 {
+		value.EscrowAddress != request.EscrowAddress || !rawAddressValid(value.ProviderAddress) ||
+		!cellDigestValid(value.EscrowCodeHash) || !cellDigestValid(value.RegistryCodeHash) ||
+		!shaDigestValid(value.EscrowTransactionHash) || !shaDigestValid(value.AgentTransactionHash) ||
+		!shaDigestValid(value.CapabilityTransactionHash) ||
+		value.EscrowFinalizedCheckpoint == 0 || value.AgentFinalizedCheckpoint == 0 || value.CapabilityFinalizedCheckpoint == 0 {
 		return errors.New("invalid finalized ATOS execution evidence")
 	}
 	return nil
+}
+
+func agentIDValid(value string) bool {
+	return len(value) == 70 && strings.HasPrefix(value, "agent_") && digestSuffixValid("sha256:"+value[6:], "sha256:")
 }
 
 func validateOutcome(value softwarework.Outcome, request softwarework.Request) error {

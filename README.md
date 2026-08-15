@@ -2,7 +2,7 @@
 
 `tos-ai` contains the reusable local execution substrate for the Native ATOS
 software-work market. It is not a second registry, an authority over payments,
-or a public A2A server. Finalized TOS state remains canonical; this module
+or a public network authority. Finalized TOS state remains canonical; this module
 executes work bound by an Accepted Quote and produces off-chain outputs and
 evidence for a TOS-committed Receipt.
 
@@ -28,11 +28,12 @@ worker protocol. The retained code provides:
   source read-only, and runs the manifest's exact working directory;
 - an at-most-once software-work runner with a crash-safe execution journal;
 - bounded, tamper-detecting content-addressed report and artifact storage;
-- an official A2A 1.0 Task/result mapper that requires a finalized ATOS
-  authorization adapter before execution and never treats A2A metadata as
-  payment authority;
+- a shared durable execution Gate that verifies finalized escrow, Agent, and
+  Capability state and atomically prevents cross-transport purchase replay;
+- an official A2A 1.0 Task/result mapper and synchronous JSON-RPC handler that
+  use that Gate and never treat A2A metadata as payment authority;
 - an official MCP 2026-07-28 typed tool mapper with the same finalized,
-  atomic single-execution claim boundary;
+  atomic single-execution claim boundary and stateless streamable-HTTP handler;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
   systemd helper libraries suitable for a future worker process.
@@ -53,13 +54,14 @@ go test ./...
 ```
 
 The provider-local `software-work-execute` command composes the frozen V1 job
-with the bounded executor; no public worker server is currently shipped. The
-execution contract and A2A mapping are frozen in
+with the bounded executor. Reusable official-SDK A2A and MCP HTTP handlers are
+available, but no opinionated public listener, TLS, or authentication process
+is shipped. The execution contract and adapter mappings are frozen in
 `atos-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md` and
-`atos-spec/docs/A2A_ADAPTER_V1.md`. `pkg/a2aadapter` uses the official A2A Go
-types, but a production entry point still requires the finalized-chain
-authorizer and reviewed server binding. It must not resurrect the deleted
-inference RPC.
+`atos-spec/docs/A2A_ADAPTER_V1.md`, `atos-spec/docs/MCP_ADAPTER_V1.md`, and
+`atos-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. A production entry point must
+configure the finalized-chain resolvers and retain the operator's hardened
+listener boundary. It must not resurrect the deleted inference RPC.
 
 The provider-local command is a privileged runtime boundary when it connects
 to root-owned containerd. Do not grant a gateway user, buyer, or remote client
@@ -80,8 +82,8 @@ pkg/executor/backendtest/       reusable lifecycle conformance suite
 executor/gpuisolation/          exclusive operator-named GPU leases
 pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/artifactstore/              immutable content-addressed output storage
-pkg/a2aadapter/                 authority-gated A2A Task/result mapping
-pkg/mcpadapter/                 purchase-bound MCP tool mapping
+pkg/a2aadapter/                 gated A2A mapping and JSON-RPC handler
+pkg/mcpadapter/                 gated MCP tool and streamable-HTTP handler
 pkg/probe/                      privacy-minimized local resource probes
 internal/resourceguard/         continuous fail-closed resource gating
 internal/unixserver/            bounded private Unix listeners

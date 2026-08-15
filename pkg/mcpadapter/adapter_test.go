@@ -8,6 +8,7 @@ import (
 
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
+	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
 )
 
 type gateFake struct {
@@ -15,12 +16,21 @@ type gateFake struct {
 	fail  bool
 }
 
-func (f *gateFake) ClaimExecution(_ context.Context, r softwarework.Request) (Evidence, error) {
+func (f *gateFake) ClaimExecution(_ context.Context, r executiongate.Request) (Evidence, error) {
 	f.calls++
 	if f.fail {
 		return Evidence{}, errors.New("conflict")
 	}
-	return Evidence{NetworkID: "test", CapabilityID: "cap_" + strings.Repeat("11", 32), CapabilityVersion: "1", ManifestDigest: "sha256:" + strings.Repeat("22", 32), QuoteCommitment: r.QuoteCommitment, EscrowAddress: "0:" + strings.Repeat("33", 32), FinalizedCheckpoint: 7}, nil
+	return Evidence{NetworkID: "test", ProviderAgentID: "agent_" + strings.Repeat("10", 32),
+		CapabilityID: "cap_" + strings.Repeat("11", 32), CapabilityVersion: "1",
+		ManifestDigest: "sha256:" + strings.Repeat("22", 32), QuoteCommitment: r.QuoteCommitment,
+		EscrowAddress: r.EscrowAddress, ProviderAddress: "0:" + strings.Repeat("34", 32),
+		EscrowCodeHash:            "tvm-cell-sha256:" + strings.Repeat("35", 32),
+		RegistryCodeHash:          "tvm-cell-sha256:" + strings.Repeat("36", 32),
+		EscrowTransactionHash:     "sha256:" + strings.Repeat("37", 32),
+		AgentTransactionHash:      "sha256:" + strings.Repeat("38", 32),
+		CapabilityTransactionHash: "sha256:" + strings.Repeat("39", 32),
+		EscrowFinalizedCheckpoint: 7, AgentFinalizedCheckpoint: 8, CapabilityFinalizedCheckpoint: 9}, nil
 }
 
 type runnerFake struct{ calls int }
@@ -42,7 +52,8 @@ func TestMCPAdapterExecutesOnlyCommittedInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, err := PrepareInput("tvm-cell-sha256:"+strings.Repeat("aa", 32), "sha256:"+strings.Repeat("bb", 32), []byte("source"))
+	input, err := PrepareInput("0:"+strings.Repeat("cc", 32), "tvm-cell-sha256:"+strings.Repeat("aa", 32),
+		"sha256:"+strings.Repeat("bb", 32), []byte("source"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +61,7 @@ func TestMCPAdapterExecutesOnlyCommittedInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Protocol != "atos_native_v1" || out.Evidence.FinalizedCheckpoint != 7 || out.Artifact.URL == "" || gate.calls != 1 || runner.calls != 1 {
+	if out.Protocol != "atos_native_v1" || out.Evidence.EscrowFinalizedCheckpoint != 7 || out.Artifact.URL == "" || gate.calls != 1 || runner.calls != 1 {
 		t.Fatal("MCP result lost Native evidence")
 	}
 	input.SourceArchiveBase64 = "Y2hhbmdlZA=="
@@ -65,7 +76,8 @@ func TestMCPAdapterExecutesOnlyCommittedInput(t *testing.T) {
 func TestMCPAdapterRequiresUniqueExecutionClaim(t *testing.T) {
 	gate, runner := &gateFake{fail: true}, &runnerFake{}
 	adapter, _ := New(gate, runner, locatorFake{})
-	input, _ := PrepareInput("tvm-cell-sha256:"+strings.Repeat("aa", 32), "sha256:"+strings.Repeat("bb", 32), []byte("source"))
+	input, _ := PrepareInput("0:"+strings.Repeat("cc", 32), "tvm-cell-sha256:"+strings.Repeat("aa", 32),
+		"sha256:"+strings.Repeat("bb", 32), []byte("source"))
 	if _, _, err := adapter.Call(context.Background(), nil, input); err == nil {
 		t.Fatal("unclaimed MCP execution accepted")
 	}

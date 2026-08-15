@@ -9,6 +9,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
+	"github.com/tosnetwork/tos-protocol/pkg/executiongate"
 )
 
 type authorizerFake struct {
@@ -16,14 +17,22 @@ type authorizerFake struct {
 	fail  bool
 }
 
-func (f *authorizerFake) ClaimExecution(_ context.Context, request softwarework.Request) (FinalizedEvidence, error) {
+func (f *authorizerFake) ClaimExecution(_ context.Context, request executiongate.Request) (FinalizedEvidence, error) {
 	f.calls++
 	if f.fail {
 		return FinalizedEvidence{}, errors.New("not funded")
 	}
-	return FinalizedEvidence{NetworkID: "test", CapabilityID: "cap_" + strings.Repeat("11", 32),
+	return FinalizedEvidence{NetworkID: "test", ProviderAgentID: "agent_" + strings.Repeat("10", 32),
+		CapabilityID:      "cap_" + strings.Repeat("11", 32),
 		CapabilityVersion: "1.0.0", ManifestDigest: "sha256:" + strings.Repeat("22", 32),
-		QuoteCommitment: request.QuoteCommitment, EscrowAddress: "0:" + strings.Repeat("33", 32), FinalizedCheckpoint: 42}, nil
+		QuoteCommitment: request.QuoteCommitment, EscrowAddress: request.EscrowAddress,
+		ProviderAddress: "0:" + strings.Repeat("34", 32), EscrowFinalizedCheckpoint: 42,
+		EscrowCodeHash:            "tvm-cell-sha256:" + strings.Repeat("35", 32),
+		RegistryCodeHash:          "tvm-cell-sha256:" + strings.Repeat("36", 32),
+		EscrowTransactionHash:     "sha256:" + strings.Repeat("37", 32),
+		AgentTransactionHash:      "sha256:" + strings.Repeat("38", 32),
+		CapabilityTransactionHash: "sha256:" + strings.Repeat("39", 32),
+		AgentFinalizedCheckpoint:  43, CapabilityFinalizedCheckpoint: 44}, nil
 }
 
 type runnerFake struct {
@@ -77,7 +86,7 @@ func TestAdapterMapsExactTaskAndResult(t *testing.T) {
 		t.Fatal("A2A adapter did not produce the exact completed task")
 	}
 	result, ok := task.Artifacts[0].Parts[0].Data().(resultBinding)
-	if !ok || result.Evidence.FinalizedCheckpoint != 42 || result.Artifact.Digest == "" || result.Artifact.URL == "" {
+	if !ok || result.Evidence.EscrowFinalizedCheckpoint != 42 || result.Artifact.Digest == "" || result.Artifact.URL == "" {
 		t.Fatal("A2A result omitted finalized evidence or content commitments")
 	}
 }
@@ -131,7 +140,8 @@ func TestAdapterRejectsInsecureArtifactLocation(t *testing.T) {
 func taskRequest(t *testing.T) *a2a.SendMessageRequest {
 	t.Helper()
 	request, err := NewTaskRequest("message-one", "context-one",
-		"tvm-cell-sha256:"+strings.Repeat("aa", 32), "sha256:"+strings.Repeat("bb", 32), []byte("source archive"))
+		"0:"+strings.Repeat("cc", 32), "tvm-cell-sha256:"+strings.Repeat("aa", 32),
+		"sha256:"+strings.Repeat("bb", 32), []byte("source archive"))
 	if err != nil {
 		t.Fatal(err)
 	}
