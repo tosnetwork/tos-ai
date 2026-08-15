@@ -1,0 +1,42 @@
+version = 3
+
+# Dedicated ATOS runtime state. Do not reuse the host Docker/Kubernetes daemon.
+root = '/var/lib/atos-containerd'
+state = '/run/atos-containerd'
+# The systemd unit hides the distribution import directory with an empty,
+# read-only mount namespace before containerd parses its compiled default glob.
+imports = []
+disabled_plugins = [
+  'io.containerd.cri.v1.images',
+  'io.containerd.cri.v1.runtime',
+  'io.containerd.grpc.v1.cri',
+  'io.containerd.monitor.container.v1.restart',
+  'io.containerd.nri.v1.nri',
+]
+required_plugins = [
+  'io.containerd.content.v1.content',
+  'io.containerd.metadata.v1.bolt',
+  'io.containerd.runtime.v2.task',
+  'io.containerd.snapshotter.v1.overlayfs',
+]
+
+[grpc]
+  address = '/run/atos-containerd/containerd.sock'
+  uid = 0
+  gid = 0
+  max_recv_message_size = 16777216
+  max_send_message_size = 16777216
+
+[debug]
+  address = ''
+  level = 'info'
+
+[metrics]
+  address = ''
+
+[plugins]
+  [plugins.'io.containerd.runtime.v2.task']
+    platforms = ['linux/amd64']
+
+  [plugins.'io.containerd.snapshotter.v1.overlayfs']
+    root_path = ''

@@ -31,6 +31,8 @@ worker protocol. The retained code provides:
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
   systemd helper libraries suitable for a future worker process.
+- a dedicated private-containerd provider deployment template with explicit
+  root-runtime and separate-signing-custody boundaries.
 
 The previous text-generation Worker RPC, model adapters, old Edge gateway,
 Managed payment path, legacy discovery integration and generalized third-party
@@ -79,6 +81,7 @@ pkg/metricsexport/              bounded metrics delivery
 pkg/update/                     signed artifact manifests
 pkg/softwareupdate/             crash-safe two-slot update state machine
 pkg/servicemanager/             fixed-unit bounded systemd operations
+deploy/provider/                private containerd provider template and runbook
 ```
 
 See [isolated backend conformance](docs/isolated-backend-conformance.md) for
