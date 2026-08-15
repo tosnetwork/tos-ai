@@ -37,6 +37,8 @@ worker protocol. The retained code provides:
 - a shared public-adapter boundary that requires TLS 1.3 and a strong bearer
   credential, rejects browser origins, and bounds request bodies, headers,
   concurrent calls, read time, and idle connections;
+- cross-transport TLS acceptance coverage proving an A2A-claimed purchase
+  cannot execute again when submitted through MCP;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
   systemd helper libraries suitable for a future worker process.
@@ -91,6 +93,7 @@ pkg/artifactstore/              immutable content-addressed output storage
 pkg/a2aadapter/                 gated A2A mapping and hardened JSON-RPC server
 pkg/mcpadapter/                 gated MCP tool and hardened streamable-HTTP server
 pkg/adapterhttp/                shared TLS/auth/resource public boundary
+pkg/adapterinterop/             cross-transport TLS single-execution acceptance
 pkg/probe/                      privacy-minimized local resource probes
 internal/resourceguard/         continuous fail-closed resource gating
 internal/unixserver/            bounded private Unix listeners
