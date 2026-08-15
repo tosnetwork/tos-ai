@@ -16,7 +16,5 @@ jobs:
         with:
           go-version: "1.26.5"
           cache: true
-      - run: make all
-      - run: make test-race
-      - run: make reproducible-builds
-      - run: make release-gates
+      - name: Verify the repository
+        run: make verify
