@@ -45,12 +45,23 @@ The module uses Go 1.26.5.
 go test ./...
 ```
 
-No production command or public worker RPC is currently shipped. The
-provider-local execution and artifact contract is frozen in
+The provider-local `software-work-execute` command composes the frozen V1 job
+with the bounded executor; no public worker RPC is currently shipped. The
+execution and artifact contract is frozen in
 `atos-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md`. A public worker entry point may
 be added only after its methods and authoritative chain-verification inputs are
 frozen in the Native protobuf. It must adapt those types to `pkg/softwarework`;
 it must not resurrect the deleted inference RPC.
+
+The provider-local command is a privileged runtime boundary when it connects
+to root-owned containerd. Do not grant a gateway user, buyer, or remote client
+access to that raw socket: containerd access is equivalent to host-root
+authority. The command therefore requires its source archive, source parent,
+and pre-created state root to be private and owned by the executor identity,
+and it refuses symlinks, non-canonical paths, broad permissions, and oversized
+source files. The containerd socket and FIFO tree remain owner-private. Receipt
+signing stays in the separate `tosctl` custody boundary; no mnemonic or private
+key belongs in executor state.
 
 ## Repository layout
 

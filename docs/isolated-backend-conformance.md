@@ -113,12 +113,37 @@ overflow fail closed. Privileged fixtures must additionally show that the
 daemon reports final metrics after process exit and before task deletion, and
 that the observed values cannot exceed policy without rejecting the result.
 
-No production worker command is currently shipped. The future Native
-software-work worker must open and validate the private socket, namespace,
-image binding and residue state before accepting work, and must close the owned
-backend synchronously during shutdown. Operators must not describe that future
-composition as certified until the privileged suite in this document passes on
-every supported deployment image.
+The provider-local `software-work-execute` command now composes the fixed V1
+software-work profile with this backend. It is not a public worker RPC. It
+opens and validates the private socket, namespace, image binding and residue
+state before executing work, and closes the owned backend synchronously.
+Operators must not describe this composition as certified until the privileged
+suite in this document passes on every supported deployment image.
+
+### Privileged runtime boundary
+
+A root-owned containerd socket is host-root authority, even when filesystem
+permissions make the connecting client appear unprivileged. Operators must not
+`chown` that socket to a gateway account, make it group-accessible, or expose it
+through a proxy available to remote requests. Doing so would let that account
+bypass the fixed ATOS execution policy and call containerd directly.
+
+For a privileged private daemon, run `software-work-execute` as the same
+dedicated executor identity that owns the socket and its `0700` parent. Before
+invocation, that identity must stage the source archive in an owner-private
+`0700` directory as a regular file with no group or other permission, and must
+pre-create the state root with the same ownership and mode. The command rejects
+relative or non-canonical paths, symlinks, ownership mismatches, broad
+permissions, and source archives above 16 MiB before opening the backend.
+Do not add a general `sudo` rule for this command: its path arguments are local
+operator inputs, not a remote API.
+
+The executor process owns no signing key. The unprivileged provider custody
+process reviews the public outcome and settlement intent and signs only through
+`tosctl`; the executor, gateway, source archive, and containerd state never
+receive a mnemonic, vault export, or private key. A future always-on service
+must preserve this split through a narrow authenticated broker instead of
+sharing the raw containerd socket.
 
 ## Live lifecycle suite
 
