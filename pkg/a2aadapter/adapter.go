@@ -45,10 +45,18 @@ type ArtifactLocator interface {
 	URL(artifactstore.Descriptor) (a2a.URL, error)
 }
 
+// Settler releases escrow for a completed execution from the finalized Evidence
+// and the validated Outcome. Settlement is separate from execution; see the
+// agentpacketadapter.Settler contract.
+type Settler interface {
+	Settle(context.Context, executiongate.Evidence, softwarework.Outcome) error
+}
+
 type Adapter struct {
 	authorizer FinalizedExecutionGate
 	runner     Runner
 	locator    ArtifactLocator
+	settler    Settler
 	now        func() time.Time
 }
 
@@ -85,10 +93,16 @@ type objectBinding struct {
 }
 
 func New(authorizer FinalizedExecutionGate, runner Runner, locator ArtifactLocator) (*Adapter, error) {
+	return NewSettling(authorizer, runner, locator, nil)
+}
+
+// NewSettling builds an adapter that releases escrow through settler after each
+// completed execution. A nil settler yields the execution-only behaviour of New.
+func NewSettling(authorizer FinalizedExecutionGate, runner Runner, locator ArtifactLocator, settler Settler) (*Adapter, error) {
 	if authorizer == nil || runner == nil || locator == nil {
 		return nil, errors.New("invalid A2A software-work adapter configuration")
 	}
-	return &Adapter{authorizer: authorizer, runner: runner, locator: locator, now: time.Now}, nil
+	return &Adapter{authorizer: authorizer, runner: runner, locator: locator, settler: settler, now: time.Now}, nil
 }
 
 func NewTaskRequest(messageID, contextID, escrowAddress, quoteCommitment, executionID string, sourceArchive []byte) (*a2a.SendMessageRequest, error) {
@@ -135,6 +149,11 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	}
 	if err := validateOutcome(outcome, work); err != nil {
 		return nil, errors.New("software-work runner returned a conflicting outcome")
+	}
+	if a.settler != nil {
+		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
+			return nil, errors.New("escrow settlement failed for a completed execution")
+		}
 	}
 	artifactURL, err := a.locator.URL(outcome.Artifact)
 	if err != nil || !artifactURLValid(artifactURL) {

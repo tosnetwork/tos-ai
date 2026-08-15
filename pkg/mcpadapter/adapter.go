@@ -66,17 +66,31 @@ type Locator interface {
 	URL(artifactstore.Descriptor) (string, error)
 }
 
+// Settler releases escrow for a completed execution from the finalized Evidence
+// and the validated Outcome. Settlement is separate from execution; see the
+// agentpacketadapter.Settler contract.
+type Settler interface {
+	Settle(context.Context, executiongate.Evidence, softwarework.Outcome) error
+}
+
 type Adapter struct {
 	gate    ExecutionGate
 	runner  Runner
 	locator Locator
+	settler Settler
 }
 
 func New(gate ExecutionGate, runner Runner, locator Locator) (*Adapter, error) {
+	return NewSettling(gate, runner, locator, nil)
+}
+
+// NewSettling builds an adapter that releases escrow through settler after each
+// completed execution. A nil settler yields the execution-only behaviour of New.
+func NewSettling(gate ExecutionGate, runner Runner, locator Locator, settler Settler) (*Adapter, error) {
 	if gate == nil || runner == nil || locator == nil {
 		return nil, errors.New("invalid MCP software-work adapter configuration")
 	}
-	return &Adapter{gate: gate, runner: runner, locator: locator}, nil
+	return &Adapter{gate: gate, runner: runner, locator: locator, settler: settler}, nil
 }
 
 func Tool() *mcp.Tool {
@@ -126,6 +140,11 @@ func (a *Adapter) Call(ctx context.Context, _ *mcp.CallToolRequest, input Input)
 	}
 	if !validOutcome(outcome, work) {
 		return nil, Output{}, errors.New("software-work runner returned a conflicting outcome")
+	}
+	if a.settler != nil {
+		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
+			return nil, Output{}, errors.New("escrow settlement failed for a completed execution")
+		}
 	}
 	artifactURL, err := a.locator.URL(outcome.Artifact)
 	if err != nil || !httpsURL(artifactURL) {

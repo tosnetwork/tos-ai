@@ -28,9 +28,20 @@ type Runner interface {
 	Execute(context.Context, softwarework.Request) (softwarework.Outcome, error)
 }
 
+// Settler releases escrow for a completed execution. It is invoked only after a
+// finalized, Gate-authorized execution produced a validated Outcome, so it
+// receives both the finalized Evidence (escrow, provider identity) and the
+// Outcome — the two inputs an escrow release needs. Settlement is deliberately
+// separate from execution: a Settler may submit the release synchronously or
+// durably enqueue it, but the execution has already happened at-most-once.
+type Settler interface {
+	Settle(context.Context, executiongate.Evidence, softwarework.Outcome) error
+}
+
 type Adapter struct {
-	gate   Gate
-	runner Runner
+	gate    Gate
+	runner  Runner
+	settler Settler
 }
 
 // Receive implements agentpacket.Receiver, allowing the protocol HTTP
@@ -53,10 +64,16 @@ type payload struct {
 }
 
 func New(gate Gate, runner Runner) (*Adapter, error) {
+	return NewSettling(gate, runner, nil)
+}
+
+// NewSettling builds an adapter that releases escrow through settler after each
+// completed execution. A nil settler yields the execution-only behaviour of New.
+func NewSettling(gate Gate, runner Runner, settler Settler) (*Adapter, error) {
 	if gate == nil || runner == nil {
 		return nil, errors.New("invalid Agent Packet adapter configuration")
 	}
-	return &Adapter{gate: gate, runner: runner}, nil
+	return &Adapter{gate: gate, runner: runner, settler: settler}, nil
 }
 
 // Execute admits only a purchase-bound work packet. The packet itself is an
@@ -83,6 +100,11 @@ func (a *Adapter) Execute(ctx context.Context, packet agentpacket.Packet) (softw
 	}
 	if outcome.QuoteCommitment != work.QuoteCommitment || outcome.ExecutionID != work.ExecutionID || outcome.InputDigest != work.InputDigest || outcome.SourceDigest != work.SourceDigest {
 		return softwarework.Outcome{}, evidence, errors.New("software-work runner returned a conflicting outcome")
+	}
+	if a.settler != nil {
+		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
+			return softwarework.Outcome{}, evidence, err
+		}
 	}
 	return outcome, evidence, nil
 }
