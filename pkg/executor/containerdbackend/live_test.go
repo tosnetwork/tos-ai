@@ -34,6 +34,7 @@ func TestContainerdBackendLiveWorkspace(t *testing.T) {
 		Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
 		FIFODir: configuration.fifoDir, MaxActive: 1, PolicyLimits: limits,
 		ImageReference: configuration.imageReference, ImageDigest: configuration.imageDigest,
+		ImagePlatform: "linux/amd64",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +118,7 @@ func TestContainerdBackendLiveMockCDIConformance(t *testing.T) {
 			},
 			CDISpecDirs:  []string{configuration.cdiSpecDir},
 			PolicyLimits: limits, ImageReference: configuration.imageReference,
-			ImageDigest: configuration.imageDigest,
+			ImageDigest: configuration.imageDigest, ImagePlatform: "linux/amd64",
 		},
 	)
 	if err != nil {
@@ -169,7 +170,7 @@ func TestContainerdBackendLiveNVIDIAConformance(t *testing.T) {
 			"gpu-certified": configuration.nvidiaCDIDevice,
 		},
 		PolicyLimits: limits, ImageReference: configuration.imageReference,
-		ImageDigest: configuration.imageDigest,
+		ImageDigest: configuration.imageDigest, ImagePlatform: "linux/amd64",
 	}
 	if configuration.cdiSpecDir != "" {
 		config.CDISpecDirs = []string{configuration.cdiSpecDir}
@@ -310,7 +311,7 @@ func TestContainerdBackendLiveConformance(t *testing.T) {
 				Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
 				FIFODir: configuration.fifoDir, MaxActive: 4,
 				PolicyLimits: limits, ImageReference: configuration.imageReference,
-				ImageDigest: configuration.imageDigest,
+				ImageDigest: configuration.imageDigest, ImagePlatform: "linux/amd64",
 			})
 			if err != nil {
 				_ = admin.Close()

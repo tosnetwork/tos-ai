@@ -46,6 +46,19 @@ func (locatorFake) URL(v artifactstore.Descriptor) (string, error) {
 	return "https://provider.example/objects/" + v.Digest[7:], nil
 }
 
+type failingLocator struct{}
+
+func (failingLocator) URL(artifactstore.Descriptor) (string, error) {
+	return "", errors.New("publication failed")
+}
+
+type settlerFake struct{ calls int }
+
+func (s *settlerFake) Settle(context.Context, executiongate.Evidence, softwarework.Outcome) error {
+	s.calls++
+	return nil
+}
+
 func TestMCPAdapterExecutesOnlyCommittedInput(t *testing.T) {
 	gate, runner := &gateFake{}, &runnerFake{}
 	adapter, err := New(gate, runner, locatorFake{})
@@ -70,6 +83,25 @@ func TestMCPAdapterExecutesOnlyCommittedInput(t *testing.T) {
 	}
 	if gate.calls != 1 || runner.calls != 1 {
 		t.Fatal("invalid MCP input reached authority or execution")
+	}
+}
+
+func TestMCPDoesNotSettleBeforeArtifactPublication(t *testing.T) {
+	settler := &settlerFake{}
+	adapter, err := NewSettling(&gateFake{}, &runnerFake{}, failingLocator{}, settler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := PrepareInput("0:"+strings.Repeat("cc", 32), "tvm-cell-sha256:"+strings.Repeat("aa", 32),
+		"sha256:"+strings.Repeat("bb", 32), []byte("source"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := adapter.Call(context.Background(), nil, input); err == nil {
+		t.Fatal("failed artifact publication was accepted")
+	}
+	if settler.calls != 0 {
+		t.Fatal("escrow settled before artifact publication")
 	}
 }
 

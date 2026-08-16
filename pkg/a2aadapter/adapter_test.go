@@ -70,6 +70,19 @@ func (insecureLocator) URL(artifactstore.Descriptor) (a2a.URL, error) {
 	return "http://provider.example/object", nil
 }
 
+type failingLocator struct{}
+
+func (failingLocator) URL(artifactstore.Descriptor) (a2a.URL, error) {
+	return "", errors.New("publication failed")
+}
+
+type settlerFake struct{ calls int }
+
+func (s *settlerFake) Settle(context.Context, executiongate.Evidence, softwarework.Outcome) error {
+	s.calls++
+	return nil
+}
+
 func TestAdapterMapsExactTaskAndResult(t *testing.T) {
 	authorizer, runner := &authorizerFake{}, &runnerFake{}
 	adapter, err := New(authorizer, runner, locatorFake{})
@@ -88,6 +101,20 @@ func TestAdapterMapsExactTaskAndResult(t *testing.T) {
 	result, ok := task.Artifacts[0].Parts[0].Data().(resultBinding)
 	if !ok || result.Evidence.EscrowFinalizedCheckpoint != 42 || result.Artifact.Digest == "" || result.Artifact.URL == "" {
 		t.Fatal("A2A result omitted finalized evidence or content commitments")
+	}
+}
+
+func TestAdapterDoesNotSettleBeforeArtifactPublication(t *testing.T) {
+	settler := &settlerFake{}
+	adapter, err := NewSettling(&authorizerFake{}, &runnerFake{}, failingLocator{}, settler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Execute(context.Background(), taskRequest(t)); err == nil {
+		t.Fatal("failed artifact publication was accepted")
+	}
+	if settler.calls != 0 {
+		t.Fatal("escrow settled before artifact publication")
 	}
 }
 

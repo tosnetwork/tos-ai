@@ -141,11 +141,6 @@ func (a *Adapter) Call(ctx context.Context, _ *mcp.CallToolRequest, input Input)
 	if !validOutcome(outcome, work) {
 		return nil, Output{}, errors.New("software-work runner returned a conflicting outcome")
 	}
-	if a.settler != nil {
-		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
-			return nil, Output{}, errors.New("escrow settlement failed for a completed execution")
-		}
-	}
 	artifactURL, err := a.locator.URL(outcome.Artifact)
 	if err != nil || !httpsURL(artifactURL) {
 		return nil, Output{}, errors.New("invalid artifact retrieval URL")
@@ -153,6 +148,11 @@ func (a *Adapter) Call(ctx context.Context, _ *mcp.CallToolRequest, input Input)
 	reportURL, err := a.locator.URL(outcome.Report)
 	if err != nil || !httpsURL(reportURL) {
 		return nil, Output{}, errors.New("invalid report retrieval URL")
+	}
+	if a.settler != nil {
+		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
+			return nil, Output{}, errors.New("escrow settlement failed for a completed execution")
+		}
 	}
 	return nil, Output{Protocol: "tos_service_v1", Evidence: evidence, QuoteCommitment: outcome.QuoteCommitment,
 		ExecutionID: outcome.ExecutionID, InputDigest: outcome.InputDigest, ResultDigest: outcome.ResultDigest,

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	manifest       = "sha256:9d39a2d3f5c34a4bfeb63324681e0f457437b756ffb79da8a1681aa79bf9f3e5"
+	manifest       = "sha256:e4db0138ca2a4d5ad8f3c7ec458304927344e341ae610ee0a682b9cc5b00594e"
 	image          = "sha256:9624bca74096f810c5b24e489521dde124fadcfa1808581648b38bdc1ba1b105"
 	maxSourceBytes = 16 << 20
 )
@@ -53,6 +53,7 @@ func main() {
 		SocketPath: *socket, Namespace: "tos-service-paid-work", Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
 		FIFODir: *fifo, MaxActive: 1, PolicyLimits: limits,
 		ImageReference: "docker.io/tosnetwork/software-work-go:1.26.5@" + image, ImageDigest: image,
+		ImagePlatform: "linux/amd64",
 	})
 	if err != nil {
 		fail(err)

@@ -33,7 +33,10 @@ func (f *fakeExecutor) Execute(_ context.Context, _ string, spec executor.Spec, 
 
 func fixture(t *testing.T) (*Runner, *fakeExecutor, *Journal, Request) {
 	t.Helper()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := artifactstore.Open(filepath.Join(root, "artifacts"), 1<<20)
 	if err != nil {
 		t.Fatal(err)

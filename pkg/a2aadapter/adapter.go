@@ -150,11 +150,6 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	if err := validateOutcome(outcome, work); err != nil {
 		return nil, errors.New("software-work runner returned a conflicting outcome")
 	}
-	if a.settler != nil {
-		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
-			return nil, errors.New("escrow settlement failed for a completed execution")
-		}
-	}
 	artifactURL, err := a.locator.URL(outcome.Artifact)
 	if err != nil || !artifactURLValid(artifactURL) {
 		return nil, errors.New("invalid A2A artifact retrieval URL")
@@ -162,6 +157,11 @@ func (a *Adapter) Execute(ctx context.Context, request *a2a.SendMessageRequest) 
 	reportURL, err := a.locator.URL(outcome.Report)
 	if err != nil || !artifactURLValid(reportURL) {
 		return nil, errors.New("invalid A2A report retrieval URL")
+	}
+	if a.settler != nil {
+		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {
+			return nil, errors.New("escrow settlement failed for a completed execution")
+		}
 	}
 	result := resultBinding{Protocol: "tos_service_v1", Evidence: evidence,
 		QuoteCommitment: outcome.QuoteCommitment, ExecutionID: outcome.ExecutionID,

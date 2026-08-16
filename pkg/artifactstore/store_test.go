@@ -10,7 +10,7 @@ import (
 )
 
 func TestStoreRoundTripIsContentAddressedAndIdempotent(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "artifacts"), 1024)
+	store, err := Open(filepath.Join(resolvedTempDir(t), "artifacts"), 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestStoreRoundTripIsContentAddressedAndIdempotent(t *testing.T) {
 }
 
 func TestStoreRejectsOverflowTraversalSymlinkAndTampering(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "artifacts")
+	root := filepath.Join(resolvedTempDir(t), "artifacts")
 	store, err := Open(root, 8)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func TestStoreRejectsOverflowTraversalSymlinkAndTampering(t *testing.T) {
 	if err := os.Remove(object); err != nil {
 		t.Fatal(err)
 	}
-	outside := t.TempDir()
+	outside := resolvedTempDir(t)
 	if err := os.Symlink(filepath.Join(outside, "missing"), object); err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +71,20 @@ func TestStoreRejectsOverflowTraversalSymlinkAndTampering(t *testing.T) {
 		t.Fatal("symlink artifact accepted")
 	}
 
-	link := filepath.Join(t.TempDir(), "linked-store")
+	link := filepath.Join(resolvedTempDir(t), "linked-store")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Open(link, 8); err == nil {
 		t.Fatal("symlink store root accepted")
 	}
+}
+
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory
 }

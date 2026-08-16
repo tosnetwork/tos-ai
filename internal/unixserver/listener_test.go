@@ -206,7 +206,12 @@ func TestPreparePrivateFileTargetRejectsSymlinkAndInsecureFile(t *testing.T) {
 
 func privateSocketPath(t *testing.T) string {
 	t.Helper()
-	directory := filepath.Join(t.TempDir(), "private")
+	root, err := os.MkdirTemp("/tmp", "us-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	directory := filepath.Join(root, "private")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

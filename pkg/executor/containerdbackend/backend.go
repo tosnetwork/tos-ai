@@ -56,6 +56,7 @@ type Config struct {
 	PolicyLimits     executor.Limits
 	ImageReference   string
 	ImageDigest      string
+	ImagePlatform    string
 }
 
 type engine interface {
@@ -356,6 +357,7 @@ func validateConfig(config Config) error {
 	if config.PermitNetwork ||
 		validateDriverLimits(config.PolicyLimits, config.PermitGPU) != nil ||
 		executor.ValidateExecutionDigest(config.ImageDigest) != nil ||
+		config.ImagePlatform != "linux/amd64" ||
 		len(config.ImageReference) == 0 ||
 		len(config.ImageReference) > MaxStringBytesHard ||
 		strings.IndexByte(config.ImageReference, 0) >= 0 ||

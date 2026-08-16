@@ -7,7 +7,7 @@ import (
 )
 
 func TestReadPrivateSource(t *testing.T) {
-	directory := t.TempDir()
+	directory := resolvedTempDir(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestReadPrivateSource(t *testing.T) {
 }
 
 func TestReadPrivateSourceRejectsUnsafePaths(t *testing.T) {
-	directory := t.TempDir()
+	directory := resolvedTempDir(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestReadPrivateSourceRejectsUnsafePaths(t *testing.T) {
 }
 
 func TestRequirePrivateOwnedDirectory(t *testing.T) {
-	directory := t.TempDir()
+	directory := resolvedTempDir(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -76,4 +76,13 @@ func TestRequirePrivateOwnedDirectory(t *testing.T) {
 	if err := requirePrivateOwnedDirectory(directory); err == nil {
 		t.Fatal("group-accessible directory accepted")
 	}
+}
+
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory
 }

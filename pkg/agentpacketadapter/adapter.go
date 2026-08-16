@@ -13,6 +13,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
 	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
@@ -38,9 +39,18 @@ type Settler interface {
 	Settle(context.Context, executiongate.Evidence, softwarework.Outcome) error
 }
 
+// Locator durably publishes the two content-addressed objects produced by a
+// completed Agent Packet execution. Agent Packet carries the digests in its
+// Receipt rather than returning URLs, so buyers derive the canonical URL from
+// the provider's advertised artifact origin.
+type Locator interface {
+	ArtifactURL(artifactstore.Descriptor) (string, error)
+}
+
 type Adapter struct {
 	gate    Gate
 	runner  Runner
+	locator Locator
 	settler Settler
 }
 
@@ -64,16 +74,29 @@ type payload struct {
 }
 
 func New(gate Gate, runner Runner) (*Adapter, error) {
-	return NewSettling(gate, runner, nil)
+	return newAdapter(gate, runner, nil, nil)
 }
 
 // NewSettling builds an adapter that releases escrow through settler after each
 // completed execution. A nil settler yields the execution-only behaviour of New.
 func NewSettling(gate Gate, runner Runner, settler Settler) (*Adapter, error) {
+	return newAdapter(gate, runner, nil, settler)
+}
+
+// NewPublishingSettling adds durable artifact publication to the backward-
+// compatible execution and settlement behavior exposed by NewSettling.
+func NewPublishingSettling(gate Gate, runner Runner, locator Locator, settler Settler) (*Adapter, error) {
+	if locator == nil {
+		return nil, errors.New("invalid Agent Packet artifact locator")
+	}
+	return newAdapter(gate, runner, locator, settler)
+}
+
+func newAdapter(gate Gate, runner Runner, locator Locator, settler Settler) (*Adapter, error) {
 	if gate == nil || runner == nil {
 		return nil, errors.New("invalid Agent Packet adapter configuration")
 	}
-	return &Adapter{gate: gate, runner: runner, settler: settler}, nil
+	return &Adapter{gate: gate, runner: runner, locator: locator, settler: settler}, nil
 }
 
 // Execute admits only a purchase-bound work packet. The packet itself is an
@@ -100,6 +123,14 @@ func (a *Adapter) Execute(ctx context.Context, packet agentpacket.Packet) (softw
 	}
 	if outcome.QuoteCommitment != work.QuoteCommitment || outcome.ExecutionID != work.ExecutionID || outcome.InputDigest != work.InputDigest || outcome.SourceDigest != work.SourceDigest {
 		return softwarework.Outcome{}, evidence, errors.New("software-work runner returned a conflicting outcome")
+	}
+	if a.locator != nil {
+		if _, err := a.locator.ArtifactURL(outcome.Artifact); err != nil {
+			return softwarework.Outcome{}, evidence, errors.New("invalid Agent Packet artifact publication")
+		}
+		if _, err := a.locator.ArtifactURL(outcome.Report); err != nil {
+			return softwarework.Outcome{}, evidence, errors.New("invalid Agent Packet report publication")
+		}
 	}
 	if a.settler != nil {
 		if err := a.settler.Settle(ctx, evidence, outcome); err != nil {

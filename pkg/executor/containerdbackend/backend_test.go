@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -278,6 +279,9 @@ func TestBackendFailsClosedOnReadinessResidueAndPanic(t *testing.T) {
 }
 
 func TestFixedIsolationSpecEnforcesCPUOnlySandbox(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("OCI Linux isolation specification requires Linux")
+	}
 	request := validRequest(t, "spec")
 	ctx := namespaces.WithNamespace(context.Background(), "tos-ai-test")
 	spec, err := oci.GenerateSpec(
@@ -312,6 +316,9 @@ func TestFixedIsolationSpecEnforcesCPUOnlySandbox(t *testing.T) {
 }
 
 func TestFixedIsolationSpecBindsOnlyRuntimeSelectedWorkspace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("OCI Linux isolation specification requires Linux")
+	}
 	request := validRequest(t, "workspace-spec")
 	request.WorkspaceArchive = true
 	request.WorkingDirectory = "/workspace/source"
@@ -395,7 +402,11 @@ func TestGPUDeviceMapRejectsAmbiguousOrUnsafeBindings(t *testing.T) {
 }
 
 func TestPrivateSocketAndFIFODirectoryValidation(t *testing.T) {
-	directory := t.TempDir()
+	directory, err := os.MkdirTemp("/tmp", "cb-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

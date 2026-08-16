@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 )
 
@@ -35,6 +36,9 @@ func newSDKEngine(config Config) (*sdkEngine, error) {
 		config.SocketPath,
 		containerd.WithDefaultNamespace(config.Namespace),
 		containerd.WithDefaultRuntime(config.Runtime),
+		containerd.WithDefaultPlatform(
+			platforms.OnlyStrict(platforms.MustParse(config.ImagePlatform)),
+		),
 		containerd.WithTimeout(config.OperationTimeout),
 	)
 	if err != nil {
