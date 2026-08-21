@@ -3,11 +3,16 @@ package adapterinterop
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -25,9 +30,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tosnetwork/tos-ai/pkg/a2aadapter"
 	"github.com/tosnetwork/tos-ai/pkg/adapterhttp"
+	"github.com/tosnetwork/tos-ai/pkg/agentpacketadapter"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/mcpadapter"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
 	"github.com/tosnetwork/tos-service-protocol/pkg/executiongate"
 )
 
@@ -149,6 +156,100 @@ func TestTLSA2AThenMCPCannotExecuteOnePurchaseTwice(t *testing.T) {
 	if gate.calls != 2 || runner.calls != 1 {
 		t.Fatalf("cross-transport calls gate=%d runner=%d, want 2/1", gate.calls, runner.calls)
 	}
+}
+
+func TestConcurrentA2AMCPAgentPacketShareOneExecutionGate(t *testing.T) {
+	gate, runner := &sharedGate{}, &sharedRunner{}
+	a2aAdapter, err := a2aadapter.New(gate, runner, a2aLocator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpAdapter, err := mcpadapter.New(gate, runner, mcpLocator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetAdapter, err := agentpacketadapter.New(gate, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	escrow := "0:" + strings.Repeat("cc", 32)
+	quote := "tvm-cell-sha256:" + strings.Repeat("aa", 32)
+	execution := "sha256:" + strings.Repeat("bb", 32)
+	source := []byte("one purchase over three transports")
+	a2aRequest, err := a2aadapter.NewTaskRequest("message", "context", escrow, quote, execution, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpInput, err := mcpadapter.PrepareInput(escrow, quote, execution, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := signedAgentPacket(t, escrow, quote, execution, source)
+
+	start := make(chan struct{})
+	results := make(chan error, 3)
+	var workers sync.WaitGroup
+	workers.Add(3)
+	go func() {
+		defer workers.Done()
+		<-start
+		_, callErr := a2aAdapter.Execute(context.Background(), a2aRequest)
+		results <- callErr
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		_, _, callErr := mcpAdapter.Call(context.Background(), nil, mcpInput)
+		results <- callErr
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		_, _, callErr := packetAdapter.Execute(context.Background(), packet)
+		results <- callErr
+	}()
+	close(start)
+	workers.Wait()
+	close(results)
+	successes := 0
+	for callErr := range results {
+		if callErr == nil {
+			successes++
+		}
+	}
+	if successes != 1 || gate.calls != 3 || runner.calls != 1 {
+		t.Fatalf("three-transport arbitration successes=%d gate=%d runner=%d, want 1/3/1",
+			successes, gate.calls, runner.calls)
+	}
+}
+
+func signedAgentPacket(t *testing.T, escrow, quote, execution string, source []byte) agentpacket.Packet {
+	t.Helper()
+	sourceHash := sha256.Sum256(source)
+	payload, err := json.Marshal(map[string]string{
+		"schema": "tos.service.agent-packet-work.v1", "escrow_address": escrow,
+		"quote_commitment": quote, "execution_id": execution,
+		"input_digest":          "sha256:" + strings.Repeat("dd", 32),
+		"source_digest":         "sha256:" + hex.EncodeToString(sourceHash[:]),
+		"source_archive_base64": base64.StdEncoding.EncodeToString(source),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := agentpacket.Sign(agentpacket.Packet{
+		SenderAgentID:    "agent_" + strings.Repeat("20", 32),
+		RecipientAgentID: "agent_" + strings.Repeat("10", 32),
+		CapabilityID:     "cap_" + strings.Repeat("11", 32), QuoteCommitment: quote,
+		Sequence: 1, CreatedAtUnix: 2_000_000_000, Payload: payload, SenderPublicKey: public,
+	}, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
 }
 
 func serverConfig(certificatePath, keyPath string) adapterhttp.ServerConfig {
