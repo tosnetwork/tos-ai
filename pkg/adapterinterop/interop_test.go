@@ -223,6 +223,67 @@ func TestConcurrentA2AMCPAgentPacketShareOneExecutionGate(t *testing.T) {
 	}
 }
 
+func TestAgentPacketCrossTransportOrdersShareOneExecutionGate(t *testing.T) {
+	for _, order := range [][2]string{
+		{"a2a", "agent-packet"},
+		{"mcp", "agent-packet"},
+		{"agent-packet", "a2a"},
+		{"agent-packet", "mcp"},
+	} {
+		t.Run(order[0]+"-then-"+order[1], func(t *testing.T) {
+			gate, runner := &sharedGate{}, &sharedRunner{}
+			a2aAdapter, err := a2aadapter.New(gate, runner, a2aLocator{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mcpAdapter, err := mcpadapter.New(gate, runner, mcpLocator{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			packetAdapter, err := agentpacketadapter.New(gate, runner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			escrow := "0:" + strings.Repeat("cc", 32)
+			quote := "tvm-cell-sha256:" + strings.Repeat("aa", 32)
+			execution := "sha256:" + strings.Repeat("bb", 32)
+			source := []byte("one ordered purchase over two transports")
+			a2aRequest, err := a2aadapter.NewTaskRequest("message", "context", escrow, quote, execution, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mcpInput, err := mcpadapter.PrepareInput(escrow, quote, execution, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packet := signedAgentPacket(t, escrow, quote, execution, source)
+			calls := map[string]func() error{
+				"a2a": func() error {
+					_, callErr := a2aAdapter.Execute(context.Background(), a2aRequest)
+					return callErr
+				},
+				"mcp": func() error {
+					_, _, callErr := mcpAdapter.Call(context.Background(), nil, mcpInput)
+					return callErr
+				},
+				"agent-packet": func() error {
+					_, _, callErr := packetAdapter.Execute(context.Background(), packet)
+					return callErr
+				},
+			}
+			if err := calls[order[0]](); err != nil {
+				t.Fatalf("first transport %s failed: %v", order[0], err)
+			}
+			if err := calls[order[1]](); err == nil {
+				t.Fatalf("second transport %s repeated the purchase", order[1])
+			}
+			if gate.calls != 2 || runner.calls != 1 {
+				t.Fatalf("ordered arbitration gate=%d runner=%d, want 2/1", gate.calls, runner.calls)
+			}
+		})
+	}
+}
+
 func signedAgentPacket(t *testing.T, escrow, quote, execution string, source []byte) agentpacket.Packet {
 	t.Helper()
 	sourceHash := sha256.Sum256(source)
