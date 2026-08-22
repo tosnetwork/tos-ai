@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	resultRecordSchema = "tos.service.messenger-result-outbox.v1"
+	resultRecordSchema = "tos.service.messenger-result-outbox.v2"
 	resultStatePending = "pending"
 	resultStateDone    = "complete"
 	maxResultBytes     = envelope.MaxContentBytes
@@ -35,23 +35,25 @@ var (
 )
 
 type resultRecord struct {
-	Schema         string `json:"schema"`
-	SourceEventID  string `json:"source_event_id"`
-	ConversationID string `json:"conversation_id"`
-	SenderAgentID  string `json:"sender_agent_id"`
-	ResultKind     string `json:"result_kind"`
-	ResultJSON     []byte `json:"result_json"`
-	ResultDigest   string `json:"result_digest"`
-	State          string `json:"state"`
+	Schema              string `json:"schema"`
+	SourceEventID       string `json:"source_event_id"`
+	ConversationID      string `json:"conversation_id"`
+	SenderAgentID       string `json:"sender_agent_id"`
+	SourceCreatedAtUnix uint64 `json:"source_created_at_unix"`
+	ResultKind          string `json:"result_kind"`
+	ResultJSON          []byte `json:"result_json"`
+	ResultDigest        string `json:"result_digest"`
+	State               string `json:"state"`
 }
 
 type PendingResult struct {
-	SourceEventID  string
-	ConversationID string
-	SenderAgentID  string
-	ResultKind     string
-	ResultJSON     []byte
-	ResultDigest   string
+	SourceEventID       string
+	ConversationID      string
+	SenderAgentID       string
+	SourceCreatedAtUnix uint64
+	ResultKind          string
+	ResultJSON          []byte
+	ResultDigest        string
 }
 
 // ResultOutbox makes the handler's result-before-202 promise durable. One
@@ -104,11 +106,11 @@ func (o *ResultOutbox) ReceiveMCPResult(_ context.Context, event envelope.Event,
 
 func (o *ResultOutbox) enqueue(event envelope.Event, kind string, result []byte) error {
 	if o == nil || !eventIDPattern.MatchString(event.EventID) || event.ConversationID == "" ||
-		event.SenderAgentID == "" || (kind != "a2a.message" && kind != "mcp.result") || len(result) == 0 || len(result) > maxResultBytes {
+		event.SenderAgentID == "" || event.CreatedAtUnix == 0 || (kind != "a2a.message" && kind != "mcp.result") || len(result) == 0 || len(result) > maxResultBytes {
 		return errors.New("invalid Messenger result outbox entry")
 	}
 	record := resultRecord{Schema: resultRecordSchema, SourceEventID: event.EventID,
-		ConversationID: event.ConversationID, SenderAgentID: event.SenderAgentID, ResultKind: kind,
+		ConversationID: event.ConversationID, SenderAgentID: event.SenderAgentID, SourceCreatedAtUnix: event.CreatedAtUnix, ResultKind: kind,
 		ResultJSON: append([]byte(nil), result...), ResultDigest: resultDigest(result), State: resultStatePending}
 	encoded, err := json.Marshal(record)
 	if err != nil || len(encoded) > maxRecordBytes {
@@ -237,7 +239,7 @@ func (o *ResultOutbox) path(eventID string) string {
 
 func pendingResult(record resultRecord) PendingResult {
 	return PendingResult{SourceEventID: record.SourceEventID, ConversationID: record.ConversationID,
-		SenderAgentID: record.SenderAgentID, ResultKind: record.ResultKind,
+		SenderAgentID: record.SenderAgentID, SourceCreatedAtUnix: record.SourceCreatedAtUnix, ResultKind: record.ResultKind,
 		ResultJSON: append([]byte(nil), record.ResultJSON...), ResultDigest: record.ResultDigest}
 }
 
@@ -267,7 +269,7 @@ func readResultRecord(path string) (resultRecord, error) {
 
 func validResultRecord(record resultRecord) bool {
 	return record.Schema == resultRecordSchema && eventIDPattern.MatchString(record.SourceEventID) &&
-		record.ConversationID != "" && record.SenderAgentID != "" &&
+		record.ConversationID != "" && record.SenderAgentID != "" && record.SourceCreatedAtUnix > 0 &&
 		(record.ResultKind == "a2a.message" || record.ResultKind == "mcp.result") &&
 		len(record.ResultJSON) > 0 && len(record.ResultJSON) <= maxResultBytes &&
 		digestPattern.MatchString(record.ResultDigest) && record.ResultDigest == resultDigest(record.ResultJSON) &&
@@ -276,7 +278,7 @@ func validResultRecord(record resultRecord) bool {
 
 func sameResult(left, right resultRecord) bool {
 	return left.SourceEventID == right.SourceEventID && left.ConversationID == right.ConversationID &&
-		left.SenderAgentID == right.SenderAgentID && left.ResultKind == right.ResultKind &&
+		left.SenderAgentID == right.SenderAgentID && left.SourceCreatedAtUnix == right.SourceCreatedAtUnix && left.ResultKind == right.ResultKind &&
 		left.ResultDigest == right.ResultDigest && bytes.Equal(left.ResultJSON, right.ResultJSON)
 }
 

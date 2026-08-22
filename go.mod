@@ -13,7 +13,7 @@ require (
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-messenger v0.0.0-20260822052042-48072c6a0e90
+	github.com/tosnetwork/tos-messenger v0.0.0-20260822055355-74e7cc2ce783
 	github.com/tosnetwork/tos-service-protocol v0.0.0-20260822025249-4fe4342a39e0
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11

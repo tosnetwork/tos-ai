@@ -41,3 +41,16 @@ to callers. Completion requires the exact result digest, uses fsync-before-
 rename and survives restart. A publishing loop may therefore retry an outbound
 Messenger result and mark this record complete only after the canonical result
 Event is durably queued. The outbox does not itself choose a network route.
+
+`ResultPublisher` implements that loop against Messenger local request v7. Its
+operator-supplied routes are sorted exact sender Agent → existing pair session
+and recipient Endpoint bindings. For each pending record it derives a stable
+idempotency key from source Event ID plus result digest and a stable expiry from
+the committed source timestamp. Messenger then constructs the response Event
+under daemon-owned network, Agent/Endpoint/Device identity, clock, schema and
+Event ID. Only after the local API returns the canonical queued Event ID does
+the publisher complete the outbox record. Socket failure, missing route, empty
+Event ID or completion failure retains the record; a crash between daemon queue
+and local completion repeats the same idempotent daemon intent. A real
+Messenger journal/socket/client integration test proves durable queueing and
+no result return after both journals restart.
