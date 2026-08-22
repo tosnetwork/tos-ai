@@ -30,5 +30,14 @@ The result receiver is mandatory. A handler returns success only after the A2A
 Task or MCP Output has been durably recorded or idempotently published. A
 decode, authorization, execution or result-commit failure returns non-202, so
 Messenger retains its application lease for retry. Deployments must key result
-commit/republication by the source Event ID; this boundary does not claim that
-an arbitrary non-idempotent result sink is crash-safe.
+commit/republication by the source Event ID.
+
+`ResultOutbox` supplies that durable boundary. It is a mode-`0700`, single-owner
+directory of mode-`0600` records. The first A2A Task or MCP Output for a source
+Event ID is create-exclusive and directory-fsynced; exact retries in pending or
+complete state are idempotent, while profile, conversation, sender, digest or
+body substitution is refused. Pending records are deterministic and immutable
+to callers. Completion requires the exact result digest, uses fsync-before-
+rename and survives restart. A publishing loop may therefore retry an outbound
+Messenger result and mark this record complete only after the canonical result
+Event is durably queued. The outbox does not itself choose a network route.
