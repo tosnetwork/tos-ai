@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
@@ -23,8 +22,6 @@ import (
 )
 
 const (
-	manifest       = "sha256:e4db0138ca2a4d5ad8f3c7ec458304927344e341ae610ee0a682b9cc5b00594e"
-	image          = "sha256:9624bca74096f810c5b24e489521dde124fadcfa1808581648b38bdc1ba1b105"
 	maxSourceBytes = 16 << 20
 )
 
@@ -47,21 +44,18 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	limits := executor.Limits{CPUMillis: 120_000, MemoryBytes: 1 << 30, DiskBytes: 2 << 30,
-		PIDs: 64, ExecutionTime: 180 * time.Second, OutputBytes: 16 << 20}
+	limits := softwarework.FrozenV1Limits()
 	backend, err := containerdbackend.Open(context.Background(), containerdbackend.Config{
 		SocketPath: *socket, Namespace: "tos-service-paid-work", Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
 		FIFODir: *fifo, MaxActive: 1, PolicyLimits: limits,
-		ImageReference: "docker.io/tosnetwork/software-work-go:1.26.5@" + image, ImageDigest: image,
+		ImageReference: softwarework.FrozenV1ImageReference, ImageDigest: softwarework.FrozenV1ImageDigest,
 		ImagePlatform: "linux/amd64",
 	})
 	if err != nil {
 		fail(err)
 	}
 	defer backend.Close()
-	bound, err := executor.NewPolicyExecutor(executor.Policy{AllowedImages: map[string]struct{}{image: {}},
-		MaxAllowedImages: 1, MaxEnvironment: 8, MaxArguments: 8, MaxAllowedHosts: 0, MaxStringBytes: 4096,
-		MaxInputBytes: 16 << 20, Ceiling: limits, RequireReadOnlyRoot: true}, backend)
+	bound, err := executor.NewPolicyExecutor(softwarework.FrozenV1Policy(), backend)
 	if err != nil {
 		fail(err)
 	}
@@ -74,10 +68,7 @@ func main() {
 		fail(err)
 	}
 	defer journal.Close()
-	runner, err := softwarework.NewRunner(bound, store, journal, softwarework.Contract{ManifestDigest: manifest,
-		ToolchainDigest: image, SandboxDigest: manifest, Executable: "/usr/local/bin/go",
-		Arguments: []string{"test", "./...", "-count=1"}, WorkingDirectory: "/workspace/source",
-		Limits: limits, UserID: 65532, GroupID: 65532})
+	runner, err := softwarework.NewRunner(bound, store, journal, softwarework.FrozenV1Contract())
 	if err != nil {
 		fail(err)
 	}

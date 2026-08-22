@@ -38,6 +38,9 @@ worker protocol. The retained code provides:
   Event ID, network, sender and conversation policy before strict A2A/MCP
   mapping, with separate mode-`0600` Unix sockets and a source-Event-ID-keyed,
   crash-safe result outbox before 202;
+- a production `tos-messenger-event-worker` composition that connects those
+  consumers to the quorum finalized-state Gate, fixed containerd runner,
+  persistent artifact locator, durable result publisher and daemon local API;
 - a shared public-adapter boundary that requires TLS 1.3 and a strong bearer
   credential, rejects browser origins, and bounds request bodies, headers,
   concurrent calls, read time, and idle connections;
@@ -45,7 +48,7 @@ worker protocol. The retained code provides:
   cannot execute again when submitted through MCP;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
 - private Unix listener, metrics export, signed update/rollback, and bounded
-  systemd helper libraries suitable for a future worker process.
+  systemd helper libraries used by operator-composed worker processes;
 - a dedicated private-containerd provider deployment template with explicit
   root-runtime and separate-signing-custody boundaries.
 
@@ -71,9 +74,10 @@ certificate/key paths and start the returned server with
 deployment. The execution contract and adapter mappings are frozen in
 `tos-service-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md` and
 `tos-service-spec/docs/A2A_ADAPTER_V1.md`, `tos-service-spec/docs/MCP_ADAPTER_V1.md`, and
-`tos-service-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. A production entry point must
-configure the finalized-chain resolvers and retain the operator's hardened
-listener boundary. It must not resurrect the deleted inference RPC.
+`tos-service-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. The production
+`tos-messenger-event-worker` configures the finalized-chain resolvers and
+retains private listener boundaries for Messenger and the artifact reverse
+proxy. It does not resurrect the deleted inference RPC.
 
 The provider-local command is a privileged runtime boundary when it connects
 to root-owned containerd. Do not grant a gateway user, buyer, or remote client
@@ -96,7 +100,8 @@ pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/artifactstore/              immutable content-addressed output storage
 pkg/a2aadapter/                 gated A2A mapping and hardened JSON-RPC server
 pkg/mcpadapter/                 gated MCP tool and hardened streamable-HTTP server
-pkg/messengereventbridge/      canonical private Event-v2 A2A/MCP consumer
+pkg/messengereventbridge/       canonical private Event-v2 A2A/MCP consumer
+cmd/tos-messenger-event-worker  production private consumer/result composition
 pkg/adapterhttp/                shared TLS/auth/resource public boundary
 pkg/adapterinterop/             cross-transport TLS single-execution acceptance
 pkg/probe/                      privacy-minimized local resource probes

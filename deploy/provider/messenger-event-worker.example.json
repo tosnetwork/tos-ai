@@ -1,0 +1,50 @@
+{
+  "schema": "tos.service.messenger-event-worker.v1",
+  "state_root": "/var/lib/tos-service-messenger-worker",
+  "a2a_socket": "/run/tos-service-messenger-worker/a2a.sock",
+  "mcp_socket": "/run/tos-service-messenger-worker/mcp.sock",
+  "artifact_socket": "/run/tos-service-messenger-worker/artifacts.sock",
+  "artifact_https_origin": "https://artifacts.provider.example",
+  "messenger_runtime_socket": "/run/tos-messenger/runtime.sock",
+  "messenger_call_timeout_seconds": 10,
+  "publish_interval_milliseconds": 1000,
+  "result_lifetime_seconds": 86400,
+  "allowed_senders": [
+    "agent_REPLACE_WITH_64_LOWERCASE_HEX"
+  ],
+  "allowed_conversations": [
+    "conv_REPLACE_WITH_64_LOWERCASE_HEX"
+  ],
+  "result_routes": [
+    {
+      "sender_agent_id": "agent_REPLACE_WITH_64_LOWERCASE_HEX",
+      "session_id": "ses_REPLACE_WITH_64_LOWERCASE_HEX",
+      "recipient_endpoint_id": "mep_REPLACE_WITH_64_LOWERCASE_HEX"
+    }
+  ],
+  "network": {
+    "id": "tos-mainnet",
+    "genesis_root_hash": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+    "genesis_file_hash": "sha256:REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  "chain": {
+    "endpoints": [
+      "https://rpc-a.provider.example/v1",
+      "https://rpc-b.provider.example/v1",
+      "https://rpc-c.provider.example/v1"
+    ],
+    "quorum": 2,
+    "registry_workchain": 0,
+    "registry_code_boc_base64": "REPLACE_WITH_CANONICAL_BOC_BASE64",
+    "registry_code_hash": "tvm-cell-sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+    "escrow_code_hash": "tvm-cell-sha256:REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  "provider": {
+    "agent_id": "agent_REPLACE_WITH_64_LOWERCASE_HEX",
+    "address": "0:REPLACE_WITH_64_LOWERCASE_HEX",
+    "transport_digest": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+    "execution_signer_authorization": "sha256:REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  "containerd_socket": "/run/tos-service-containerd/containerd.sock",
+  "containerd_fifo_directory": "/run/tos-service-containerd/messenger-worker-fifos"
+}

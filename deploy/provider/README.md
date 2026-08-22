@@ -86,6 +86,45 @@ Review the settlement intent outside this root boundary and sign its exact
 key, or vault master key into `/var/lib/tos-service-provider`, `/run/tos-service-containerd`,
 the source archive, or executor environment.
 
+## Run the Messenger event worker
+
+`tos-messenger-event-worker` is the long-running composition for route-neutral
+A2A/MCP Events. It still uses the dedicated root-only containerd socket, but it
+does not contain a wallet or signing key. Install the binary, replace every
+placeholder in `messenger-event-worker.example.json`, then validate the exact
+file before enabling the unit:
+
+```bash
+install -o root -g root -m 0755 /path/to/tos-messenger-event-worker \
+  /usr/local/libexec/tos-service/tos-messenger-event-worker
+install -o root -g root -m 0600 deploy/provider/messenger-event-worker.example.json \
+  /etc/tos-service/messenger-event-worker.json
+
+/usr/local/libexec/tos-service/tos-messenger-event-worker \
+  -config /etc/tos-service/messenger-event-worker.json -check
+
+install -o root -g root -m 0644 deploy/provider/tos-messenger-event-worker.service \
+  /etc/systemd/system/tos-messenger-event-worker.service
+systemctl daemon-reload
+systemctl enable --now tos-messenger-event-worker.service
+```
+
+The checked-in JSON is intentionally invalid until all `REPLACE_WITH_*`
+values are replaced. Allowed senders and conversations must be strictly sorted;
+result routes must be sorted by sender and cover the allowed sender set exactly.
+Messenger must grant `outbox.compose-protocol-result` only on the configured
+runtime socket and must bind the named pair sessions to the configured
+recipient Endpoints. Configure the public artifact HTTPS origin to reverse
+proxy only `/v1/artifacts/sha256/<lowercase-hex>` to the private
+`artifacts.sock`; never expose the A2A, MCP or Messenger runtime sockets.
+
+After any full restart, require all three private sockets to reappear, submit a
+previously completed source Event again, and verify that the source-keyed outbox
+and Messenger idempotency key yield the original queued result Event rather
+than another execution or response. Also inject one authorized inbound
+`mcp.result` and verify that it is committed only to `mcp-result-journal` and
+never appears in the outbound publisher outbox.
+
 ## Acceptance checks
 
 Run the live conformance suite from

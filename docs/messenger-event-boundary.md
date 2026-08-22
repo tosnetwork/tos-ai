@@ -26,6 +26,12 @@ proxy, TCP listener, browser path, text fallback or authority in rendering.
 `mcpadapter.Output`. Execution remains behind the adapters' shared finalized
 Execution Gate.
 
+Production composition separates MCP directions. An output created while
+handling `mcp.call` enters the outbound ResultOutbox. A remotely returned
+`mcp.result` enters a distinct terminal `MCPResultJournal`, is marked complete
+durably, and is never visible to ResultPublisher. This prevents a valid inbound
+result from being echoed back to its sender.
+
 The result receiver is mandatory. A handler returns success only after the A2A
 Task or MCP Output has been durably recorded or idempotently published. A
 decode, authorization, execution or result-commit failure returns non-202, so
@@ -54,3 +60,34 @@ Event ID or completion failure retains the record; a crash between daemon queue
 and local completion repeats the same idempotent daemon intent. A real
 Messenger journal/socket/client integration test proves durable queueing and
 no result return after both journals restart.
+
+## Production operator composition
+
+`cmd/tos-messenger-event-worker` closes the local composition gap. One strict,
+mode-`0600`, single-link operator JSON document binds:
+
+- the exact network/genesis domain, three-to-eight distinct TOS RPC
+  authorities and strict-majority quorum;
+- provider Agent/address, registry and escrow code identities, frozen
+  manifest, transport and execution-signer authorization;
+- separate A2A/MCP Unix sockets, a private artifact reverse-proxy socket and
+  the Messenger runtime-authority socket;
+- sorted allowed sender/conversation sets and an exact one-to-one sender →
+  pair-session/recipient-Endpoint result-route set; and
+- the private state root, dedicated containerd socket/FIFO tree, bounded
+  publish cadence and result lifetime.
+
+Startup creates only owner-private state children, opens the real quorum Gate,
+fixed no-network container runner, persistent artifact publication index,
+outbound outbox and inbound MCP result journal, then starts both profile
+consumers and the result publisher. It refuses
+an allowed sender without a return route, aliased profile sockets, weak chain
+quorum, remote plaintext RPC, non-HTTPS artifact origins, unknown config fields
+and unsafe paths. `-check` performs static/operator-path validation without
+opening containerd or creating runtime state.
+
+The artifact Unix socket is intentionally not a public listener. An operator
+must terminate TLS at the configured HTTPS origin and proxy only the fixed
+content-addressed artifact path to that socket. The worker retains no wallet,
+mnemonic or settlement key. The hardened systemd template and deliberately
+incomplete replace-before-use JSON document live under `deploy/provider/`.

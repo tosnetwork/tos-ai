@@ -64,19 +64,27 @@ type MCPResultReceiver interface {
 }
 
 type MCPExecutionHandler struct {
-	executor MCPExecutor
-	results  MCPResultReceiver
+	executor        MCPExecutor
+	outboundResults MCPResultReceiver
+	inboundResults  MCPResultReceiver
 }
 
 func NewMCPExecutionHandler(executor MCPExecutor, results MCPResultReceiver) (*MCPExecutionHandler, error) {
-	if executor == nil || results == nil {
+	return NewMCPExecutionHandlerSplit(executor, results, results)
+}
+
+// NewMCPExecutionHandlerSplit keeps locally produced call results separate
+// from remotely returned results. Production publishers must receive only the
+// former or an inbound mcp.result could be echoed back to its sender.
+func NewMCPExecutionHandlerSplit(executor MCPExecutor, outboundResults, inboundResults MCPResultReceiver) (*MCPExecutionHandler, error) {
+	if executor == nil || outboundResults == nil || inboundResults == nil {
 		return nil, errors.New("invalid MCP Messenger execution handler")
 	}
-	return &MCPExecutionHandler{executor: executor, results: results}, nil
+	return &MCPExecutionHandler{executor: executor, outboundResults: outboundResults, inboundResults: inboundResults}, nil
 }
 
 func (h *MCPExecutionHandler) HandleMCPCall(ctx context.Context, event envelope.Event, body payload.MCPCall) error {
-	if h == nil || h.executor == nil || h.results == nil || ctx == nil || body.Protocol != "mcp" || body.Version != "1" {
+	if h == nil || h.executor == nil || h.outboundResults == nil || ctx == nil || body.Protocol != "mcp" || body.Version != "1" {
 		return errors.New("invalid MCP Messenger call event")
 	}
 	var input mcpadapter.Input
@@ -87,21 +95,21 @@ func (h *MCPExecutionHandler) HandleMCPCall(ctx context.Context, event envelope.
 	if err != nil {
 		return errors.New("MCP Messenger execution failed")
 	}
-	if err := h.results.ReceiveMCPResult(ctx, event, output); err != nil {
+	if err := h.outboundResults.ReceiveMCPResult(ctx, event, output); err != nil {
 		return errors.New("MCP Messenger result was not committed")
 	}
 	return nil
 }
 
 func (h *MCPExecutionHandler) HandleMCPResult(ctx context.Context, event envelope.Event, body payload.MCPResult) error {
-	if h == nil || h.results == nil || ctx == nil || body.Protocol != "mcp" || body.Version != "1" {
+	if h == nil || h.inboundResults == nil || ctx == nil || body.Protocol != "mcp" || body.Version != "1" {
 		return errors.New("invalid MCP Messenger result event")
 	}
 	var output mcpadapter.Output
 	if err := decodeStrictJSON(body.Body, &output); err != nil {
 		return errors.New("invalid MCP Messenger result body")
 	}
-	if err := h.results.ReceiveMCPResult(ctx, event, output); err != nil {
+	if err := h.inboundResults.ReceiveMCPResult(ctx, event, output); err != nil {
 		return errors.New("MCP Messenger result was not committed")
 	}
 	return nil

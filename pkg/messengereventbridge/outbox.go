@@ -65,6 +65,42 @@ type ResultOutbox struct {
 	mutex sync.Mutex
 }
 
+// MCPResultJournal durably commits remotely returned MCP results without
+// exposing them to ResultPublisher. It deliberately uses a distinct owned
+// directory from the outbound result outbox.
+type MCPResultJournal struct {
+	store *ResultOutbox
+}
+
+func OpenMCPResultJournal(root string) (*MCPResultJournal, error) {
+	store, err := OpenResultOutbox(root)
+	if err != nil {
+		return nil, err
+	}
+	return &MCPResultJournal{store: store}, nil
+}
+
+func (j *MCPResultJournal) ReceiveMCPResult(_ context.Context, event envelope.Event, output mcpadapter.Output) error {
+	if j == nil || j.store == nil {
+		return errors.New("invalid MCP result journal")
+	}
+	raw, err := json.Marshal(output)
+	if err != nil {
+		return errors.New("encode MCP result")
+	}
+	if err := j.store.enqueue(event, "mcp.result", raw); err != nil {
+		return err
+	}
+	return j.store.Complete(event.EventID, resultDigest(raw))
+}
+
+func (j *MCPResultJournal) Close() error {
+	if j == nil || j.store == nil {
+		return nil
+	}
+	return j.store.Close()
+}
+
 func OpenResultOutbox(root string) (*ResultOutbox, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, errors.New("invalid Messenger result outbox root")

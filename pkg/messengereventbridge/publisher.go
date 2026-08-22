@@ -22,9 +22,9 @@ type LocalAPICaller interface {
 }
 
 type ResultRoute struct {
-	SenderAgentID       string
-	SessionID           string
-	RecipientEndpointID string
+	SenderAgentID       string `json:"sender_agent_id"`
+	SessionID           string `json:"session_id"`
+	RecipientEndpointID string `json:"recipient_endpoint_id"`
 }
 
 type PublisherConfig struct {
