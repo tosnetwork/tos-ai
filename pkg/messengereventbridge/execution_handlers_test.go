@@ -123,6 +123,30 @@ func TestMCPExecutionHandlerSeparatesCallsAndResults(t *testing.T) {
 	}
 }
 
+func TestMCPExecutionHandlerSplitNeverSendsInboundResultToOutboundSink(t *testing.T) {
+	output := mcpadapter.Output{Protocol: "tos_service_v1", ExecutionID: "sha256:split"}
+	outbound, inbound := &mcpResultsFake{}, &mcpResultsFake{}
+	handler, err := NewMCPExecutionHandlerSplit(&mcpExecutorFake{output: output}, outbound, inbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputRaw, _ := json.Marshal(mcpadapter.Input{ExecutionID: "sha256:input"})
+	if err := handler.HandleMCPCall(context.Background(), decodedEvent(t, "mcp.call"), payload.MCPCall{Foreign: payload.Foreign{
+		Protocol: "mcp", Version: "1", Body: inputRaw,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	outputRaw, _ := json.Marshal(output)
+	if err := handler.HandleMCPResult(context.Background(), decodedEvent(t, "mcp.result"), payload.MCPResult{Foreign: payload.Foreign{
+		Protocol: "mcp", Version: "1", Body: outputRaw,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(outbound.values) != 1 || len(inbound.values) != 1 {
+		t.Fatalf("MCP directions crossed: outbound=%+v inbound=%+v", outbound.values, inbound.values)
+	}
+}
+
 func TestExecutionHandlersRejectProfileUnknownFieldsAndTrailingJSON(t *testing.T) {
 	a2aHandler, _ := NewA2AExecutionHandler(&a2aExecutorFake{task: &a2a.Task{}}, &a2aResultsFake{})
 	for _, body := range []payload.A2AMessage{

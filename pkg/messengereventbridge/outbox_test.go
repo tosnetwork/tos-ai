@@ -91,6 +91,48 @@ func TestResultOutboxSeparatesMCPResultAndSourceIdentity(t *testing.T) {
 	}
 }
 
+func TestMCPResultJournalCommitsInboundResultWithoutPublishing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "inbound-mcp-results")
+	journal, err := OpenMCPResultJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := decodedEvent(t, "mcp.result")
+	output := mcpadapter.Output{Protocol: "tos_service_v1", ExecutionID: "sha256:" + strings.Repeat("1", 64)}
+	if err := journal.ReceiveMCPResult(context.Background(), event, output); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.ReceiveMCPResult(context.Background(), event, output); err != nil {
+		t.Fatalf("exact inbound result retry failed: %v", err)
+	}
+	substituted := output
+	substituted.ExecutionID = "sha256:" + strings.Repeat("2", 64)
+	if err := journal.ReceiveMCPResult(context.Background(), event, substituted); err == nil {
+		t.Fatal("inbound MCP result substitution was accepted")
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspect, err := OpenResultOutbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := inspect.Pending(); err != nil || len(pending) != 0 {
+		t.Fatalf("inbound result leaked into publishable pending set: %+v err=%v", pending, err)
+	}
+	if err := inspect.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenMCPResultJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.ReceiveMCPResult(context.Background(), event, output); err != nil {
+		t.Fatalf("inbound result did not survive restart: %v", err)
+	}
+}
+
 func TestResultOutboxRefusesConcurrentOwnerAndCorruptRecord(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "results")
 	outbox, err := OpenResultOutbox(root)

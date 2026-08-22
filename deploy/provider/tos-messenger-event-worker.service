@@ -1,0 +1,50 @@
+[Unit]
+Description=TOS Messenger A2A/MCP software-work provider
+Documentation=https://github.com/tosnetwork/tos-ai/tree/main/deploy/provider
+Requires=tos-service-containerd.service
+After=tos-service-containerd.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/tos-service/tos-messenger-event-worker -config /etc/tos-service/messenger-event-worker.json
+Restart=on-failure
+RestartSec=5s
+# One admitted fixed job may use the 180-second execution ceiling; leave room
+# for journal/outbox fsync and containerd cleanup before systemd escalates.
+TimeoutStopSec=240s
+UMask=0077
+
+# This process is root only because the dedicated containerd socket is root
+# authority. It has no wallet/signing key and exposes only private Unix sockets.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+RuntimeDirectory=tos-service-messenger-worker
+RuntimeDirectoryMode=0700
+StateDirectory=tos-service-messenger-worker
+StateDirectoryMode=0700
+ReadWritePaths=/run/tos-service-containerd /run/tos-service-messenger-worker /var/lib/tos-service-messenger-worker
+
+[Install]
+WantedBy=multi-user.target
