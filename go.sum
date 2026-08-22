@@ -171,10 +171,12 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 h1:kdXcSzyDtseVEc4yCz2qF8ZrQvIDBJLl4S1c3GCXmoI=
 github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635/go.mod h1:hkRG7XYTFWNJGYcbNJQlaLq0fg1yr4J4t/NcTQtrfww=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20260820090236-2a06d05b29db h1:mY8J+W3+nslO6VbtgAgoQIyWEEc7SuuhlQQyb1WMu8w=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20260820090236-2a06d05b29db/go.mod h1:CRRhzdu1Qg3ZhGWiw+QkSaZxBz21E+GqGU5hTZabOMs=
-github.com/tosnetwork/tosutils-go v1.18.1 h1:FaGgdkidQS8QjCnkzj3+9lJupBtAJxuLFy9/gs0p8bE=
-github.com/tosnetwork/tosutils-go v1.18.1/go.mod h1:HtytU2Ya/EII8lswkqK30qgQePIHS1k7XDMxll3d9CQ=
+github.com/tosnetwork/tos-messenger v0.0.0-20260822052042-48072c6a0e90 h1:TWQBOtT3yciEq1/952h93C3Hi5Rgth+HOHsPOclQriI=
+github.com/tosnetwork/tos-messenger v0.0.0-20260822052042-48072c6a0e90/go.mod h1:eKORslXn17KxiJCebHTbl7j7xk1FPXhqMnIz3kCKWYY=
+github.com/tosnetwork/tos-service-protocol v0.0.0-20260822025249-4fe4342a39e0 h1:xStQPbNWz1ZT27C3TG71m90MrJ45BrA0/X0R7wgrW68=
+github.com/tosnetwork/tos-service-protocol v0.0.0-20260822025249-4fe4342a39e0/go.mod h1:CRRhzdu1Qg3ZhGWiw+QkSaZxBz21E+GqGU5hTZabOMs=
+github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef h1:P+zHw4vfeKoRdLgjEmLFnkZOu4MleU9X22hHEX6l/F8=
+github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef/go.mod h1:HtytU2Ya/EII8lswkqK30qgQePIHS1k7XDMxll3d9CQ=
 github.com/urfave/cli v1.19.1/go.mod h1:70zkFmudgCuE/ngEzBv17Jvp/497gISqfk5gWijbERA=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=

@@ -34,6 +34,9 @@ worker protocol. The retained code provides:
   use that Gate and never treat A2A metadata as payment authority;
 - an official MCP 2026-07-28 typed tool mapper with the same finalized,
   atomic single-execution claim boundary and stateless streamable-HTTP handler;
+- a private Messenger Event-v2 consumer that independently verifies canonical
+  Event ID, network, sender and conversation policy before strict A2A/MCP
+  mapping, with separate mode-`0600` Unix sockets and result-before-202;
 - a shared public-adapter boundary that requires TLS 1.3 and a strong bearer
   credential, rejects browser origins, and bounds request bodies, headers,
   concurrent calls, read time, and idle connections;
@@ -92,6 +95,7 @@ pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/artifactstore/              immutable content-addressed output storage
 pkg/a2aadapter/                 gated A2A mapping and hardened JSON-RPC server
 pkg/mcpadapter/                 gated MCP tool and hardened streamable-HTTP server
+pkg/messengereventbridge/      canonical private Event-v2 A2A/MCP consumer
 pkg/adapterhttp/                shared TLS/auth/resource public boundary
 pkg/adapterinterop/             cross-transport TLS single-execution acceptance
 pkg/probe/                      privacy-minimized local resource probes
