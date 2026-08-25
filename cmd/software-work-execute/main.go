@@ -13,8 +13,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 	"github.com/tosnetwork/tos-ai/pkg/executor/containerdbackend"
@@ -136,8 +136,7 @@ func requirePrivateOwnedDirectory(path string) error {
 }
 
 func ownedByCurrentUser(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
+	return osguard.CurrentUserOwns(info)
 }
 
 func fail(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }

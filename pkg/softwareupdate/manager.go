@@ -15,10 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/tosnetwork/tos-ai/internal/dirlock"
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/pkg/update"
 )
 
@@ -489,8 +489,7 @@ func readPrivateFile(path string, maximum int64, mode os.FileMode) ([]byte, erro
 }
 
 func ownedByCurrentUser(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
+	return osguard.CurrentUserOwns(info)
 }
 
 func cleanInterruptedFiles(directory string) {

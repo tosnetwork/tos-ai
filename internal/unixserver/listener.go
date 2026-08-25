@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-ai/internal/dirlock"
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 )
 
 const (
@@ -109,8 +110,7 @@ func PreparePrivateFileTarget(path string) error {
 }
 
 func ownedByCurrentUser(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
+	return osguard.CurrentUserOwns(info)
 }
 
 func socketLockName(path string) (string, error) {

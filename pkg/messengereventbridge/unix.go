@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 )
 
 type UnixService struct {
@@ -55,8 +56,7 @@ func listenPrivateUnix(path string) (net.Listener, error) {
 		return nil, errors.New("Messenger protocol socket must be a clean absolute path")
 	}
 	parent, err := os.Stat(filepath.Dir(path))
-	stat, owned := parentSyscallStat(parent)
-	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0o077 != 0 || !owned || stat.Uid != uint32(os.Geteuid()) {
+	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0o077 != 0 || !osguard.CurrentUserOwns(parent) {
 		return nil, errors.New("Messenger protocol socket parent must be an existing private directory")
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
@@ -72,14 +72,6 @@ func listenPrivateUnix(path string) (net.Listener, error) {
 		return nil, err
 	}
 	return listener, nil
-}
-
-func parentSyscallStat(info os.FileInfo) (*syscall.Stat_t, bool) {
-	if info == nil {
-		return nil, false
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return stat, ok
 }
 
 func (s *UnixService) Run(ctx context.Context) error {

@@ -9,11 +9,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/tosnetwork/tos-ai/internal/dirlock"
 	"github.com/tosnetwork/tos-ai/internal/nilcheck"
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/pkg/executor"
 )
 
@@ -445,8 +445,7 @@ func validateEmptyWorkspaceRoot(path string) error {
 }
 
 func ownedByCurrentUser(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
+	return osguard.CurrentUserOwns(info)
 }
 
 func runtimeID(digest string) string {

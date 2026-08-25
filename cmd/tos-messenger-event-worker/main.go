@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/internal/unixserver"
 	"github.com/tosnetwork/tos-ai/pkg/a2aadapter"
 	"github.com/tosnetwork/tos-ai/pkg/artifacthttp"
@@ -147,10 +148,9 @@ func readConfig(path string) (config, error) {
 		return value, errors.New("configuration path contains a symlink")
 	}
 	before, err := os.Lstat(path)
-	stat, ok := fileOwner(before)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 ||
 		before.Mode().Perm() != 0o600 || before.Size() <= 0 || before.Size() > maxConfigBytes ||
-		!ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		!osguard.CurrentUserOwnsSingleLink(before) {
 		return value, errors.New("configuration must be a bounded private owned regular file")
 	}
 	file, err := os.Open(path)
@@ -535,9 +535,8 @@ func requirePrivateDirectory(path string) error {
 		return errors.New("worker state directory must be canonical and absolute")
 	}
 	info, err := os.Lstat(path)
-	stat, ok := fileOwner(info)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 ||
-		!ok || stat.Uid != uint32(os.Geteuid()) {
+		!osguard.CurrentUserOwns(info) {
 		return errors.New("worker state directory must be private and owned")
 	}
 	resolved, err := filepath.EvalSymlinks(path)
@@ -545,14 +544,6 @@ func requirePrivateDirectory(path string) error {
 		return errors.New("worker state directory contains a symlink")
 	}
 	return nil
-}
-
-func fileOwner(info os.FileInfo) (*syscall.Stat_t, bool) {
-	if info == nil {
-		return nil, false
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return stat, ok
 }
 
 func fail(err error) {

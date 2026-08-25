@@ -13,10 +13,10 @@ import (
 	"regexp"
 	"sort"
 	"sync"
-	"syscall"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/tosnetwork/tos-ai/internal/dirlock"
+	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/pkg/mcpadapter"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 )
@@ -109,9 +109,8 @@ func OpenResultOutbox(root string) (*ResultOutbox, error) {
 		return nil, errors.New("create Messenger result outbox root")
 	}
 	info, err := os.Lstat(root)
-	stat, valid := fileStat(info)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 ||
-		!valid || stat.Uid != uint32(os.Geteuid()) {
+		!osguard.CurrentUserOwns(info) {
 		return nil, errors.New("Messenger result outbox root must be private and owned")
 	}
 	ownership, err := dirlock.Acquire(root, ".messenger-result-outbox.lock")
@@ -281,9 +280,8 @@ func pendingResult(record resultRecord) PendingResult {
 
 func readResultRecord(path string) (resultRecord, error) {
 	info, err := os.Lstat(path)
-	stat, valid := fileStat(info)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 ||
-		info.Size() <= 0 || info.Size() > maxRecordBytes || !valid || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		info.Size() <= 0 || info.Size() > maxRecordBytes || !osguard.CurrentUserOwnsSingleLink(info) {
 		return resultRecord{}, errors.New("invalid Messenger result outbox record")
 	}
 	raw, err := os.ReadFile(path)
@@ -348,14 +346,6 @@ func syncResultDirectory(path string) error {
 		return errors.New("sync Messenger result directory")
 	}
 	return nil
-}
-
-func fileStat(info os.FileInfo) (*syscall.Stat_t, bool) {
-	if info == nil {
-		return nil, false
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return stat, ok
 }
 
 var _ A2AResultReceiver = (*ResultOutbox)(nil)
