@@ -15,6 +15,7 @@ import (
 	"time"
 
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 type testWriterAuthority struct {
@@ -92,6 +93,35 @@ func TestGateStartsExactImmutableResourcesOnce(t *testing.T) {
 	}
 	if err := gate.Complete(launch, StateSucceeded, digest([]byte("outcome"))); err != nil {
 		t.Fatal(err)
+	}
+	exported, err := gate.ExportOutcomeEvidence(launch.ExecutionID, "issuer:pseudonym", "execution:pseudonym", "local_private",
+		digest([]byte("audience")), digest([]byte("retention")), digest([]byte("retrieval")), digest([]byte("authority-time")),
+		digest([]byte("qualification")), 128, 128, now)
+	if err != nil || len(exported.CanonicalEvidence) == 0 || exported.EvidenceItem.EvidenceRole != "authoritative_resolution" {
+		t.Fatalf("outcome evidence=%+v err=%v", exported, err)
+	}
+	authorityTime := commerce.AuthorityTimeProofV1{ProfileURI: "tos.authority.clock.v1", AuthorityOrCheckpointID: "checkpoint:gate",
+		IntervalStartUnix: uint64(now.Add(-time.Second).Unix()), IntervalEndUnix: uint64(now.Unix()), FinalizedHighWater: 1,
+		FinalizedRootDigest: digest([]byte("root")), ProofDigest: digest([]byte("proof"))}
+	authorityTimeBytes, _ := codec.Marshal(authorityTime)
+	authorityMaterial := commerce.OutcomeAuthorityProofMaterialV1{ProofProfileURI: commerce.OutcomeAuthorityTimeProofProfileV1,
+		CanonicalObject: authorityTimeBytes}
+	authorityMaterialDigest, _ := commerce.OutcomeAuthorityProofObjectDigestV1(authorityMaterial)
+	subjectScope, _ := commerce.OutcomeSubjectScopeDigestV1(launch.ExecutionID)
+	qualification := commerce.IssuerQualificationProofV1{RootAuthorityID: "authority:root", IssuerAgentID: "agent:executor",
+		IssuerKeyDigest: digest([]byte("issuer-key")), OrderedDelegationChainDigest: digest([]byte("delegation")),
+		ScopeProfileURI: ExecutionOutcomeEvidenceProfileV1, SubjectScopeDigest: subjectScope,
+		ValidFromUnix: uint64(now.Add(-time.Hour).Unix()), ValidUntilUnix: uint64(now.Add(time.Hour).Unix()),
+		RevocationHandleSetDigest: digest([]byte("revocations")), AuthorityTimeProofDigest: authorityMaterialDigest,
+		RevocationHighWater: 1, RevocationRootDigest: digest([]byte("revocation-root"))}
+	qualificationBytes, _ := codec.Marshal(qualification)
+	qualificationMaterial := commerce.OutcomeAuthorityProofMaterialV1{ProofProfileURI: commerce.OutcomeIssuerQualificationProofProfileV1,
+		CanonicalObject: qualificationBytes}
+	event, bundle, err := gate.BuildOperationOutcomeArtifacts(launch.ExecutionID, "agent:executor", "local_private",
+		digest([]byte("audience")), digest([]byte("retention")), digest([]byte("retrieval")), digest([]byte("gate-policy")),
+		[]commerce.OutcomeAuthorityProofMaterialV1{authorityMaterial, qualificationMaterial}, now)
+	if err != nil || commerce.VerifyOperationOutcomeArtifactBundleV1(event, bundle) != nil {
+		t.Fatalf("Gate outcome event is not self-contained: event=%+v err=%v", event, err)
 	}
 	if _, err := gate.Start(context.Background(), ticket, fence, startAction); err == nil {
 		t.Fatal("terminal execution started twice")
