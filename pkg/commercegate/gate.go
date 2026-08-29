@@ -464,7 +464,7 @@ func EffectAuthorizationMaterial(plan Plan, request HTTPSRequest) ([]byte, map[s
 // effect as submitted before opening the socket; a crash or timeout thereafter
 // remains ambiguous and cannot be retried as a new semantic action.
 func (gate *Gate) PerformHTTPS(ctx context.Context, launch Launch, request HTTPSRequest,
-	action commerce.AuthorizedAction, fence commerce.WriterFence, credentials CredentialResolver) (HTTPSResponse, error) {
+	action commerce.AuthorizedAction, fence commerce.WriterFence, credentials CredentialResolver, revalidate func(context.Context) error) (HTTPSResponse, error) {
 	if gate == nil || gate.lock == nil {
 		return HTTPSResponse{}, errors.New("execution effect broker is unavailable")
 	}
@@ -544,6 +544,12 @@ func (gate *Gate) PerformHTTPS(ctx context.Context, launch Launch, request HTTPS
 			return HTTPSResponse{}, resolveErr
 		}
 		headers = append(headers, secretHeaders...)
+	}
+	// This callback is the final capability admission at the network broker,
+	// after credentials and the exact request are frozen and immediately before
+	// DNS/socket activity. A caller-side precheck is not a substitute.
+	if revalidate == nil || revalidate(ctx) != nil {
+		return HTTPSResponse{}, errors.New("trusted capability was revoked at HTTPS submission")
 	}
 	response, callErr := performPinnedHTTPS(ctx, *network, request, headers, action.StableActionID)
 	if callErr != nil {
