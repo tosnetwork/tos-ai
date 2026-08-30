@@ -177,10 +177,8 @@ github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 h1:kdXcSzyDtse
 github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635/go.mod h1:hkRG7XYTFWNJGYcbNJQlaLq0fg1yr4J4t/NcTQtrfww=
 github.com/tosnetwork/tos-messenger v0.0.0-20260825005733-7c5759f44d71 h1:mRYXVauTfGea46cYDEQZWpni/IjK2gwMsEEwWjYd7+U=
 github.com/tosnetwork/tos-messenger v0.0.0-20260825005733-7c5759f44d71/go.mod h1:NejX+TWK0XleL5oLnLaRbdayVaODy5kYrS8EuN6JxS0=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20260825005653-0cd6b53f2c35 h1:2Zrh8aAP2EODPQQmD0DfsodCy3L1sWAoLUt/qlaBHNA=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20260825005653-0cd6b53f2c35/go.mod h1:jFUXk+mmQiY2jaBIlhVympKIC9O9RSEK3zrnnEupajU=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20260828000705-8d8b80ad5934 h1:hJWZgX4mf14IXoSyHWzJZOmsUQpalRF39C5FjsUpnlE=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20260828000705-8d8b80ad5934/go.mod h1:jFUXk+mmQiY2jaBIlhVympKIC9O9RSEK3zrnnEupajU=
+github.com/tosnetwork/tos-service-protocol v0.0.0-20260830105001-39dd9f362aa6 h1:r9zfUuXKjmg6hqNULasjUvAGeMZupVnC6pvKWcGvd7w=
+github.com/tosnetwork/tos-service-protocol v0.0.0-20260830105001-39dd9f362aa6/go.mod h1:LHTXahrT3G7Kee+8cvIY/HOSz3tO6B4hHozE/sBzzrE=
 github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef h1:P+zHw4vfeKoRdLgjEmLFnkZOu4MleU9X22hHEX6l/F8=
 github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef/go.mod h1:HtytU2Ya/EII8lswkqK30qgQePIHS1k7XDMxll3d9CQ=
 github.com/urfave/cli v1.19.1/go.mod h1:70zkFmudgCuE/ngEzBv17Jvp/497gISqfk5gWijbERA=
