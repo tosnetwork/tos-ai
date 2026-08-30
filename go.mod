@@ -14,7 +14,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/tosnetwork/tos-messenger v0.0.0-20260825005733-7c5759f44d71
-	github.com/tosnetwork/tos-service-protocol v0.0.0-20260828000705-8d8b80ad5934
+	github.com/tosnetwork/tos-service-protocol v0.0.0-20260830105001-39dd9f362aa6
 	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
