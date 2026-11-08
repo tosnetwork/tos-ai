@@ -1,7 +1,7 @@
 // Package softwarework binds the frozen software-work contract to the bounded
 // executor and immutable artifact store. It deliberately does not decide
-// whether a Quote or escrow is canonical; that authority remains finalized TOS
-// state at the future public worker boundary.
+// whether a Quote or a Service Actor request is canonical; that authority
+// remains finalized TOS state at the future public worker boundary.
 package softwarework
 
 import (

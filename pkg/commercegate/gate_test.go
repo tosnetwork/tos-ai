@@ -2,8 +2,6 @@ package commercegate
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,22 +12,48 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/actionauthoritytest"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
 
+// authorityKey names an Action Authority controller in custody and the
+// verifier that checks its signatures.
+type authorityKey struct {
+	signer     mldsa44.Signer
+	verifier   mldsa44.Verifier
+	controller string
+	keyID      string
+	publicKey  []byte
+}
+
+// fakeKey is the deterministic in-process stand-in used by pure-logic tests.
+func fakeKey() authorityKey {
+	fake := &mldsa44test.Fake{}
+	return authorityKey{signer: fake, verifier: fake, controller: actionauthoritytest.Controller,
+		keyID: fake.KeyID(actionauthoritytest.Controller), publicKey: fake.PublicKey(actionauthoritytest.Controller)}
+}
+
+// custodyKey is a real ML-DSA-44 controller in a private tosctl vault.
+func custodyKey(t *testing.T, custody *actionauthoritytest.Custody, controller string) authorityKey {
+	t.Helper()
+	return authorityKey{signer: custody.Signer, verifier: custody.Signer, controller: controller,
+		keyID: custody.KeyID(t, controller), publicKey: custody.PublicKeys[controller]}
+}
+
 type testWriterAuthority struct {
-	key        ed25519.PublicKey
+	actionauthoritytest.Resolver
 	generation uint64
 	lease      string
 }
 
-func (authority *testWriterAuthority) AuthorizeFenceKey(_ string, key ed25519.PublicKey, _ time.Time) error {
-	if !key.Equal(authority.key) {
-		return errors.New("wrong authority key")
-	}
-	return nil
+func newTestWriterAuthority(key authorityKey, generation uint64, lease string) *testWriterAuthority {
+	return &testWriterAuthority{Resolver: actionauthoritytest.Resolver{Verifier: key.verifier,
+		Keys: map[string][][]byte{"authority": {key.publicKey}}}, generation: generation, lease: lease}
 }
+
 func (authority *testWriterAuthority) ConfirmCurrentWriterFence(fence commerce.WriterFence, _ time.Time) error {
 	if fence.Body.WriterGeneration != authority.generation || fence.Body.LeaseID != authority.lease {
 		return errors.New("stale writer")
@@ -39,9 +63,9 @@ func (authority *testWriterAuthority) ConfirmCurrentWriterFence(fence commerce.W
 
 func TestGateStartsExactImmutableResourcesOnce(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := fakeKey()
 	fence := signedFence(t, key, now, 1, "lease:one")
-	authority := &testWriterAuthority{key: key.Public().(ed25519.PublicKey), generation: 1, lease: "lease:one"}
+	authority := newTestWriterAuthority(key, 1, "lease:one")
 	directory := filepath.Join(t.TempDir(), "gate")
 	gate, err := Open(directory, authority)
 	if err != nil {
@@ -130,9 +154,9 @@ func TestGateStartsExactImmutableResourcesOnce(t *testing.T) {
 
 func TestGateRejectsStaleTakeoverAndRecoversStartingAsAmbiguous(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := fakeKey()
 	fence1 := signedFence(t, key, now, 1, "lease:one")
-	authority := &testWriterAuthority{key: key.Public().(ed25519.PublicKey), generation: 1, lease: "lease:one"}
+	authority := newTestWriterAuthority(key, 1, "lease:one")
 	directory := filepath.Join(t.TempDir(), "gate")
 	gate, _ := Open(directory, authority)
 	gate.now = func() time.Time { return now }
@@ -183,7 +207,7 @@ func TestGateRejectsStaleTakeoverAndRecoversStartingAsAmbiguous(t *testing.T) {
 
 func TestExecutionIdentitySurvivesWriterTakeoverButBoundPlanDoesNot(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := fakeKey()
 	fence1 := signedFence(t, key, now, 1, "lease:one")
 	fence2 := signedFence(t, key, now, 2, "lease:two")
 	path := filepath.Join(t.TempDir(), "input")
@@ -212,9 +236,9 @@ func TestExecutionIdentitySurvivesWriterTakeoverButBoundPlanDoesNot(t *testing.T
 
 func TestGateRejectsPrivateOrRedirectableNetworkCapabilities(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := fakeKey()
 	fence := signedFence(t, key, now, 1, "lease:network")
-	authority := &testWriterAuthority{key: key.Public().(ed25519.PublicKey), generation: 1, lease: "lease:network"}
+	authority := newTestWriterAuthority(key, 1, "lease:network")
 	gate, err := Open(filepath.Join(t.TempDir(), "gate"), authority)
 	if err != nil {
 		t.Fatal(err)
@@ -248,9 +272,9 @@ func TestGateRejectsPrivateOrRedirectableNetworkCapabilities(t *testing.T) {
 
 func TestGateRecoversRunningExecutionAsAmbiguousWithoutRestart(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	key := fakeKey()
 	fence := signedFence(t, key, now, 1, "lease:running")
-	authority := &testWriterAuthority{key: key.Public().(ed25519.PublicKey), generation: 1, lease: "lease:running"}
+	authority := newTestWriterAuthority(key, 1, "lease:running")
 	directory := filepath.Join(t.TempDir(), "gate")
 	gate, err := Open(directory, authority)
 	if err != nil {
@@ -297,18 +321,18 @@ func testPlan(path string, raw []byte, obligation string) Plan {
 		PolicyRevision: 1, LeaseLossPolicy: LeaseLossKill, Files: []FileBinding{{Path: path, Digest: digest(raw), Size: uint64(len(raw))}}}
 }
 
-func signedFence(t *testing.T, key ed25519.PrivateKey, now time.Time, generation uint64, lease string) commerce.WriterFence {
+func signedFence(t *testing.T, key authorityKey, now time.Time, generation uint64, lease string) commerce.WriterFence {
 	t.Helper()
-	fence, err := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner", AgentID: "agent", InstanceID: "runtime",
+	fence, err := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner", AgentID: "agent", InstanceID: "runtime",
 		LeaseID: lease, WriterGeneration: generation, IssuedAtUnix: uint64(now.Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()),
-		AuthorityID: "authority", Scope: []string{"execution.prepare", "execution.start"}}, key)
+		AuthorityID: "authority", Scope: []string{"execution.prepare", "execution.start"}}, key.signer, key.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return fence
 }
 
-func authorizedPrepare(t *testing.T, plan Plan, fence commerce.WriterFence, key ed25519.PrivateKey, now time.Time) (Plan, commerce.AuthorizedAction) {
+func authorizedPrepare(t *testing.T, plan Plan, fence commerce.WriterFence, key authorityKey, now time.Time) (Plan, commerce.AuthorizedAction) {
 	t.Helper()
 	prepared, request, fields, err := PrepareAuthorizationMaterial(plan, fence)
 	if err != nil {
@@ -319,14 +343,14 @@ func authorizedPrepare(t *testing.T, plan Plan, fence commerce.WriterFence, key 
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = commerce.SignAuthorizedAction(action, key)
+	action, err = commerce.SignAuthorizedAction(context.Background(), action, key.keyID, key.signer, key.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return prepared, action
 }
 
-func authorizedStart(t *testing.T, plan Plan, ticket Ticket, fence commerce.WriterFence, key ed25519.PrivateKey, now time.Time) commerce.AuthorizedAction {
+func authorizedStart(t *testing.T, plan Plan, ticket Ticket, fence commerce.WriterFence, key authorityKey, now time.Time) commerce.AuthorizedAction {
 	t.Helper()
 	request, fields, err := StartAuthorizationMaterial(plan, ticket)
 	if err != nil {
@@ -337,7 +361,7 @@ func authorizedStart(t *testing.T, plan Plan, ticket Ticket, fence commerce.Writ
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = commerce.SignAuthorizedAction(action, key)
+	action, err = commerce.SignAuthorizedAction(context.Background(), action, key.keyID, key.signer, key.controller)
 	if err != nil {
 		t.Fatal(err)
 	}

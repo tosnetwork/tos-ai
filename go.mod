@@ -4,25 +4,20 @@ go 1.26.5
 
 require (
 	github.com/NVIDIA/go-nvml v0.13.3-1
-	github.com/a2aproject/a2a-go/v2 v2.4.0
 	github.com/containerd/cgroups/v3 v3.0.3
 	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/containerd/v2 v2.0.11
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/containerd/typeurl/v2 v2.2.3
-	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-messenger v0.0.0-20260825005733-7c5759f44d71
-	github.com/tosnetwork/tos-service-protocol v0.0.0-20260830105001-39dd9f362aa6
-	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef
+	github.com/tosnetwork/tos-service-protocol v0.0.0-20261108031740-cb4273a60ded
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
 	tags.cncf.io/container-device-interface v1.0.0
 )
 
 require (
-	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20231105174938-2b5cbb29f3e2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -44,8 +39,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/sys/mountinfo v0.7.2 // indirect
@@ -59,13 +52,10 @@ require (
 	github.com/opencontainers/selinux v1.13.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/segmentio/asm v1.1.3 // indirect
-	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
+	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/xssnick/raptorq v1.5.0 // indirect
-	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.56.0 // indirect
@@ -74,10 +64,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260427160629-7cedc36a6bc4 // indirect
 	google.golang.org/grpc v1.82.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
