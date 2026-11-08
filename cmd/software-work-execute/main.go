@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
@@ -33,7 +34,13 @@ func main() {
 	quote := flag.String("quote", "", "Accepted Quote commitment")
 	executionID := flag.String("execution-id", "", "execution identity")
 	inputDigest := flag.String("input-digest", "", "canonical job input digest")
+	manifestDigest := flag.String("manifest-digest", "", "published manifest digest the sandbox binds (default: the frozen manifest)")
+	outputBytes := flag.Uint64("output-bytes", 0, "output bound the published manifest states (default: the frozen bound)")
 	flag.Parse()
+	contract, err := publishedContract(*manifestDigest, *outputBytes)
+	if err != nil {
+		fail(err)
+	}
 	if *socket == "" || *fifo == "" || *root == "" || *source == "" {
 		fail(fmt.Errorf("all path flags are required"))
 	}
@@ -68,7 +75,7 @@ func main() {
 		fail(err)
 	}
 	defer journal.Close()
-	runner, err := softwarework.NewRunner(bound, store, journal, softwarework.FrozenV1Contract())
+	runner, err := softwarework.NewRunner(bound, store, journal, contract)
 	if err != nil {
 		fail(err)
 	}
@@ -79,6 +86,29 @@ func main() {
 	}
 	encoded, _ := json.MarshalIndent(outcome, "", "  ")
 	fmt.Println(string(encoded))
+}
+
+// publishedContract is the frozen contract bound to a provider's published
+// manifest: its digest names the sandbox, and its output bound may only be
+// tighter than the frozen one.
+func publishedContract(manifestDigest string, outputBytes uint64) (softwarework.Contract, error) {
+	contract := softwarework.FrozenV1Contract()
+	if manifestDigest != "" {
+		if len(manifestDigest) != 71 || manifestDigest[:7] != "sha256:" {
+			return softwarework.Contract{}, errors.New("manifest digest must be sha256:<64 hex>")
+		}
+		if _, err := hex.DecodeString(manifestDigest[7:]); err != nil || strings.ToLower(manifestDigest) != manifestDigest {
+			return softwarework.Contract{}, errors.New("manifest digest must be sha256:<64 lowercase hex>")
+		}
+		contract.ManifestDigest, contract.SandboxDigest = manifestDigest, manifestDigest
+	}
+	if outputBytes != 0 {
+		if outputBytes > contract.Limits.OutputBytes {
+			return softwarework.Contract{}, errors.New("output bound may not exceed the frozen bound")
+		}
+		contract.Limits.OutputBytes = outputBytes
+	}
+	return contract, nil
 }
 
 func sha256Digest(value []byte) string {
