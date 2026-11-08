@@ -11,7 +11,7 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-service-protocol v0.0.0-20261108031740-cb4273a60ded
+	github.com/tosnetwork/tos-service-protocol v0.0.0-20261108055745-27233a485afb
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
 	tags.cncf.io/container-device-interface v1.0.0
