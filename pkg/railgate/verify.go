@@ -87,6 +87,9 @@ type VerifierConfig struct {
 	ExecutionBudget time.Duration
 	// RespondBudget is reserved after execution for respond to finalize.
 	RespondBudget time.Duration
+	// Now is the wall clock the deadline slack is measured with; nil means
+	// time.Now.
+	Now func() time.Time
 }
 
 // Verifier checks a claim against finalized state.
@@ -104,6 +107,9 @@ func NewVerifier(config VerifierConfig) (*Verifier, error) {
 	}
 	if config.RespondBudget == 0 {
 		config.RespondBudget = DefaultRespondBudget
+	}
+	if config.Now == nil {
+		config.Now = time.Now
 	}
 	if config.RespondBudget < MinRespondBudget || config.RespondBudget > MaxBudget ||
 		config.ExecutionBudget <= 0 || config.ExecutionBudget > MaxBudget {
@@ -174,6 +180,7 @@ func (v *Verifier) verify(ctx context.Context, claim Claim, budget time.Duration
 	if v == nil || ctx == nil {
 		return nil, errors.New("railgate: invalid verification")
 	}
+	started := v.config.Now()
 	if claim.Package == nil || claim.Package.Proposal == nil || !rawAddressPattern.MatchString(claim.BuyerWallet) ||
 		claim.ExecutionID == ([32]byte{}) || claim.InputDigest == ([32]byte{}) || claim.Call.Hash == "" {
 		return nil, errors.New("railgate: the claim is incomplete")
@@ -257,7 +264,10 @@ func (v *Verifier) verify(ctx context.Context, claim Claim, budget time.Duration
 	if err := crossCheckPending(ctx, session, actor, claim.RequestID, evidence.Actor.Data); err != nil {
 		return nil, err
 	}
-	if err := checkSlack(session.ChainTime(), request.Snapshot.ResponseDeadline, budget); err != nil {
+	// The slack is measured from the checkpoint's chain time advanced by the
+	// time this verification took, or from the wall clock if that is later,
+	// so slow reads cannot leave less than the budget before the deadline.
+	if err := checkSlack(currentTime(session.ChainTime(), started, v.config.Now()), request.Snapshot.ResponseDeadline, budget); err != nil {
 		return nil, err
 	}
 	return &Verified{Checkpoint: session.Checkpoint(), ChainTime: session.ChainTime(), Actor: actor, RequestID: claim.RequestID,
@@ -309,6 +319,24 @@ func crossCheckPending(ctx context.Context, session Session, actor string, id ui
 		return errors.New("railgate: the getters differ from the decoded pending entry")
 	}
 	return nil
+}
+
+// currentTime is a lower bound on the time at which the caller acts: the
+// checkpoint's chain time advanced by the time elapsed since started, or now
+// if that is later. A zero chain time stays zero so checkSlack refuses it.
+func currentTime(chainTime, started, now time.Time) time.Time {
+	if chainTime.IsZero() {
+		return chainTime
+	}
+	elapsed := now.Sub(started)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	current := chainTime.Add(elapsed)
+	if now.After(current) {
+		current = now
+	}
+	return current
 }
 
 // checkSlack requires chain time plus budget to stay strictly before the

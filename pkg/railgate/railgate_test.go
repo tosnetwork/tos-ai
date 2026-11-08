@@ -435,3 +435,65 @@ func TestRecheckRefusesAClaimForAnotherRequestThanTheVerifiedOne(t *testing.T) {
 		t.Fatal("a claim for another request passed the recheck of the first")
 	}
 }
+
+// steppingClock returns start on its first call and start+step on every later
+// call, so the second reading models the time a verification took.
+func steppingClock(start time.Time, step time.Duration) func() time.Time {
+	calls := 0
+	return func() time.Time {
+		calls++
+		if calls == 1 {
+			return start
+		}
+		return start.Add(step)
+	}
+}
+
+func TestVerifyDeductsVerificationTimeFromTheSlack(t *testing.T) {
+	f := newFixture(t)
+	chain := time.Unix(int64(f.snapshot.ResponseDeadline)-301, 0)
+	f.chain.chainTime = chain
+	// The wall clock is behind the chain, so only the elapsed time counts.
+	past := chain.Add(-time.Hour)
+	f.verifier.config.Now = steppingClock(past, 0)
+	if _, err := f.verifier.Verify(context.Background(), f.claim); err != nil {
+		t.Fatalf("an instant verification with one second of slack was refused: %v", err)
+	}
+	f.verifier.config.Now = steppingClock(past, 2*time.Second)
+	if _, err := f.verifier.Verify(context.Background(), f.claim); err == nil {
+		t.Fatal("a verification that took two seconds of one second of slack was admitted")
+	}
+}
+
+func TestVerifyMeasuresFromTheWallClockWhenItIsLater(t *testing.T) {
+	f := newFixture(t)
+	chain := time.Unix(int64(f.snapshot.ResponseDeadline)-301, 0)
+	f.chain.chainTime = chain
+	f.verifier.config.Now = func() time.Time { return chain.Add(5 * time.Second) }
+	if _, err := f.verifier.Verify(context.Background(), f.claim); err == nil {
+		t.Fatal("a checkpoint behind the wall clock was measured from its own chain time")
+	}
+}
+
+func TestGateRunRechecksTheSlackRightBeforeExecution(t *testing.T) {
+	f := newFixture(t)
+	f.chain.chainTime = time.Unix(int64(f.snapshot.ResponseDeadline)-301, 0)
+	past := f.chain.chainTime.Add(-time.Hour)
+	f.verifier.config.Now = func() time.Time { return past }
+	gate, _ := openGate(t, f)
+	ctx := context.Background()
+	slot, _, err := gate.Admit(ctx, f.claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two seconds pass between the start of the run and its execution.
+	gate.now = steppingClock(past, 2*time.Second)
+	ran := false
+	err = gate.Run(ctx, slot, f.claim, func(context.Context, *Verified) error { ran = true; return nil })
+	if ran || !errors.Is(err, ErrNotPendingNow) {
+		t.Fatalf("a run without the budget left before execution: ran=%v err=%v", ran, err)
+	}
+	if current, _, _ := gate.Lookup(slot.Key()); current.State != SlotAbandoned {
+		t.Fatalf("slot is %s", current.State)
+	}
+}

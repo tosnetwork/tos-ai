@@ -205,9 +205,16 @@ func (g *Gate) Run(ctx context.Context, slot Slot, claim Claim, execute func(con
 	if err := g.transition(slot.Key(), SlotAdmitted, SlotAdmitted, ""); err != nil {
 		return err
 	}
+	started := g.now()
 	verified, err := g.verifier.Verify(ctx, claim)
 	if err == nil && (verified.SlotKey() != slot.Key() || hex.EncodeToString(verified.RequestHash[:]) != slot.RequestHash) {
 		err = errors.New("railgate: the claim names another request than the slot")
+	}
+	if err == nil {
+		// Re-measure right before execution: the budget must still fit after
+		// the verification and the slot write that precede it.
+		budget := g.verifier.config.ExecutionBudget + g.verifier.config.RespondBudget
+		err = checkSlack(currentTime(verified.ChainTime, started, g.now()), verified.ResponseDeadline, budget)
 	}
 	if err != nil {
 		if transitionErr := g.transition(slot.Key(), SlotAdmitted, SlotAbandoned, ""); transitionErr != nil {
