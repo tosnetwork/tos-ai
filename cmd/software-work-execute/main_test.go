@@ -102,7 +102,7 @@ func TestPublishedContractBindsTheManifestAndOnlyTightensOutput(t *testing.T) {
 	for _, bad := range []struct {
 		digest string
 		output uint64
-	}{{"sha256:" + strings.Repeat("AB", 32), 0}, {"sha256:abc", 0}, {"tvm-cell-sha256:" + strings.Repeat("ab", 32), 0},
+	}{{"sha256:" + strings.Repeat("AB", 32), 0}, {"sha256:" + strings.Repeat("gg", 32), 0}, {"sha256:abc", 0}, {"tvm-cell-sha256:" + strings.Repeat("ab", 32), 0},
 		{"", softwarework.FrozenV1Limits().OutputBytes + 1}} {
 		if _, err := publishedContract(bad.digest, bad.output); err == nil {
 			t.Errorf("accepted %q %d", bad.digest, bad.output)
