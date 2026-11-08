@@ -82,6 +82,7 @@ pkg/executor/containerdbackend/ containerd implementation
 pkg/executor/backendtest/       reusable lifecycle conformance suite
 executor/gpuisolation/          exclusive operator-named GPU leases
 pkg/softwarework/               bound jobs and at-most-once outcome journal
+pkg/railgate/                   finalized pending-request admission for paid Service Actor work
 pkg/artifactstore/              immutable content-addressed output storage
 pkg/commercegate/               Action Authority gated local execution admission
 pkg/privateingress/             Action Authority gated private content ingress

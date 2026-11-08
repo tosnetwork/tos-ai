@@ -1,8 +1,10 @@
 package main
 
 import (
+	"github.com/tosnetwork/tos-ai/pkg/softwarework"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,4 +87,25 @@ func resolvedTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return directory
+}
+
+func TestPublishedContractBindsTheManifestAndOnlyTightensOutput(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	contract, err := publishedContract(digest, 1<<20)
+	if err != nil || contract.ManifestDigest != digest || contract.SandboxDigest != digest || contract.Limits.OutputBytes != 1<<20 {
+		t.Fatalf("contract = %+v %v", contract, err)
+	}
+	frozen, err := publishedContract("", 0)
+	if err != nil || frozen.ManifestDigest != softwarework.FrozenV1ManifestDigest {
+		t.Fatalf("default contract = %+v %v", frozen, err)
+	}
+	for _, bad := range []struct {
+		digest string
+		output uint64
+	}{{"sha256:" + strings.Repeat("AB", 32), 0}, {"sha256:" + strings.Repeat("gg", 32), 0}, {"sha256:abc", 0}, {"tvm-cell-sha256:" + strings.Repeat("ab", 32), 0},
+		{"", softwarework.FrozenV1Limits().OutputBytes + 1}} {
+		if _, err := publishedContract(bad.digest, bad.output); err == nil {
+			t.Errorf("accepted %q %d", bad.digest, bad.output)
+		}
+	}
 }
