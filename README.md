@@ -28,27 +28,12 @@ worker protocol. The retained code provides:
   source read-only, and runs the manifest's exact working directory;
 - an at-most-once software-work runner with a crash-safe execution journal;
 - bounded, tamper-detecting content-addressed report and artifact storage;
-- a shared durable execution Gate that verifies finalized escrow, Agent, and
-  Capability state and atomically prevents cross-transport purchase replay;
-- an official A2A 1.0 Task/result mapper and synchronous JSON-RPC handler that
-  use that Gate and never treat A2A metadata as payment authority;
-- an official MCP 2026-07-28 typed tool mapper with the same finalized,
-  atomic single-execution claim boundary and stateless streamable-HTTP handler;
-- a private Messenger Event-v2 consumer that independently verifies canonical
-  Event ID, network, sender and conversation policy before strict A2A/MCP
-  mapping, with separate mode-`0600` Unix sockets and a source-Event-ID-keyed,
-  crash-safe result outbox before 202;
-- a production `tos-messenger-event-worker` composition that connects those
-  consumers to the quorum finalized-state Gate, fixed containerd runner,
-  persistent artifact locator, durable result publisher and daemon local API;
-- a shared public-adapter boundary that requires TLS 1.3 and a strong bearer
-  credential, rejects browser origins, and bounds request bodies, headers,
-  concurrent calls, read time, and idle connections;
-- cross-transport TLS acceptance coverage proving an A2A-claimed purchase
-  cannot execute again when submitted through MCP;
+- a local commerce Gate and private ingress store that admit an execution or
+  upload only under an ML-DSA-44 Action Authority Writer Fence and
+  AuthorizedActionV1 resolved by key ID;
 - privacy-minimized host/GPU probes and a resource-liveness guard;
-- private Unix listener, metrics export, signed update/rollback, and bounded
-  systemd helper libraries used by operator-composed worker processes;
+- metrics export, signed update/rollback, and bounded systemd helper libraries
+  used by operator-composed worker processes;
 - a dedicated private-containerd provider deployment template with explicit
   root-runtime and separate-signing-custody boundaries.
 
@@ -56,6 +41,10 @@ The previous text-generation Worker RPC, model adapters, old Edge gateway,
 Managed payment path, legacy discovery integration and generalized third-party
 execution adapters were removed. They encoded the retired protocol and must not
 be treated as compatibility requirements for the new software-work schema.
+The escrow-gated A2A, MCP and Agent Packet adapters, their public HTTP
+boundary and the Messenger event worker were removed with stablecoin escrow:
+software work settles on the Service Actor rail, and an execution gate keyed
+by a pending Service Actor request is not provided here.
 
 ## Build and test
 
@@ -66,18 +55,14 @@ go test ./...
 ```
 
 The provider-local `software-work-execute` command composes the frozen V1 job
-with the bounded executor. Reusable official-SDK A2A and MCP handlers expose
-`NewPublicServer`, which composes them with the mandatory `pkg/adapterhttp`
-TLS and authentication boundary. Operators provide protected absolute
-certificate/key paths and start the returned server with
-`adapterhttp.ListenAndServe`; bypassing this boundary is not a supported public
-deployment. The execution contract and adapter mappings are frozen in
-`tos-service-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md` and
-`tos-service-spec/docs/A2A_ADAPTER_V1.md`, `tos-service-spec/docs/MCP_ADAPTER_V1.md`, and
-`tos-service-spec/docs/NATIVE_EXECUTION_GATE_V1.md`. The production
-`tos-messenger-event-worker` configures the finalized-chain resolvers and
-retains private listener boundaries for Messenger and the artifact reverse
-proxy. It does not resurrect the deleted inference RPC.
+with the bounded executor. The execution contract is frozen in
+`tos-service-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md`; settlement follows
+`tos-service-spec/docs/SERVICE_ACTOR_TVM_V1.md`. It does not resurrect the
+deleted inference RPC.
+
+Tests that check real ML-DSA-44 bytes run the pinned `tosctl` helper named by
+`TOS_SERVICE_TOSCTL` and `TOS_SERVICE_TOSCTL_SHA256`; they fail, rather than
+skip, without it.
 
 The provider-local command is a privileged runtime boundary when it connects
 to root-owned containerd. Do not grant a gateway user, buyer, or remote client
@@ -98,15 +83,10 @@ pkg/executor/backendtest/       reusable lifecycle conformance suite
 executor/gpuisolation/          exclusive operator-named GPU leases
 pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/artifactstore/              immutable content-addressed output storage
-pkg/a2aadapter/                 gated A2A mapping and hardened JSON-RPC server
-pkg/mcpadapter/                 gated MCP tool and hardened streamable-HTTP server
-pkg/messengereventbridge/       canonical private Event-v2 A2A/MCP consumer
-cmd/tos-messenger-event-worker  production private consumer/result composition
-pkg/adapterhttp/                shared TLS/auth/resource public boundary
-pkg/adapterinterop/             cross-transport TLS single-execution acceptance
+pkg/commercegate/               Action Authority gated local execution admission
+pkg/privateingress/             Action Authority gated private content ingress
 pkg/probe/                      privacy-minimized local resource probes
 internal/resourceguard/         continuous fail-closed resource gating
-internal/unixserver/            bounded private Unix listeners
 pkg/metricsexport/              bounded metrics delivery
 pkg/update/                     signed artifact manifests
 pkg/softwareupdate/             crash-safe two-slot update state machine

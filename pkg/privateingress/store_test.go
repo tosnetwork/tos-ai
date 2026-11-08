@@ -14,24 +14,50 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/actionauthoritytest"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
 
+// ownerKey names the owner's Action Authority controller in custody and the
+// verifier that checks its signatures.
+type ownerKey struct {
+	signer     mldsa44.Signer
+	verifier   mldsa44.Verifier
+	controller string
+	keyID      string
+	publicKey  []byte
+}
+
+// fakeOwner is the deterministic in-process stand-in used by pure-logic tests.
+func fakeOwner() ownerKey {
+	fake := &mldsa44test.Fake{}
+	return ownerKey{signer: fake, verifier: fake, controller: actionauthoritytest.Controller,
+		keyID: fake.KeyID(actionauthoritytest.Controller), publicKey: fake.PublicKey(actionauthoritytest.Controller)}
+}
+
+// testAuthority holds the current writer fence by pointer so a test can make
+// a different fence current.
 type testAuthority struct {
-	authorityID string
-	public      ed25519.PublicKey
-	fence       commerce.WriterFence
+	actionauthoritytest.Resolver
+	current *commerce.WriterFence
+}
+
+func newTestAuthority(owner ownerKey, fence commerce.WriterFence) testAuthority {
+	return testAuthority{Resolver: actionauthoritytest.Resolver{Verifier: owner.verifier,
+		Keys: map[string][][]byte{"authority:test": {owner.publicKey}}}, current: &fence}
 }
 
 func TestConcurrentChallengeConflictHasOneDurableWinner(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	ownerPublic, ownerPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	owner := fakeOwner()
 	receiverPublic, receiverPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	senderPublic, _, _ := ed25519.GenerateKey(rand.Reader)
-	fence, err := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test", AgentID: "agent:receiver",
+	fence, err := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test", AgentID: "agent:receiver",
 		InstanceID: "instance:test", LeaseID: "lease:test", WriterGeneration: 1, IssuedAtUnix: uint64(now.Unix()),
-		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), AuthorityID: "authority:test", Scope: []string{"content.upload"}}, ownerPrivate)
+		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), AuthorityID: "authority:test", Scope: []string{"content.upload"}}, owner.signer, owner.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +67,7 @@ func TestConcurrentChallengeConflictHasOneDurableWinner(t *testing.T) {
 	}
 	store, err := Open(directory, "agent:receiver", receiverPrivate,
 		testHandoffResolver{"agent:receiver": receiverPublic, "agent:sender": senderPublic},
-		testAuthority{authorityID: "authority:test", public: ownerPublic, fence: fence})
+		newTestAuthority(owner, fence))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,15 +105,8 @@ func TestConcurrentChallengeConflictHasOneDurableWinner(t *testing.T) {
 	}
 }
 
-func (authority testAuthority) AuthorizeFenceKey(authorityID string, key ed25519.PublicKey, _ time.Time) error {
-	if authorityID != authority.authorityID || !authority.public.Equal(key) {
-		return errors.New("unknown")
-	}
-	return nil
-}
-
 func (authority testAuthority) ConfirmCurrentWriterFence(fence commerce.WriterFence, _ time.Time) error {
-	if fence.Proof != authority.fence.Proof {
+	if authority.current == nil || fence.Proof != authority.current.Proof {
 		return errors.New("stale")
 	}
 	return nil
@@ -104,20 +123,20 @@ func (resolver testHandoffResolver) AuthorizeHandoffKey(agentID string, key ed25
 
 func TestIngressAcceptsOneExactWriterFencedUpload(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	ownerPublic, ownerPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	owner := fakeOwner()
 	receiverPublic, receiverPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	senderPublic, senderPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	digest := func(value string) string {
 		hash := sha256.Sum256([]byte(value))
 		return "sha256:" + hex.EncodeToString(hash[:])
 	}
-	fence, err := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test", AgentID: "agent:receiver",
+	fence, err := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test", AgentID: "agent:receiver",
 		InstanceID: "instance:test", LeaseID: "lease:test", WriterGeneration: 1, IssuedAtUnix: uint64(now.Unix()),
-		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), AuthorityID: "authority:test", Scope: []string{"content.delete", "content.upload"}}, ownerPrivate)
+		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), AuthorityID: "authority:test", Scope: []string{"content.delete", "content.upload"}}, owner.signer, owner.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority := testAuthority{authorityID: "authority:test", public: ownerPublic, fence: fence}
+	authority := newTestAuthority(owner, fence)
 	directory := filepath.Join(t.TempDir(), "ingress")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -174,7 +193,7 @@ func TestIngressAcceptsOneExactWriterFencedUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = commerce.SignAuthorizedAction(action, ownerPrivate)
+	action, err = commerce.SignAuthorizedAction(context.Background(), action, owner.keyID, owner.signer, owner.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +230,7 @@ func TestIngressAcceptsOneExactWriterFencedUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deleteAction, err = commerce.SignAuthorizedAction(deleteAction, ownerPrivate)
+	deleteAction, err = commerce.SignAuthorizedAction(context.Background(), deleteAction, owner.keyID, owner.signer, owner.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
