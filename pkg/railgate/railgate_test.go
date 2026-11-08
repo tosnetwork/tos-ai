@@ -135,6 +135,20 @@ func TestVerifyIgnoresReplaysOfTheRequestHashThatCreateNoBuyerRequest(t *testing
 	}
 }
 
+func TestVerifyIgnoresAnotherSendersPaidCallCarryingTheRequestHash(t *testing.T) {
+	f := newFixture(t)
+	other := fxCall(t, fxOwner, 1, f.snapshot.RequestHash, uint32(fxNow.Unix())-50, 11, f.terms)
+	snapshot, err := other.Snapshot.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.chain.history = append([]toschain.ActorTransaction{other}, f.chain.history...)
+	f.chain.data = fxData(t, f.policy, 2, map[uint64]nativecore.ServiceActorRequestSnapshotV1{0: f.snapshot, 1: snapshot}, nil)
+	if _, err := f.verifier.Verify(context.Background(), f.claim); err != nil {
+		t.Fatalf("another sender's call with the same request hash blocked the buyer: %v", err)
+	}
+}
+
 func TestVerifyRefusesTwoSuccessfulBuyerCallsCarryingOneRequestHash(t *testing.T) {
 	f := newFixture(t)
 	second := fxCall(t, fxBuyer, 1, f.snapshot.RequestHash, uint32(fxNow.Unix())-50, 11, f.terms)
