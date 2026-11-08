@@ -159,8 +159,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 h1:kdXcSzyDtseVEc4yCz2qF8ZrQvIDBJLl4S1c3GCXmoI=
 github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635/go.mod h1:hkRG7XYTFWNJGYcbNJQlaLq0fg1yr4J4t/NcTQtrfww=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20261108055745-27233a485afb h1:qwguOYiwQf4sC46uY4v72aQqE8mDTlkGt5qt1zXt0To=
-github.com/tosnetwork/tos-service-protocol v0.0.0-20261108055745-27233a485afb/go.mod h1:LHTXahrT3G7Kee+8cvIY/HOSz3tO6B4hHozE/sBzzrE=
+github.com/tosnetwork/tos-service-protocol v0.0.0-20261108061139-3fd3114dcf60 h1:xQZ0LSI+xEl/R5gkWQ/XJ1EuC/4cphS8bsXiS4fe3cY=
+github.com/tosnetwork/tos-service-protocol v0.0.0-20261108061139-3fd3114dcf60/go.mod h1:LHTXahrT3G7Kee+8cvIY/HOSz3tO6B4hHozE/sBzzrE=
 github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef h1:P+zHw4vfeKoRdLgjEmLFnkZOu4MleU9X22hHEX6l/F8=
 github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef/go.mod h1:HtytU2Ya/EII8lswkqK30qgQePIHS1k7XDMxll3d9CQ=
 github.com/urfave/cli v1.19.1/go.mod h1:70zkFmudgCuE/ngEzBv17Jvp/497gISqfk5gWijbERA=

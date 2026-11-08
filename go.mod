@@ -11,7 +11,8 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/opencontainers/runtime-spec v1.2.0
-	github.com/tosnetwork/tos-service-protocol v0.0.0-20261108055745-27233a485afb
+	github.com/tosnetwork/tos-service-protocol v0.0.0-20261108061139-3fd3114dcf60
+	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
 	tags.cncf.io/container-device-interface v1.0.0
@@ -54,7 +55,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
-	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
