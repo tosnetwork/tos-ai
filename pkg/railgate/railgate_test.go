@@ -123,13 +123,41 @@ func TestVerifyRefusesAClaimTheChainDoesNotProve(t *testing.T) {
 	}
 }
 
-func TestVerifyRefusesTwoCallsCarryingOneRequestHash(t *testing.T) {
+func TestVerifyIgnoresReplaysOfTheRequestHashThatCreateNoBuyerRequest(t *testing.T) {
 	f := newFixture(t)
-	second := f.call
-	second.LT, second.Hash, second.Kind, second.Snapshot, second.ExitCode = 11, txHash(11), toschain.ActorTxFailed, nil, 1926
+	failed := f.call
+	failed.LT, failed.Hash, failed.Kind, failed.Snapshot, failed.ExitCode = 11, txHash(11), toschain.ActorTxFailed, nil, 1926
+	failedOther := failed
+	failedOther.LT, failedOther.Hash, failedOther.Sender = 12, txHash(12), fxOwner
+	f.chain.history = append([]toschain.ActorTransaction{failedOther, failed}, f.chain.history...)
+	if _, err := f.verifier.Verify(context.Background(), f.claim); err != nil {
+		t.Fatalf("failed replays of the request hash blocked the buyer's request: %v", err)
+	}
+}
+
+func TestVerifyRefusesTwoSuccessfulBuyerCallsCarryingOneRequestHash(t *testing.T) {
+	f := newFixture(t)
+	second := fxCall(t, fxBuyer, 1, f.snapshot.RequestHash, uint32(fxNow.Unix())-50, 11, f.terms)
+	snapshot, err := second.Snapshot.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.chain.history = append([]toschain.ActorTransaction{second}, f.chain.history...)
+	f.chain.data = fxData(t, f.policy, 2, map[uint64]nativecore.ServiceActorRequestSnapshotV1{0: f.snapshot, 1: snapshot}, nil)
 	if _, err := f.verifier.Verify(context.Background(), f.claim); err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("two calls with one request hash: %v", err)
+		t.Fatalf("two buyer calls with one request hash: %v", err)
+	}
+}
+
+func TestRecheckRefusesAnIncompleteVerifiedRequest(t *testing.T) {
+	f := newFixture(t)
+	verified, err := f.verifier.Verify(context.Background(), f.claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified.Price = nil
+	if err := f.verifier.Recheck(context.Background(), f.claim, verified); err == nil {
+		t.Fatal("a verified request without a price was rechecked")
 	}
 }
 

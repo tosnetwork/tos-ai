@@ -268,24 +268,27 @@ func (v *Verifier) verify(ctx context.Context, claim Claim, budget time.Duration
 		ResponseDeadline: request.Snapshot.ResponseDeadline, Call: claim.Call}, nil
 }
 
-// findCall returns the one finalized call transaction the claim names. The
-// call must come from the claimed buyer with the request hash the claim
-// reproduces and the quoted terms hash; no other call may carry that hash.
+// findCall returns the claimed finalized call. It must be a successful call
+// from the claimed buyer carrying the request hash the claim reproduces and
+// the quoted terms hash, and no other successful call from that buyer may
+// carry the same hash. Failed calls and calls from other senders create no
+// request for this buyer, so a replay of the public request hash by anyone
+// else cannot block the buyer's request.
 func findCall(transactions []toschain.ActorTransaction, claim Claim, requestHash, termsHash [32]byte) (toschain.ActorTransaction, error) {
 	requestText, termsText := hex.EncodeToString(requestHash[:]), hex.EncodeToString(termsHash[:])
 	var found []toschain.ActorTransaction
 	for _, transaction := range transactions {
-		if transaction.Call != nil && transaction.Call.RequestHash == requestText {
+		if transaction.Kind == toschain.ActorTxCall && transaction.Call != nil && transaction.Sender == claim.BuyerWallet &&
+			transaction.Call.RequestHash == requestText {
 			found = append(found, transaction)
 		}
 	}
 	if len(found) != 1 {
-		return toschain.ActorTransaction{}, fmt.Errorf("railgate: %d finalized calls carry this request hash, need exactly one", len(found))
+		return toschain.ActorTransaction{}, fmt.Errorf("railgate: %d successful calls from the buyer carry this request hash, need exactly one", len(found))
 	}
 	call := found[0]
-	if call.Kind != toschain.ActorTxCall || call.LT != claim.Call.LT || call.Hash != claim.Call.Hash ||
-		call.Sender != claim.BuyerWallet || call.Call.ExpectedTermsHash != termsText {
-		return toschain.ActorTransaction{}, errors.New("railgate: the finalized call is not the claimed successful call from the buyer under the quoted terms")
+	if call.LT != claim.Call.LT || call.Hash != claim.Call.Hash || call.Call.ExpectedTermsHash != termsText {
+		return toschain.ActorTransaction{}, errors.New("railgate: the finalized call is not the claimed call under the quoted terms")
 	}
 	return call, nil
 }
@@ -326,7 +329,7 @@ func checkSlack(chainTime time.Time, responseDeadline uint64, budget time.Durati
 // pending with the respond budget ahead of its deadline and unchanged since
 // it was verified. The attestor policy runs it right before respond.
 func (v *Verifier) Recheck(ctx context.Context, claim Claim, expected *Verified) error {
-	if v == nil || expected == nil {
+	if v == nil || expected == nil || expected.Price == nil {
 		return errors.New("railgate: missing verified request")
 	}
 	verified, err := v.verify(ctx, claim, v.config.RespondBudget)
