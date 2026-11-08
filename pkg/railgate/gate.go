@@ -42,10 +42,6 @@ const (
 	SlotAmbiguous SlotState = "ambiguous"
 )
 
-func (s SlotState) terminal() bool {
-	return s == SlotCompleted || s == SlotFailed || s == SlotAbandoned || s == SlotAmbiguous
-}
-
 var (
 	// ErrSlotTaken reports a claim whose slot already exists: it is never
 	// admitted for a second execution.
@@ -302,9 +298,6 @@ func (g *Gate) transition(key SlotKey, from, to SlotState, responseHash string) 
 	}
 	if from == to {
 		return nil
-	}
-	if slot.State.terminal() {
-		return fmt.Errorf("railgate: slot is already %s", slot.State)
 	}
 	slot.State, slot.ResponseHash, slot.UpdatedUnix = to, responseHash, g.now().Unix()
 	return g.write(slot, false)

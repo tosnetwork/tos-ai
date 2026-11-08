@@ -399,3 +399,39 @@ func TestGateFailRecordsAnExecutionThatDidNotSucceed(t *testing.T) {
 		t.Fatal("a failed execution was completed")
 	}
 }
+
+func TestRecheckRefusesAClaimForAnotherRequestThanTheVerifiedOne(t *testing.T) {
+	f := newFixture(t)
+	first, err := f.verifier.Verify(context.Background(), f.claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, _, err := nativecore.BuildAcceptedQuoteCommitment(fxNetwork, f.pkg.Proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quoteHash, requestHash [32]byte
+	copy(quoteHash[:], quote.Hash())
+	requestCell, err := nativecore.BuildServiceRequestCellV1(nativecore.ServiceRequestV1{QuoteCommitment: quoteHash,
+		ExecutionID: digest32(3), InputDigest: digest32(4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(requestHash[:], requestCell.Hash())
+	second := fxCall(t, fxBuyer, 1, requestHash, uint32(fxNow.Unix())-50, 11, f.terms)
+	snapshot, err := second.Snapshot.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.chain.history = append([]toschain.ActorTransaction{second}, f.chain.history...)
+	f.chain.data = fxData(t, f.policy, 2, map[uint64]nativecore.ServiceActorRequestSnapshotV1{0: f.snapshot, 1: snapshot}, nil)
+	claim := f.claim
+	claim.ExecutionID, claim.InputDigest, claim.RequestID = digest32(3), digest32(4), 1
+	claim.Call = toschain.ActorTxID{LT: second.LT, Hash: second.Hash}
+	if _, err := f.verifier.Verify(context.Background(), claim); err != nil {
+		t.Fatalf("the second request does not verify: %v", err)
+	}
+	if err := f.verifier.Recheck(context.Background(), claim, first); err == nil {
+		t.Fatal("a claim for another request passed the recheck of the first")
+	}
+}
