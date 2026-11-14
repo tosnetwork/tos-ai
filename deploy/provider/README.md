@@ -48,8 +48,9 @@ test "$(stat -c '%U:%G:%a' /run/tos-service-containerd/containerd.sock)" = root:
 ctr --address /run/tos-service-containerd/containerd.sock plugins ls
 ```
 
-The unit tightens the socket to `0600` after the daemon reports readiness;
-containerd itself creates it `0660`, which the executor refuses. It runs with
+The unit tightens the socket (and the ttrpc socket beside it) to `0600` after
+the daemon reports readiness; containerd itself creates them `0660`, which the
+executor refuses. It runs with
 `UMask=0022` because the overlayfs snapshotter creates each layer's root
 directory itself: under a stricter umask those become `0700` and the
 unprivileged sandbox user cannot traverse `/`. The daemon's root and state
@@ -60,7 +61,9 @@ Build the reproducible OCI archive with
 resulting index digest). Import it into namespace `tos-service-paid-work`,
 unpacked for `overlayfs`. The executor looks the image up by its exact
 digest-qualified reference, so that reference must exist as an image name.
-Never use a mutable tag without the manifest's exact `sha256:` digest.
+The pinned value is the OCI image *index* digest (the SHA-256 of the archive's
+`index.json`). Never use a mutable tag without it: the plain `$name` tag that the
+import creates is not used by the executor and may be removed after tagging.
 
 ```bash
 socket=/run/tos-service-containerd/containerd.sock
@@ -70,6 +73,7 @@ test "sha256:$(tar -xOf software-work-go-1.26.5.oci.tar index.json | sha256sum |
 ctr --address "$socket" -n tos-service-paid-work images import \
   --index-name "$name" --snapshotter overlayfs software-work-go-1.26.5.oci.tar
 ctr --address "$socket" -n tos-service-paid-work images tag "$name" "$name@$digest"
+ctr --address "$socket" -n tos-service-paid-work images ls "name==$name@$digest" | grep -qF "$digest"
 ctr --address "$socket" -n tos-service-paid-work images check
 ```
 
@@ -88,6 +92,12 @@ env TOS_AI_CONTAINERD_TEST_SOCKET="$socket" \
 ```
 
 Both tests must pass before the host serves paid work.
+
+Known limitation: the runc v2 shim of this daemon still keeps its runc state
+under the host-wide `/run/containerd/runc/<namespace>` and its shim sockets
+under `/run/containerd/s`, beside any distribution containerd. Their modes are
+set explicitly (not by the umask), but the private daemon does not yet have its
+own runc root.
 
 ## Paid path: admit, then execute
 

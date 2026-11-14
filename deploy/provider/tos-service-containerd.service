@@ -8,9 +8,10 @@ Wants=local-fs.target
 Type=notify
 ExecStart=/usr/bin/containerd --config /etc/tos-service/containerd.toml
 # containerd creates its socket mode 0660 for the configured group; the
-# executor accepts only an owner-only 0600 socket, so tighten it once the
-# daemon reports readiness (Type=notify), on every start.
-ExecStartPost=/usr/bin/chmod 0600 /run/tos-service-containerd/containerd.sock
+# executor accepts only an owner-only 0600 socket, so tighten it (and the
+# ttrpc socket beside it) once the daemon reports readiness (Type=notify), on
+# every start.
+ExecStartPost=/usr/bin/chmod 0600 /run/tos-service-containerd/containerd.sock /run/tos-service-containerd/containerd.sock.ttrpc
 Restart=on-failure
 RestartSec=5s
 Delegate=yes
