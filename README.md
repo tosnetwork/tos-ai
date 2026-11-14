@@ -43,8 +43,10 @@ execution adapters were removed. They encoded the retired protocol and must not
 be treated as compatibility requirements for the new software-work schema.
 The escrow-gated A2A, MCP and Agent Packet adapters, their public HTTP
 boundary and the Messenger event worker were removed with stablecoin escrow:
-software work settles on the Service Actor rail, and an execution gate keyed
-by a pending Service Actor request is not provided here.
+software work settles on the Service Actor rail. Its replacement execution
+gate, keyed by a finalized pending Service Actor request, is the `pkg/railgate`
+library, which operator-composed provider processes call before execution;
+the provider-local `software-work-execute` command does not invoke it.
 
 ## Build and test
 
