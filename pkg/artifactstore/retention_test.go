@@ -121,7 +121,8 @@ func TestSweepKeepsAnObjectAPendingJobShares(t *testing.T) {
 		t.Fatalf("pending record = %+v %v", record, err)
 	}
 	report := sweep(t, store, 10)
-	if report.DeletedJobs != 1 || report.DeletedObjects != 0 || report.KeptShared != 1 || report.Live != 1 || !present(t, store, shared) {
+	if report.DeletedJobs != 1 || report.DeletedObjects != 0 || report.KeptShared != 1 || report.Live != 0 || report.Pending != 1 ||
+		!present(t, store, shared) {
 		t.Fatalf("an object a pending job committed was deleted: %+v", report)
 	}
 	// Once the pending job is retained and expires, the object goes.

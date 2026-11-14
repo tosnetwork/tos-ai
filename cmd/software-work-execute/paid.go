@@ -379,6 +379,46 @@ func retentionDeadline(responseDeadline, retentionSeconds uint64) (int64, error)
 	return int64(responseDeadline + retentionSeconds), nil
 }
 
+// manifestContract is the execution contract a paid run must honor: the
+// frozen preset bound to the published manifest, with every limit set to
+// exactly what the manifest commits to. A limit the manifest leaves at zero,
+// or sets above what the preset can enforce, refuses the manifest instead of
+// silently running under another bound.
+func manifestContract(manifestDigest string, limits nativecore.SoftwareWorkLimitsV1) (softwarework.Contract, error) {
+	contract, err := publishedContract(manifestDigest, 0)
+	if err != nil {
+		return softwarework.Contract{}, err
+	}
+	if manifestDigest == "" {
+		return softwarework.Contract{}, errors.New("a paid contract needs the published manifest digest")
+	}
+	frozen := contract.Limits
+	frozenWallClockMillis := uint64(frozen.ExecutionTime / time.Millisecond)
+	for _, limit := range []struct {
+		name            string
+		manifest, upper uint64
+	}{
+		{"cpu_millis", limits.CPUMillis, frozen.CPUMillis},
+		{"memory_bytes", limits.MemoryBytes, frozen.MemoryBytes},
+		{"scratch_bytes", limits.ScratchBytes, frozen.DiskBytes},
+		{"output_bytes", limits.OutputBytes, frozen.OutputBytes},
+		{"wall_clock_millis", limits.WallClockMillis, frozenWallClockMillis},
+	} {
+		if limit.manifest == 0 || limit.manifest > limit.upper {
+			return softwarework.Contract{}, fmt.Errorf("the manifest's %s (%d) is outside what the executor enforces (1-%d)",
+				limit.name, limit.manifest, limit.upper)
+		}
+	}
+	contract.Limits.CPUMillis = limits.CPUMillis
+	contract.Limits.MemoryBytes = limits.MemoryBytes
+	contract.Limits.DiskBytes = limits.ScratchBytes
+	contract.Limits.OutputBytes = limits.OutputBytes
+	// Bounded by the frozen wall clock above, so the conversion cannot
+	// overflow.
+	contract.Limits.ExecutionTime = time.Duration(limits.WallClockMillis) * time.Millisecond
+	return contract, nil
+}
+
 func sha256Text(value [32]byte) string { return "sha256:" + hex.EncodeToString(value[:]) }
 
 // executeOnce runs the job through the gate and reports the outcome.
@@ -474,7 +514,7 @@ func openPaid(in paidInputs) (*paidJob, func() error, error) {
 	if err != nil || !bytes.Equal(canonical, manifestCBOR) {
 		return nil, nil, errors.New("the provider manifest is not canonical")
 	}
-	contract, err := publishedContract(manifestDigest, manifest.Limits.OutputBytes)
+	contract, err := manifestContract(manifestDigest, manifest.Limits)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -516,9 +556,9 @@ func openPaid(in paidInputs) (*paidJob, func() error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// The budget covers the longer of the quoted wall clock and the
-	// executor's own limit, so a run can never outlast what was checked.
-	budget := max(time.Duration(manifest.Limits.WallClockMillis)*time.Millisecond, contract.Limits.ExecutionTime)
+	// The sandbox runs under exactly the manifest's wall clock, so the
+	// execution budget the deadline slack reserves is that same bound.
+	budget := contract.Limits.ExecutionTime
 	manifests := staticManifest{digest: manifestDigest, value: manifestCBOR}
 	verifier, err := railgate.NewVerifier(railgate.VerifierConfig{Reader: reader, Manifests: manifests, Network: network,
 		ActorCodeHash: config.ActorCodeHash, ProviderAgentID: config.ProviderAgentID, CapabilityID: config.CapabilityID,
@@ -529,6 +569,11 @@ func openPaid(in paidInputs) (*paidJob, func() error, error) {
 	environment, err := openExecution(in.socket, in.fifo, in.stateDir, contract)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A full artifact store could not keep this run's results; refuse
+	// before admission rather than fail the slot after running.
+	if err := environment.store.CheckCapacity(context.Background(), 1); err != nil {
+		return nil, nil, errors.Join(err, environment.Close())
 	}
 	gate, err := railgate.OpenGate(verifier, filepath.Join(in.stateDir, "slots"))
 	if err != nil {

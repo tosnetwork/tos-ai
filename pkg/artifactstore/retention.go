@@ -32,8 +32,11 @@ import (
 // an object a job that is still running or retained depends on.
 const (
 	retentionSchema = "tos.ai.artifact-retention.v1"
-	// MaxRetentionRecords bounds the records a sweep reads, so one call has
-	// bounded work and memory whatever the directory holds.
+	// MaxRetentionRecords bounds the records, tombstones and holds a store
+	// keeps. A new job record or hold is refused at the bound (existing jobs
+	// may still add objects and be retained), so a sweep, which reads every
+	// entry, has bounded work and never faces a store it cannot read; once
+	// expired jobs are swept, new ones are admitted again.
 	MaxRetentionRecords = 65536
 	// MaxSweepJobs bounds the expired jobs one sweep deletes.
 	MaxSweepJobs = 1024
@@ -57,6 +60,10 @@ const (
 // ErrRetentionBusy reports that another process held the retention lock for
 // longer than the bounded wait; the caller retries later.
 var ErrRetentionBusy = errors.New("artifact retention is held by another process")
+
+// ErrRetentionFull reports that the store holds MaxRetentionRecords entries;
+// a sweep of expired jobs makes room.
+var ErrRetentionFull = errors.New("artifact retention is at its record bound; sweep expired jobs")
 
 // retentionRecord binds objects to a job. A pending record has no deadline
 // yet and keeps its objects until Retain sets one.
@@ -90,8 +97,10 @@ type SweepReport struct {
 	KeptShared int `json:"kept_shared"`
 	// Deferred counts expired jobs left for a later sweep by the limit.
 	Deferred int `json:"deferred"`
-	// Live counts unexpired jobs, pending ones included.
+	// Live counts retained jobs whose deadline has not passed.
 	Live int `json:"live"`
+	// Pending counts jobs without a deadline yet; they keep their objects.
+	Pending int `json:"pending"`
 	// Held counts objects kept by a permanent hold.
 	Held int `json:"held"`
 }
@@ -146,6 +155,9 @@ func (s *Store) bindLocked(retention, job string, retainUntil int64, objects []s
 		}
 		record.Objects = append(record.Objects, existing.Objects...)
 	case errors.Is(err, os.ErrNotExist):
+		if err := s.requireRoomLocked(retention, 1); err != nil {
+			return err
+		}
 	default:
 		return err
 	}
@@ -187,19 +199,15 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 		return SweepReport{}, err
 	}
 	defer lock.Close()
-	directory, err := os.Open(retention)
+	// Every entry is read whatever the directory holds: refusing a large
+	// store would leave it unsweepable. Creation is capped at the record
+	// bound, so this work stays bounded in normal operation.
+	entries, err := readRetentionEntries(retention)
 	if err != nil {
-		return SweepReport{}, errors.New("open artifact retention directory")
-	}
-	entries, err := directory.ReadDir(MaxRetentionRecords + 1)
-	_ = directory.Close()
-	if err != nil && !errors.Is(err, io.EOF) {
-		return SweepReport{}, errors.New("read artifact retention directory")
-	}
-	if len(entries) > MaxRetentionRecords {
-		return SweepReport{}, errors.New("artifact retention directory exceeds its record bound")
+		return SweepReport{}, err
 	}
 	var tombstones, expired, surviving []retentionRecord
+	pending := 0
 	held := map[string]struct{}{}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -230,9 +238,13 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 			if err != nil {
 				return SweepReport{}, err
 			}
-			if !record.Pending && record.RetainUntilUnix < now.Unix() {
+			switch {
+			case record.Pending:
+				pending++
+				surviving = append(surviving, record)
+			case record.RetainUntilUnix < now.Unix():
 				expired = append(expired, record)
-			} else {
+			default:
 				surviving = append(surviving, record)
 			}
 		default:
@@ -249,7 +261,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 	}
 	slices.SortFunc(expired, byDeadline)
 	slices.SortFunc(tombstones, byDeadline)
-	report := SweepReport{Live: len(surviving), Held: len(held)}
+	report := SweepReport{Live: len(surviving) - pending, Pending: pending, Held: len(held)}
 	// Interrupted deletions finish first; they count against the limit.
 	if len(tombstones) > limit {
 		report.Deferred = len(tombstones) - limit + len(expired)
@@ -370,15 +382,84 @@ func (s *Store) acquireRetention(ctx context.Context) (*dirlock.Lock, string, er
 	}
 }
 
-// writeHold durably records that an object committed without a job is kept
-// permanently.
-func writeHold(retention, digest string) error {
-	path := filepath.Join(retention, strings.TrimPrefix(digest, "sha256:")+holdSuffix)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		_, err := readHold(retention, filepath.Base(path))
+// CheckCapacity reports ErrRetentionFull unless jobs more job records fit
+// under the record bound. A caller runs it before accepting work whose
+// results it must store, so a full store refuses the work up front.
+func (s *Store) CheckCapacity(ctx context.Context, jobs int) error {
+	if s == nil || s.root == "" || ctx == nil || jobs <= 0 || jobs > MaxRetentionRecords {
+		return errors.New("invalid artifact capacity request")
+	}
+	lock, retention, err := s.acquireRetention(ctx)
+	if err != nil {
 		return err
 	}
+	defer lock.Close()
+	return s.requireRoomLocked(retention, jobs)
+}
+
+// requireRoomLocked refuses unless entries more records or holds fit under
+// the store's record bound. Interrupted temporary writes do not count.
+func (s *Store) requireRoomLocked(retention string, entries int) error {
+	directory, err := os.Open(retention)
+	if err != nil {
+		return errors.New("open artifact retention directory")
+	}
+	defer directory.Close()
+	count := 0
+	for {
+		batch, err := directory.ReadDir(1024)
+		for _, entry := range batch {
+			if !strings.HasPrefix(entry.Name(), retentionTempPrefix) {
+				count++
+			}
+		}
+		// Stop as soon as the answer is known.
+		if count > s.maxRecords-entries {
+			return ErrRetentionFull
+		}
+		if errors.Is(err, io.EOF) || (err == nil && len(batch) == 0) {
+			return nil
+		}
+		if err != nil {
+			return errors.New("read artifact retention directory")
+		}
+	}
+}
+
+// readRetentionEntries lists the whole retention directory in batches.
+func readRetentionEntries(retention string) ([]os.DirEntry, error) {
+	directory, err := os.Open(retention)
+	if err != nil {
+		return nil, errors.New("open artifact retention directory")
+	}
+	defer directory.Close()
+	var entries []os.DirEntry
+	for {
+		batch, err := directory.ReadDir(1024)
+		entries = append(entries, batch...)
+		if errors.Is(err, io.EOF) || (err == nil && len(batch) == 0) {
+			return entries, nil
+		}
+		if err != nil {
+			return nil, errors.New("read artifact retention directory")
+		}
+	}
+}
+
+// writeHold durably records that an object committed without a job is kept
+// permanently.
+func (s *Store) writeHold(retention, digest string) error {
+	path := filepath.Join(retention, strings.TrimPrefix(digest, "sha256:")+holdSuffix)
+	if _, err := os.Lstat(path); err == nil {
+		_, err := readHold(retention, filepath.Base(path))
+		return err
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("stat artifact hold")
+	}
+	if err := s.requireRoomLocked(retention, 1); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return errors.New("create artifact hold")
 	}

@@ -34,6 +34,8 @@ type Store struct {
 	objects  string
 	maximum  uint64
 	lockWait time.Duration
+	// maxRecords is MaxRetentionRecords; tests lower it.
+	maxRecords int
 }
 
 func Open(root string, maximum uint64) (*Store, error) {
@@ -61,7 +63,8 @@ func Open(root string, maximum uint64) (*Store, error) {
 	if err := requirePrivateDirectory(objects); err != nil {
 		return nil, err
 	}
-	return &Store{root: clean, objects: objects, maximum: maximum, lockWait: DefaultRetentionWait}, nil
+	return &Store{root: clean, objects: objects, maximum: maximum, lockWait: DefaultRetentionWait,
+		maxRecords: MaxRetentionRecords}, nil
 }
 
 // Put stores an object that belongs to no job. It is held permanently: a
@@ -130,7 +133,7 @@ func (s *Store) put(ctx context.Context, job string, mediaType string, reader io
 		return Descriptor{}, err
 	}
 	if job == "" {
-		err = writeHold(retention, digest)
+		err = s.writeHold(retention, digest)
 	} else {
 		err = s.bindLocked(retention, job, 0, []string{digest})
 	}

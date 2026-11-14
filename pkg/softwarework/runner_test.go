@@ -96,7 +96,7 @@ func TestRunnerBindsItsObjectsToTheExecution(t *testing.T) {
 	}
 	now := time.Unix(1_800_000_000, 0)
 	pending, err := runner.store.Sweep(context.Background(), now, 8)
-	if err != nil || pending.Live != 1 || pending.DeletedObjects != 0 || pending.Held != 0 {
+	if err != nil || pending.Pending != 1 || pending.Live != 0 || pending.DeletedObjects != 0 || pending.Held != 0 {
 		t.Fatalf("pending job = %+v %v", pending, err)
 	}
 	if err := runner.store.Retain(context.Background(), request.ExecutionID, now.Add(-time.Hour),

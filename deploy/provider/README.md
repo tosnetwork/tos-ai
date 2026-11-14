@@ -119,7 +119,15 @@ The rail config is a private JSON file owned by the executor identity:
 endpoints one operator runs is not independent finality; choosing
 independent operators is a configuration responsibility. The manifest file
 must be the canonical CBOR the Capability version publishes, and its
-`toolchain_digest` must be the executor's pinned image.
+`toolchain_digest` must be the executor's pinned image. The sandbox runs
+under exactly the manifest's `limits`: `cpu_millis`, `memory_bytes`,
+`scratch_bytes` (the workspace disk bound), `output_bytes` and
+`wall_clock_millis`, which is also the execution budget reserved before the
+response deadline. Each must be non-zero and no larger than the frozen
+preset (120 000 CPU ms, 1 GiB memory, 2 GiB disk, 16 MiB output, 180 s);
+a manifest outside those bounds is refused before admission. The default
+mode takes no manifest and runs under the frozen preset (with an optional
+tighter `--output-bytes`).
 
 ```bash
 /usr/local/libexec/tos-service/software-work-execute paid \
@@ -217,13 +225,22 @@ second (the paid path does this itself; the default mode with
 
 The sweep deletes at most `--limit` (1–1024) expired jobs per call and prints
 a JSON report (`deleted_jobs`, `deleted_objects`, `kept_shared`, `deferred`,
-`live`, `held`); rerun it while `deferred` is non-zero, for example from a
+`live` retained jobs not yet expired, `pending` jobs without a deadline, and
+`held` objects); rerun it while `deferred` is non-zero, for example from a
 systemd timer. An object stays while a pending, unexpired or deferred job
 names it or a hold keeps it, so a sweep never deletes an object that a
 running job just committed or deduplicated. Committing an object, retaining
 a job and sweeping take one retention lock; each waits up to 60 seconds for
-the others, and a sweep's work per call is bounded, so a timer-driven sweep
-does not fail a run that finishes at the same moment.
+the others, so a timer-driven sweep does not fail a run that finishes at the
+same moment.
+
+A store keeps at most 65 536 job records, tombstones and holds. At that
+bound a new job or hold is refused (existing jobs can still add objects and
+be retained), and both `paid` and the default mode refuse to start a run,
+exiting 1 before anything is admitted or executed. A sweep reads every entry
+however many there are, so it always makes progress, and each expired job it
+deletes makes room again. Pending jobs count toward the bound; give them a
+deadline (or retain them) so they can be swept.
 
 Each deletion is marked by a tombstone first, so an interrupted sweep leaves
 no live record pointing at a deleted object and the next run finishes it.

@@ -98,6 +98,9 @@ func runLocal(args []string, stdout, stderr io.Writer) int {
 		return failLocal(stderr, err)
 	}
 	defer execution.Close()
+	if err := execution.store.CheckCapacity(context.Background(), 1); err != nil {
+		return failLocal(stderr, err)
+	}
 	outcome, err := execution.runner.Execute(context.Background(), softwarework.Request{QuoteCommitment: *quote,
 		ExecutionID: *executionID, InputDigest: *inputDigest, SourceDigest: sha256Digest(archive), SourceArchive: archive})
 	if err != nil {
