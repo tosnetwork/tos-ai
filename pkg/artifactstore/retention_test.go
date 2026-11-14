@@ -116,7 +116,7 @@ func TestSweepKeepsAnObjectAPendingJobShares(t *testing.T) {
 	if again := put(t, store, job("b"), "shared"); again != shared {
 		t.Fatal("identical bytes were not deduplicated")
 	}
-	record, err := readRetentionRecord(filepath.Join(root, "retention"), strings.Repeat("b", 64)+recordSuffix)
+	record, err := readRetentionRecord(filepath.Join(root, "retention"), strings.Repeat("b", 64)+pendingSuffix)
 	if err != nil || !record.Pending || record.RetainUntilUnix != 0 {
 		t.Fatalf("pending record = %+v %v", record, err)
 	}
@@ -209,6 +209,7 @@ func TestSweepRejectsMalformedMetadataBeforeDeletingAnything(t *testing.T) {
 		"unsorted":             record(`"pending":false,"retain_until_unix":1,"objects":["` + job("d") + `","` + job("c") + `"]`),
 		"final without a date": record(`"pending":false,"retain_until_unix":0,` + objects),
 		"pending with a date":  record(`"pending":true,"retain_until_unix":5,` + objects),
+		"pending as final":     record(`"pending":true,"retain_until_unix":0,` + objects),
 		"negative deadline":    record(`"pending":false,"retain_until_unix":-1,` + objects),
 		"trailing data":        record(`"pending":false,"retain_until_unix":1,`+objects) + " {}",
 		"traversal":            record(`"pending":false,"retain_until_unix":1,"objects":["../../etc/passwd"]`),

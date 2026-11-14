@@ -97,10 +97,10 @@ func runLocal(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return failLocal(stderr, err)
 	}
+	// No capacity check here: without --retain-until the job's objects stay
+	// pending, which the record bound never refuses, so pre-admitted work
+	// keeps running however many jobs the store has seen.
 	defer execution.Close()
-	if err := execution.store.CheckCapacity(context.Background(), 1); err != nil {
-		return failLocal(stderr, err)
-	}
 	outcome, err := execution.runner.Execute(context.Background(), softwarework.Request{QuoteCommitment: *quote,
 		ExecutionID: *executionID, InputDigest: *inputDigest, SourceDigest: sha256Digest(archive), SourceArchive: archive})
 	if err != nil {

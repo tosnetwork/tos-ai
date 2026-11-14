@@ -109,6 +109,43 @@ func TestRunnerBindsItsObjectsToTheExecution(t *testing.T) {
 	}
 }
 
+// Pre-admitted work that never sets a deadline keeps running however full
+// the store's record bound is: its pending records are never refused.
+func TestRunnerKeepsRunningPastTheRecordBound(t *testing.T) {
+	runner, backend, journal, request := fixture(t)
+	defer journal.Close()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifactstore.Open(filepath.Join(root, "artifacts"), 1<<20, artifactstore.WithRecordBound(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.store = store
+	filler := digest([]byte("retained job"))
+	object, err := store.PutFor(context.Background(), filler, "application/octet-stream", bytes.NewReader([]byte("retained")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Retain(context.Background(), filler, time.Unix(1_900_000_000, 0), []string{object.Digest}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckCapacity(context.Background(), 1); err == nil {
+		t.Fatal("the store is not at its bound")
+	}
+	for index := range 5 {
+		request.ExecutionID = digest([]byte{byte(index)})
+		if _, err := runner.Execute(context.Background(), request); err != nil {
+			t.Fatalf("execution %d past the bound: %v", index, err)
+		}
+	}
+	report, err := store.Sweep(context.Background(), time.Unix(1_800_000_000, 0), 8)
+	if err != nil || report.Pending != 5 || report.Live != 1 || backend.calls != 5 {
+		t.Fatalf("report = %+v %v calls=%d", report, err, backend.calls)
+	}
+}
+
 func TestRunnerRejectsConflictingExecutionIdentity(t *testing.T) {
 	runner, backend, journal, request := fixture(t)
 	defer journal.Close()

@@ -34,13 +34,38 @@ type Store struct {
 	objects  string
 	maximum  uint64
 	lockWait time.Duration
-	// maxRecords is MaxRetentionRecords; tests lower it.
+	// maxRecords bounds deadline-bearing records; MaxRetentionRecords
+	// unless lowered with WithRecordBound.
 	maxRecords int
 }
 
-func Open(root string, maximum uint64) (*Store, error) {
+// Option adjusts a store opened by Open.
+type Option func(*Store) error
+
+// WithRecordBound lowers the bound on deadline-bearing job records below
+// MaxRetentionRecords, for an operator with less disk to spare.
+func WithRecordBound(records int) Option {
+	return func(s *Store) error {
+		if records <= 0 || records > MaxRetentionRecords {
+			return errors.New("artifact record bound is outside 1..MaxRetentionRecords")
+		}
+		s.maxRecords = records
+		return nil
+	}
+}
+
+func Open(root string, maximum uint64, options ...Option) (*Store, error) {
 	if !filepath.IsAbs(root) || maximum == 0 || maximum > MaxObjectBytesHard {
 		return nil, errors.New("invalid artifact store configuration")
+	}
+	store := &Store{lockWait: DefaultRetentionWait, maxRecords: MaxRetentionRecords, maximum: maximum}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("invalid artifact store option")
+		}
+		if err := option(store); err != nil {
+			return nil, err
+		}
 	}
 	clean := filepath.Clean(root)
 	if clean != root {
@@ -63,8 +88,8 @@ func Open(root string, maximum uint64) (*Store, error) {
 	if err := requirePrivateDirectory(objects); err != nil {
 		return nil, err
 	}
-	return &Store{root: clean, objects: objects, maximum: maximum, lockWait: DefaultRetentionWait,
-		maxRecords: MaxRetentionRecords}, nil
+	store.root, store.objects = clean, objects
+	return store, nil
 }
 
 // Put stores an object that belongs to no job. It is held permanently: a

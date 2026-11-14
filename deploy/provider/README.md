@@ -201,7 +201,7 @@ install -d -o root -g root -m 0700 \
 
 `--retain-until` gives the job's artifact and report a retention deadline;
 without it the job's retention record stays pending and the objects are
-never swept. The caller must first resolve the exact Capability
+never swept (see [Artifact retention](#artifact-retention)). The caller must first resolve the exact Capability
 version, Accepted Quote, and the pending Service Actor request `(actor,
 request_id)` that was called under the quoted `terms_hash` and
 `request_hash`. A crash-ambiguous execution ID is never reused. The executor
@@ -213,9 +213,9 @@ signing credential.
 Objects are deduplicated by content, so one object may belong to several
 jobs. Every job has a record in `STATE/artifacts/retention/` naming its
 objects. The record is written as each object is committed and stays
-pending, keeping its objects, until the job is given its last retained unix
-second (the paid path does this itself; the default mode with
-`--retain-until`). Objects stored without a job get a permanent hold
+pending (`<job>.pending`), keeping its objects, until the job is given its
+last retained unix second (`<job>.json`; the paid path does this itself, the
+default mode with `--retain-until`). Objects stored without a job get a permanent hold
 (`<object>.hold`). Sweep expired jobs with:
 
 ```bash
@@ -234,13 +234,29 @@ a job and sweeping take one retention lock; each waits up to 60 seconds for
 the others, so a timer-driven sweep does not fail a run that finishes at the
 same moment.
 
-A store keeps at most 65 536 job records, tombstones and holds. At that
-bound a new job or hold is refused (existing jobs can still add objects and
-be retained), and both `paid` and the default mode refuse to start a run,
-exiting 1 before anything is admitted or executed. A sweep reads every entry
-however many there are, so it always makes progress, and each expired job it
-deletes makes room again. Pending jobs count toward the bound; give them a
-deadline (or retain them) so they can be swept.
+A store keeps at most 65 536 deadline-bearing job records and tombstones.
+At that bound, giving a new job its first deadline is refused (jobs that
+already have one can still add objects and be extended), and `paid` refuses
+to start a run, exiting 1 before anything is admitted or executed. A sweep
+reads every entry however many there are, so it always makes progress, and
+each expired job it deletes makes room again.
+
+Pending records and holds are references that must never be broken, so they
+are never refused and do not count toward the bound. The default mode does
+not check capacity: without `--retain-until` it keeps working indefinitely,
+and its storage grows the way it always did before retention existed,
+because objects of jobs that never get a deadline are never collected. **A
+provider runtime that drives the default mode should pass
+`--retain-until`** (for example the end of the response window plus the
+manifest's `retention_seconds`) so its objects become collectable. With
+`--retain-until` the default mode needs room for a deadline after the run;
+at the bound that run fails after executing, so keep sweeping.
+
+In the paid path every retention lock wait (the runner's two object commits
+and the final `Retain`) is also bounded by the time left before the response
+deadline minus the respond budget, or by the 60 second cap if that is
+shorter. A wait that runs out fails the execution (`execution_failed`, or
+`ambiguous` if the outcome cannot be recorded); it never reads as success.
 
 Each deletion is marked by a tombstone first, so an interrupted sweep leaves
 no live record pointing at a deleted object and the next run finishes it.

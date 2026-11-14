@@ -290,6 +290,7 @@ type paidJob struct {
 	sourceDigest   string
 	run            func(context.Context, softwarework.Request) (softwarework.Outcome, error)
 	store          *artifactstore.Store
+	respondBudget  time.Duration
 
 	outcome     *softwarework.Outcome
 	receipt     []byte
@@ -325,6 +326,17 @@ func (p *paidJob) execute(ctx context.Context, verified *railgate.Verified) (str
 	if err != nil {
 		return "", err
 	}
+	if p.respondBudget <= 0 {
+		return "", errors.New("paid: no respond budget is configured")
+	}
+	// Everything before respond, the run and every retention lock wait
+	// included, must end while the respond budget is still ahead of the
+	// response deadline. The store caps each lock wait at its own bound too,
+	// so the wait is the smaller of the two. A wait that runs out fails the
+	// execution; it is never reported as success.
+	// retentionDeadline above bounded ResponseDeadline to int64.
+	ctx, cancel := context.WithDeadline(ctx, time.Unix(int64(verified.ResponseDeadline), 0).Add(-p.respondBudget))
+	defer cancel()
 	request := softwarework.Request{QuoteCommitment: verified.QuoteCommitment,
 		ExecutionID: sha256Text(verified.ExecutionID), InputDigest: sha256Text(verified.InputDigest),
 		SourceDigest: p.sourceDigest, SourceArchive: p.archive}
@@ -423,6 +435,13 @@ func sha256Text(value [32]byte) string { return "sha256:" + hex.EncodeToString(v
 
 // executeOnce runs the job through the gate and reports the outcome.
 func (p *paidJob) executeOnce(ctx context.Context) paidReport {
+	// A paid result is always given a deadline, which the store's record
+	// bound may refuse; refuse before admission rather than fail the slot
+	// after running.
+	if err := p.store.CheckCapacity(ctx, 1); err != nil {
+		return paidReport{Status: statusRefused, ExitCode: exitRefused, Actor: p.actor, RequestID: p.claim.RequestID,
+			Error: "paid: the artifact store cannot retain another result: " + err.Error()}
+	}
 	result := p.gate.ExecuteOnce(ctx, p.claim, p.check, p.execute)
 	report := paidReport{Status: string(result.Status), ExitCode: exitCodeFor(result.Status), Actor: p.actor,
 		RequestID: p.claim.RequestID, SlotState: string(result.Slot.State), QuoteCommitment: result.Slot.QuoteCommitment,
@@ -570,17 +589,13 @@ func openPaid(in paidInputs) (*paidJob, func() error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// A full artifact store could not keep this run's results; refuse
-	// before admission rather than fail the slot after running.
-	if err := environment.store.CheckCapacity(context.Background(), 1); err != nil {
-		return nil, nil, errors.Join(err, environment.Close())
-	}
 	gate, err := railgate.OpenGate(verifier, filepath.Join(in.stateDir, "slots"))
 	if err != nil {
 		return nil, nil, errors.Join(err, environment.Close())
 	}
 	job := &paidJob{gate: gate, claim: claim, actor: in.actor, manifestDigest: manifestDigest, contract: contract,
-		archive: archive, sourceDigest: sha256Digest(archive), run: environment.runner.Execute, store: environment.store}
+		archive: archive, sourceDigest: sha256Digest(archive), run: environment.runner.Execute, store: environment.store,
+		respondBudget: time.Duration(config.RespondBudgetSeconds) * time.Second}
 	return job, func() error { return errors.Join(gate.Close(), environment.Close()) }, nil
 }
 

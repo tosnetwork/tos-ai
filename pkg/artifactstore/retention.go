@@ -17,26 +17,30 @@ import (
 )
 
 // Retention binds stored objects to the job that produced them until a
-// deadline. A record lives in retention/<job hex>.json. Sweep deletes an
-// expired job in three durable steps: it renames the record to a tombstone
-// (<job hex>.expired), removes the job's objects that no surviving record
-// references, and only then removes the tombstone. A crash at any point
-// leaves either a live record whose objects are all present or a tombstone
-// the next sweep finishes; no surviving record ever names a deleted object.
+// deadline. A job with a deadline has a record in retention/<job hex>.json.
+// Sweep deletes an expired job in three durable steps: it renames the record
+// to a tombstone (<job hex>.expired), removes the job's objects that no
+// surviving record references, and only then removes the tombstone. A crash
+// at any point leaves either a live record whose objects are all present or
+// a tombstone the next sweep finishes; no surviving record ever names a
+// deleted object.
 //
 // Objects are deduplicated by content, so one object may belong to several
 // jobs. Every commit binds the object under the retention lock: PutFor adds
-// it to its job's record, pending until Retain gives the job a deadline, and
-// Put leaves a permanent hold (<object hex>.hold). A sweep keeps any object a
-// pending, unexpired or deferred record or a hold names, so it never deletes
-// an object a job that is still running or retained depends on.
+// it to its job's pending record (<job hex>.pending) until Retain gives the
+// job a deadline, and Put leaves a permanent hold (<object hex>.hold). A
+// sweep keeps any object a pending, unexpired or deferred record or a hold
+// names, so it never deletes an object a job that is still running or
+// retained depends on.
 const (
 	retentionSchema = "tos.ai.artifact-retention.v1"
-	// MaxRetentionRecords bounds the records, tombstones and holds a store
-	// keeps. A new job record or hold is refused at the bound (existing jobs
-	// may still add objects and be retained), so a sweep, which reads every
-	// entry, has bounded work and never faces a store it cannot read; once
-	// expired jobs are swept, new ones are admitted again.
+	// MaxRetentionRecords bounds the deadline-bearing job records and
+	// tombstones a store keeps. Giving a new job a deadline is refused at the
+	// bound (jobs that already have one may still add objects and be
+	// extended), and once expired jobs are swept new ones are admitted again.
+	// Pending records and holds are references that must never be broken, so
+	// they are never refused and do not count; a store whose jobs never get a
+	// deadline grows the way an unswept store always did.
 	MaxRetentionRecords = 65536
 	// MaxSweepJobs bounds the expired jobs one sweep deletes.
 	MaxSweepJobs = 1024
@@ -46,6 +50,7 @@ const (
 	maxRetentionRecordBytes = 4 << 10
 	retentionLockName       = ".retention.lock"
 	recordSuffix            = ".json"
+	pendingSuffix           = ".pending"
 	tombstoneSuffix         = ".expired"
 	holdSuffix              = ".hold"
 	retentionTempPrefix     = ".retain-"
@@ -61,8 +66,9 @@ const (
 // longer than the bounded wait; the caller retries later.
 var ErrRetentionBusy = errors.New("artifact retention is held by another process")
 
-// ErrRetentionFull reports that the store holds MaxRetentionRecords entries;
-// a sweep of expired jobs makes room.
+// ErrRetentionFull reports that the store holds MaxRetentionRecords
+// deadline-bearing records and tombstones; a sweep of expired jobs makes
+// room.
 var ErrRetentionFull = errors.New("artifact retention is at its record bound; sweep expired jobs")
 
 // retentionRecord binds objects to a job. A pending record has no deadline
@@ -133,9 +139,11 @@ func (s *Store) Retain(ctx context.Context, job string, retainUntil time.Time, o
 }
 
 // bindLocked adds objects to job's record while the retention lock is held.
-// retainUntil zero keeps the record's current state (a new record is
-// pending); a positive value sets a pending record's deadline or extends a
-// final one, never shortening it.
+// retainUntil zero keeps the job's current state (a job without a deadline
+// stays pending); a positive value gives a pending job its deadline or
+// extends an existing one, never shortening it. Only a job's first deadline
+// creates a new deadline-bearing record, so only that counts against the
+// record bound.
 func (s *Store) bindLocked(retention, job string, retainUntil int64, objects []string) error {
 	name := strings.TrimPrefix(job, "sha256:")
 	if _, err := os.Lstat(filepath.Join(retention, name+tombstoneSuffix)); err == nil {
@@ -143,23 +151,30 @@ func (s *Store) bindLocked(retention, job string, retainUntil int64, objects []s
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("stat artifact retention tombstone")
 	}
-	record := retentionRecord{Schema: retentionSchema, Job: job, Pending: retainUntil == 0, RetainUntilUnix: retainUntil}
-	existing, err := readRetentionRecord(retention, name+recordSuffix)
+	final, finalErr := readRetentionRecord(retention, name+recordSuffix)
+	if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
+		return finalErr
+	}
+	pending, pendingErr := readRetentionRecord(retention, name+pendingSuffix)
+	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+		return pendingErr
+	}
+	hasFinal, hasPending := finalErr == nil, pendingErr == nil
+	record := retentionRecord{Schema: retentionSchema, Job: job}
 	switch {
-	case err == nil:
-		switch {
-		case retainUntil == 0:
-			record.Pending, record.RetainUntilUnix = existing.Pending, existing.RetainUntilUnix
-		case !existing.Pending:
-			record.RetainUntilUnix = max(retainUntil, existing.RetainUntilUnix)
-		}
-		record.Objects = append(record.Objects, existing.Objects...)
-	case errors.Is(err, os.ErrNotExist):
+	case hasFinal:
+		record.RetainUntilUnix = max(retainUntil, final.RetainUntilUnix)
+		record.Objects = append(record.Objects, final.Objects...)
+	case retainUntil == 0:
+		record.Pending = true
+	default:
 		if err := s.requireRoomLocked(retention, 1); err != nil {
 			return err
 		}
-	default:
-		return err
+		record.RetainUntilUnix = retainUntil
+	}
+	if hasPending {
+		record.Objects = append(record.Objects, pending.Objects...)
 	}
 	record.Objects = append(record.Objects, objects...)
 	slices.Sort(record.Objects)
@@ -174,11 +189,28 @@ func (s *Store) bindLocked(retention, job string, retainUntil int64, objects []s
 			return err
 		}
 	}
-	if existing.valid() && existing.Pending == record.Pending && existing.RetainUntilUnix == record.RetainUntilUnix &&
-		slices.Equal(existing.Objects, record.Objects) {
+	if record.Pending {
+		if hasPending && slices.Equal(pending.Objects, record.Objects) {
+			return nil
+		}
+		return writeRetentionRecord(retention, name+pendingSuffix, record)
+	}
+	if hasFinal && !hasPending && final.RetainUntilUnix == record.RetainUntilUnix && slices.Equal(final.Objects, record.Objects) {
 		return nil
 	}
-	return writeRetentionRecord(retention, name+recordSuffix, record)
+	if err := writeRetentionRecord(retention, name+recordSuffix, record); err != nil {
+		return err
+	}
+	if !hasPending {
+		return nil
+	}
+	// The deadline-bearing record now names every pending object, so the
+	// pending record is redundant. A crash before this removal leaves both;
+	// the next bind or sweep removes the pending one.
+	if err := removeRegular(filepath.Join(retention, name+pendingSuffix)); err != nil {
+		return err
+	}
+	return syncDirectory(retention)
 }
 
 // Sweep deletes at most limit jobs whose retention ended before now, and
@@ -206,9 +238,9 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 	if err != nil {
 		return SweepReport{}, err
 	}
-	var tombstones, expired, surviving []retentionRecord
-	pending := 0
+	var tombstones, expired, surviving, pendingRecords []retentionRecord
 	held := map[string]struct{}{}
+	deadlineBearing := map[string][]string{}
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
@@ -229,26 +261,47 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 			if err != nil {
 				return SweepReport{}, err
 			}
-			if record.Pending {
-				return SweepReport{}, fmt.Errorf("artifact retention tombstone %s is pending", name)
-			}
 			tombstones = append(tombstones, record)
+			deadlineBearing[record.Job] = record.Objects
+		case strings.HasSuffix(name, pendingSuffix):
+			record, err := readRetentionRecord(retention, name)
+			if err != nil {
+				return SweepReport{}, err
+			}
+			pendingRecords = append(pendingRecords, record)
 		case strings.HasSuffix(name, recordSuffix):
 			record, err := readRetentionRecord(retention, name)
 			if err != nil {
 				return SweepReport{}, err
 			}
-			switch {
-			case record.Pending:
-				pending++
-				surviving = append(surviving, record)
-			case record.RetainUntilUnix < now.Unix():
+			deadlineBearing[record.Job] = record.Objects
+			if record.RetainUntilUnix < now.Unix() {
 				expired = append(expired, record)
-			default:
+			} else {
 				surviving = append(surviving, record)
 			}
 		default:
 			return SweepReport{}, fmt.Errorf("unexpected entry %q in the artifact retention directory", name)
+		}
+	}
+	// A pending record left beside its job's deadline-bearing record by an
+	// interrupted Retain is redundant once that record names all its
+	// objects; anything else keeps the pending record and its objects.
+	pending := 0
+	for _, record := range pendingRecords {
+		objects, retained := deadlineBearing[record.Job]
+		if !retained {
+			pending++
+			surviving = append(surviving, record)
+			continue
+		}
+		for _, object := range record.Objects {
+			if !slices.Contains(objects, object) {
+				return SweepReport{}, fmt.Errorf("pending record of %s names an object its retained record lacks", record.Job)
+			}
+		}
+		if err := removeRegular(filepath.Join(retention, strings.TrimPrefix(record.Job, "sha256:")+pendingSuffix)); err != nil {
+			return SweepReport{}, err
 		}
 	}
 	// Records are read in directory order; sort so a bounded sweep picks
@@ -382,9 +435,9 @@ func (s *Store) acquireRetention(ctx context.Context) (*dirlock.Lock, string, er
 	}
 }
 
-// CheckCapacity reports ErrRetentionFull unless jobs more job records fit
-// under the record bound. A caller runs it before accepting work whose
-// results it must store, so a full store refuses the work up front.
+// CheckCapacity reports ErrRetentionFull unless jobs more jobs can be given
+// a deadline under the record bound. A caller that will retain its results
+// runs it before accepting the work, so a full store refuses up front.
 func (s *Store) CheckCapacity(ctx context.Context, jobs int) error {
 	if s == nil || s.root == "" || ctx == nil || jobs <= 0 || jobs > MaxRetentionRecords {
 		return errors.New("invalid artifact capacity request")
@@ -397,8 +450,8 @@ func (s *Store) CheckCapacity(ctx context.Context, jobs int) error {
 	return s.requireRoomLocked(retention, jobs)
 }
 
-// requireRoomLocked refuses unless entries more records or holds fit under
-// the store's record bound. Interrupted temporary writes do not count.
+// requireRoomLocked refuses unless entries more deadline-bearing records fit
+// under the store's record bound.
 func (s *Store) requireRoomLocked(retention string, entries int) error {
 	directory, err := os.Open(retention)
 	if err != nil {
@@ -409,7 +462,10 @@ func (s *Store) requireRoomLocked(retention string, entries int) error {
 	for {
 		batch, err := directory.ReadDir(1024)
 		for _, entry := range batch {
-			if !strings.HasPrefix(entry.Name(), retentionTempPrefix) {
+			// Only deadline-bearing records and their tombstones count;
+			// pending records and holds never break a reference.
+			if name := entry.Name(); !strings.HasPrefix(name, retentionTempPrefix) &&
+				(strings.HasSuffix(name, recordSuffix) || strings.HasSuffix(name, tombstoneSuffix)) {
 				count++
 			}
 		}
@@ -455,9 +511,6 @@ func (s *Store) writeHold(retention, digest string) error {
 		return err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("stat artifact hold")
-	}
-	if err := s.requireRoomLocked(retention, 1); err != nil {
-		return err
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -567,8 +620,10 @@ func readRetentionRecord(directory, name string) (retentionRecord, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return retentionRecord{}, fmt.Errorf("artifact retention record %s has trailing data", name)
 	}
-	stem := strings.TrimSuffix(strings.TrimSuffix(name, recordSuffix), tombstoneSuffix)
-	if !record.valid() || "sha256:"+stem != record.Job {
+	// The file name states the record's kind: only a .pending record may be
+	// pending, and it must be.
+	stem := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, recordSuffix), tombstoneSuffix), pendingSuffix)
+	if !record.valid() || "sha256:"+stem != record.Job || record.Pending != strings.HasSuffix(name, pendingSuffix) {
 		return retentionRecord{}, fmt.Errorf("artifact retention record %s is invalid", name)
 	}
 	return record, nil

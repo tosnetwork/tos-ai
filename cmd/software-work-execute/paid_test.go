@@ -239,10 +239,74 @@ func testGate(t *testing.T, reader railgate.Reader) *railgate.Gate {
 	return gate
 }
 
+func testStore(t *testing.T, options ...artifactstore.Option) *artifactstore.Store {
+	t.Helper()
+	store, err := artifactstore.Open(filepath.Join(privateDir(t), "artifacts"), 1<<20, options...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// At the record bound a paid run is refused before admission: no slot is
+// taken and nothing runs, so the request stays claimable elsewhere.
+func TestPaidIsRefusedBeforeAdmissionAtTheRecordBound(t *testing.T) {
+	store := testStore(t, artifactstore.WithRecordBound(1))
+	ctx := context.Background()
+	retainedJob := "sha256:" + strings.Repeat("e", 64)
+	object, err := store.PutFor(ctx, retainedJob, "application/octet-stream", strings.NewReader("retained"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Retain(ctx, retainedJob, time.Now().Add(time.Hour), []string{object.Digest}); err != nil {
+		t.Fatal(err)
+	}
+	reader := &failingReader{}
+	ran := false
+	job := &paidJob{gate: testGate(t, reader), actor: testActor, manifestDigest: testManifest, store: store,
+		claim: railgate.Claim{BuyerWallet: testBuyer, RequestID: 3},
+		run: func(context.Context, softwarework.Request) (softwarework.Outcome, error) {
+			ran = true
+			return softwarework.Outcome{}, nil
+		}}
+	report := job.executeOnce(ctx)
+	if report.Status != statusRefused || report.ExitCode != exitRefused || report.SlotState != "" || ran ||
+		!strings.Contains(report.Error, "retain") {
+		t.Fatalf("report = %+v ran=%v", report, ran)
+	}
+	// With room the same job reaches admission (and is refused there).
+	job.store = testStore(t, artifactstore.WithRecordBound(1))
+	if report := job.executeOnce(ctx); report.Status != string(railgate.StatusNotAdmitted) {
+		t.Fatalf("with room = %+v", report)
+	}
+}
+
+// Every retention lock wait in a paid run ends while the respond budget is
+// still ahead of the response deadline, well before the store's own cap,
+// and a wait that runs out never reads as success.
+func TestPaidLockWaitsAreBoundedByTheDeadlineSlack(t *testing.T) {
+	f := newPaidFixture(t)
+	f.verified.ResponseDeadline = uint64(time.Now().Add(f.job.respondBudget + 400*time.Millisecond).Unix())
+	holder, err := dirlock.Acquire(f.storeRoot, ".retention.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	started := time.Now()
+	hash, err := f.job.execute(context.Background(), f.verified)
+	elapsed := time.Since(started)
+	if err == nil || hash != "" || f.job.receipt != nil {
+		t.Fatalf("a run whose lock wait outlived the slack succeeded: %q %v", hash, err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the lock wait took %v; the slack was under 2 s", elapsed)
+	}
+}
+
 func TestPaidJobNeverExecutesAClaimThatIsNotAdmitted(t *testing.T) {
 	reader := &failingReader{}
 	ran := false
-	job := &paidJob{gate: testGate(t, reader), actor: testActor, manifestDigest: testManifest,
+	job := &paidJob{gate: testGate(t, reader), actor: testActor, manifestDigest: testManifest, store: testStore(t),
 		claim: railgate.Claim{Package: &nativev1.QuoteProposalPackageV1{Proposal: &nativev1.QuoteProposalV1{}}, BuyerWallet: testBuyer,
 			ExecutionID: [32]byte{1}, InputDigest: [32]byte{2}, Call: toschain.ActorTxID{LT: 10, Hash: strings.Repeat("0a", 32)}},
 		run: func(context.Context, softwarework.Request) (softwarework.Outcome, error) {
@@ -285,7 +349,7 @@ func newPaidFixture(t *testing.T) *paidFixture {
 		Manifest: nativecore.SoftwareWorkManifestV1{ToolchainDigest: contract.ToolchainDigest, RetentionSeconds: 86400},
 		Price:    big.NewInt(300_000_000), ResponseDeadline: 2_000_003_600}
 	f.job = &paidJob{actor: testActor, manifestDigest: testManifest, contract: contract, archive: archive,
-		sourceDigest: sha256Digest(archive), store: store, claim: railgate.Claim{RequestID: 5}}
+		sourceDigest: sha256Digest(archive), store: store, claim: railgate.Claim{RequestID: 5}, respondBudget: 30 * time.Second}
 	f.job.run = func(ctx context.Context, request softwarework.Request) (softwarework.Outcome, error) {
 		f.runs++
 		report, err := store.PutFor(ctx, request.ExecutionID, softwarework.ReportMediaType, strings.NewReader("report"))
