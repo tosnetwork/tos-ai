@@ -21,11 +21,11 @@ func TestArtifactsGCDeletesOnlyExpiredRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	old, err := store.Put(ctx, "application/octet-stream", strings.NewReader("old"))
+	old, err := store.PutFor(ctx, "sha256:"+strings.Repeat("a", 64), "application/octet-stream", strings.NewReader("old"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := store.Put(ctx, "application/octet-stream", strings.NewReader("fresh"))
+	fresh, err := store.PutFor(ctx, "sha256:"+strings.Repeat("b", 64), "application/octet-stream", strings.NewReader("fresh"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +70,16 @@ func TestArtifactsGCRefusesBadInvocations(t *testing.T) {
 		"zero limit":     {"--state-dir", root, "--limit", "0"},
 		"huge limit":     {"--state-dir", root, "--limit", "100000"},
 		"extra argument": {"--state-dir", root, "now"},
-		"unknown flag":   {"--state-dir", root, "--force"},
 	} {
 		if code := run(append([]string{"artifacts-gc"}, args...), io.Discard, io.Discard); code != exitError {
 			t.Errorf("%s: exit = %d", name, code)
 		}
+	}
+	if code := run([]string{"artifacts-gc", "--state-dir", root, "--force"}, io.Discard, io.Discard); code != exitUsage {
+		t.Errorf("unknown flag: exit = %d", code)
+	}
+	if code := run([]string{"artifacts-gc", "-h"}, io.Discard, io.Discard); code != exitOK {
+		t.Errorf("help: exit = %d", code)
 	}
 	if err := os.Chmod(root, 0o750); err != nil {
 		t.Fatal(err)
@@ -93,5 +98,11 @@ func TestLocalModeRefusesUnexpectedArguments(t *testing.T) {
 		if code := run(args, io.Discard, io.Discard); code != exitError {
 			t.Errorf("%s: exit = %d", name, code)
 		}
+	}
+	if code := run([]string{"--no-such-flag"}, io.Discard, io.Discard); code != exitUsage {
+		t.Errorf("unknown flag: exit = %d", code)
+	}
+	if code := run([]string{"-help"}, io.Discard, io.Discard); code != exitOK {
+		t.Errorf("help: exit = %d", code)
 	}
 }

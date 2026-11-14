@@ -29,9 +29,12 @@ import (
 // Paid-mode exit codes. Every paid run also prints one JSON status object
 // on stdout whose "status" names the same outcome.
 const (
-	// exitRefused (1, exitError): the configuration or input is invalid or
-	// a local dependency is unavailable; nothing was admitted or run.
+	// exitRefused (1, exitError): the configuration or input is invalid, or
+	// a dependency (finalized resolver, executor, slot store) is
+	// unavailable; nothing was admitted or run and the run may be retried.
 	exitRefused = exitError
+	// exitUsage (2): the command line does not parse.
+	exitUsage = 2
 	// exitAlreadyTaken: the request already has an execution slot; it is
 	// not executed again.
 	exitAlreadyTaken = 3
@@ -47,6 +50,10 @@ const (
 	// exitExecutionFailed: the execution ran and did not succeed; the slot
 	// is failed and must never be attested.
 	exitExecutionFailed = 7
+	// exitRefusedBeforeExecution: admitted, but the verified request does
+	// not fit this executor (actor, request, manifest, toolchain, price or
+	// retention); the slot is abandoned and nothing ran.
+	exitRefusedBeforeExecution = 8
 )
 
 const (
@@ -161,7 +168,7 @@ func parsePaidInputs(args []string, stderr io.Writer) (paidInputs, error) {
 	flags.StringVar(&in.executionID, "execution-id", "", "execution id committed by the request (sha256:<hex>)")
 	flags.StringVar(&in.inputDigest, "input-digest", "", "input digest committed by the request (sha256:<hex>)")
 	if err := flags.Parse(args); err != nil {
-		return paidInputs{}, err
+		return paidInputs{}, usageError{err}
 	}
 	if flags.NArg() != 0 {
 		return paidInputs{}, fmt.Errorf("unexpected argument %q", flags.Arg(0))
@@ -259,6 +266,10 @@ func exitCodeFor(status railgate.Status) int {
 		return exitNotAdmitted
 	case railgate.StatusExecutionFailed:
 		return exitExecutionFailed
+	case railgate.StatusRefusedBeforeExecution:
+		return exitRefusedBeforeExecution
+	case railgate.StatusUnavailable:
+		return exitRefused
 	default:
 		// An unknown status is never reported as success or as safe to
 		// retry: treat it as ambiguous.
@@ -285,15 +296,30 @@ type paidJob struct {
 	retainUntil int64
 }
 
-func (p *paidJob) execute(ctx context.Context, verified *railgate.Verified) (string, error) {
+// check refuses a verified request this executor cannot serve. It runs after
+// admission and before the slot is started, so a refusal abandons the slot
+// with nothing run.
+func (p *paidJob) check(verified *railgate.Verified) error {
 	if verified == nil || verified.Price == nil || verified.Price.Sign() <= 0 {
-		return "", errors.New("paid: the verified request has no price")
+		return errors.New("paid: the verified request has no price")
 	}
 	if verified.Actor != p.actor || verified.RequestID != p.claim.RequestID || verified.ManifestDigest != p.manifestDigest {
-		return "", errors.New("paid: the verified request is not the configured actor, request and manifest")
+		return errors.New("paid: the verified request is not the configured actor, request and manifest")
 	}
 	if verified.Manifest.ToolchainDigest != p.contract.ToolchainDigest {
-		return "", errors.New("paid: the quoted toolchain is not the executor's toolchain")
+		return errors.New("paid: the quoted toolchain is not the executor's toolchain")
+	}
+	if _, err := retentionDeadline(verified.ResponseDeadline, verified.Manifest.RetentionSeconds); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *paidJob) execute(ctx context.Context, verified *railgate.Verified) (string, error) {
+	// The pre-execution verification is a fresh one; it must still pass
+	// the same check.
+	if err := p.check(verified); err != nil {
+		return "", err
 	}
 	retainUntil, err := retentionDeadline(verified.ResponseDeadline, verified.Manifest.RetentionSeconds)
 	if err != nil {
@@ -306,22 +332,25 @@ func (p *paidJob) execute(ctx context.Context, verified *railgate.Verified) (str
 	if err != nil {
 		return "", err
 	}
+	// The runner bound its objects to this execution as pending; give them
+	// the job's deadline first, so even an outcome refused below does not
+	// stay pending forever.
+	if err := p.store.Retain(ctx, request.ExecutionID, time.Unix(retainUntil, 0),
+		[]string{outcome.Artifact.Digest, outcome.Report.Digest}); err != nil {
+		return "", fmt.Errorf("paid: record artifact retention: %w", err)
+	}
 	if outcome.ExitCode != 0 || outcome.CompletedAtUnix == 0 || outcome.ExecutionID != request.ExecutionID ||
 		outcome.QuoteCommitment != request.QuoteCommitment || outcome.InputDigest != request.InputDigest ||
 		outcome.SourceDigest != p.sourceDigest || outcome.ToolchainDigest != p.contract.ToolchainDigest ||
 		outcome.SandboxDigest != p.manifestDigest {
 		return "", errors.New("paid: the execution outcome is not a successful run of this request")
 	}
-	// The deliverables must be stored, intact and retained before a
-	// response hash can be recorded for them.
+	// The deliverables must be stored and intact before a response hash can
+	// be recorded for them.
 	for _, digest := range []string{outcome.Artifact.Digest, outcome.Report.Digest} {
 		if _, err := p.store.Get(ctx, digest); err != nil {
 			return "", fmt.Errorf("paid: stored result %s: %w", digest, err)
 		}
-	}
-	if err := p.store.Retain(ctx, request.ExecutionID, time.Unix(retainUntil, 0),
-		[]string{outcome.Artifact.Digest, outcome.Report.Digest}); err != nil {
-		return "", fmt.Errorf("paid: record artifact retention: %w", err)
 	}
 	root, _, err := nativecore.BuildSoftwareWorkReceiptCellV1(nativecore.SoftwareWorkReceiptV1{
 		QuoteCommitment: verified.QuoteCommitment, ExecutionID: request.ExecutionID, InputDigest: request.InputDigest,
@@ -354,7 +383,7 @@ func sha256Text(value [32]byte) string { return "sha256:" + hex.EncodeToString(v
 
 // executeOnce runs the job through the gate and reports the outcome.
 func (p *paidJob) executeOnce(ctx context.Context) paidReport {
-	result := p.gate.ExecuteOnce(ctx, p.claim, p.execute)
+	result := p.gate.ExecuteOnce(ctx, p.claim, p.check, p.execute)
 	report := paidReport{Status: string(result.Status), ExitCode: exitCodeFor(result.Status), Actor: p.actor,
 		RequestID: p.claim.RequestID, SlotState: string(result.Slot.State), QuoteCommitment: result.Slot.QuoteCommitment,
 		ResponseHash: result.ResponseHash}
@@ -390,8 +419,22 @@ func refuse(stdout io.Writer, err error) int {
 	return writeReport(stdout, paidReport{Status: statusRefused, ExitCode: exitRefused, Error: err.Error()})
 }
 
+// usageError marks a command line that does not parse.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
+
+const statusUsage = "usage"
+
 func runPaid(args []string, stdout, stderr io.Writer) int {
 	in, err := parsePaidInputs(args, stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return exitOK
+	}
+	var usage usageError
+	if errors.As(err, &usage) {
+		return writeReport(stdout, paidReport{Status: statusUsage, ExitCode: exitUsage, Error: err.Error()})
+	}
 	if err != nil {
 		return refuse(stdout, err)
 	}
@@ -437,6 +480,9 @@ func openPaid(in paidInputs) (*paidJob, func() error, error) {
 	}
 	if manifest.ToolchainDigest != contract.ToolchainDigest {
 		return nil, nil, errors.New("the provider manifest names another toolchain than the executor's")
+	}
+	if manifest.RetentionSeconds == 0 {
+		return nil, nil, errors.New("the provider manifest retains no result; a paid result must be retained for delivery")
 	}
 	packageBytes, err := readPrivateFile(in.quote, maxQuotePackage, "Quote package")
 	if err != nil {

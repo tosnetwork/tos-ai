@@ -59,25 +59,38 @@ It refuses to run anything until finalized TOS state proves the request:
 
 1. every flag and the rail config are validated, the Quote package is checked
    against the configured provider offer and `--actor`, and the containerd
-   executor, journal, artifact store and slot directory are opened. Any
-   missing or malformed piece refuses the run before admission;
+   executor, journal, artifact store and slot directory are opened. The
+   manifest must state a non-zero `retention_seconds`. Any missing or
+   malformed piece refuses the run before admission;
 2. `railgate` `Admit` verifies the call, the pending request, the Quote and
    input binding and the deadline slack at a fresh finalized checkpoint and
    creates an at-most-once slot keyed by `(quote_commitment, actor,
    request_id)`;
-3. `Run` re-verifies at another fresh checkpoint immediately before
+3. the verified request is checked against this executor (actor, request,
+   manifest, toolchain, a positive price, a representable retention
+   deadline); a refusal abandons the slot before anything runs;
+4. `Run` re-verifies at another fresh checkpoint immediately before
    execution and durably marks the slot started;
-4. a successful run's artifact and report are re-read, retained until the
-   response deadline plus the manifest's `retention_seconds`, and bound into
-   the `SoftwareWorkReceiptV1` whose cell hash is recorded with `Complete`;
-   any other outcome is recorded with `Fail` and is never attested;
-5. a final fresh `Recheck` reports whether respond may be sent now.
+5. the run's artifact and report are retained first, until the response
+   deadline plus the manifest's `retention_seconds`; a successful run's
+   objects are then re-read and bound into the `SoftwareWorkReceiptV1` whose
+   cell hash is recorded with `Complete`; any other outcome is recorded with
+   `Fail` and is never attested;
+6. a final fresh `Recheck` reports whether respond may be sent now.
 
 The paid state directory holds the slots, the resolver checkpoints, the job
 journal and the artifacts. It must be **persistent and shared by every paid
 run of the provider offer**: deleting or splitting it would forget which
 requests were already admitted. One process owns it at a time; a concurrent
 run fails to open it rather than share it.
+
+**Run exactly one provider runtime per Service Actor and offer.** The
+at-most-once guarantee holds only within one slot directory. Two paid state
+directories for the same offer, or `software-work-execute paid` next to
+another provider runtime that keeps its own slots for the same actor (for
+example an agent runtime with its own state directory), can each admit and
+execute the same request. Pick one runtime for an actor and route every
+paid request for it through that runtime's single slot directory.
 
 The rail config is a private JSON file owned by the executor identity:
 
@@ -131,12 +144,20 @@ and the `outcome`; `error` explains every other status) and exits with:
 | Exit | `status` | Meaning and operator action |
 |---|---|---|
 | 0 | `completed` | Admitted, executed once, Receipt hash recorded. Sign respond through `tosctl` only while `respond_check` is `passed`; otherwise rerun the check before the response deadline. |
-| 1 | `refused` | Invalid flags or config, or a local dependency is unavailable. Nothing was admitted or run; fix and retry. |
+| 0 | (none) | `-h`: usage printed, nothing run. |
+| 1 | `refused` | Invalid flags or config, or a local dependency (executor, journal, store) cannot be opened. Nothing was admitted or run; fix and retry. |
+| 1 | `unavailable` | No finalized checkpoint could be opened (resolver or quorum outage), or the slot store failed before a slot existed. Nothing was admitted or run; retry. |
+| 2 | `usage` | The command line does not parse. |
 | 3 | `already_taken` | The request already has a slot (admitted, completed, failed or abandoned). It is not executed again. |
 | 4 | `not_pending_now` | Admitted, but the pre-execution check found the request no longer pending with room to execute and respond. The slot is abandoned; nothing ran. |
-| 5 | `ambiguous` | A run may have started without a recorded outcome (a crash, or a result that could not be recorded). Never rerun or respond; the buyer's refund path applies. |
-| 6 | `not_admitted` | Finalized state does not prove the claim (unknown call, other terms, incomplete history, too close to the deadline, resolver unavailable). No slot was created; nothing ran. |
+| 5 | `ambiguous` | A run may have started without a recorded outcome (a crash, or a result that could not be recorded), or the slot store failed in a way that left a slot behind. Never rerun or respond; the buyer's refund path applies. |
+| 6 | `not_admitted` | Finalized state at an open checkpoint does not prove the claim (unknown call, other terms, incomplete history, too close to the deadline). A read that fails after the checkpoint opened also lands here. No slot was created; nothing ran. |
 | 7 | `execution_failed` | The execution ran and did not succeed. The slot is failed and is never attested. |
+| 8 | `refused_before_execution` | Admitted, but the verified request does not fit this executor (actor, request, manifest, toolchain, price or retention). The slot is abandoned; nothing ran. |
+
+A resolver outage during the pre-execution re-verification (step 4) cannot
+be told apart from a request that stopped being pending; it abandons the
+slot and reports `not_pending_now`.
 
 The input digest is the value the paid call committed. How a transport
 derives it from the source archive is that transport's rule; the Receipt
@@ -170,9 +191,9 @@ install -d -o root -g root -m 0700 \
   --retain-until RETAIN_UNTIL_UNIX_SECOND
 ```
 
-`--retain-until` records how long the job's artifact and report are
-retained; without it no retention record is written and the objects stay
-until removed by hand. The caller must first resolve the exact Capability
+`--retain-until` gives the job's artifact and report a retention deadline;
+without it the job's retention record stays pending and the objects are
+never swept. The caller must first resolve the exact Capability
 version, Accepted Quote, and the pending Service Actor request `(actor,
 request_id)` that was called under the quoted `terms_hash` and
 `request_hash`. A crash-ambiguous execution ID is never reused. The executor
@@ -181,8 +202,13 @@ signing credential.
 
 ## Artifact retention
 
-Every retained job has a record in `STATE/artifacts/retention/` naming its
-objects and the last unix second they are kept. Sweep expired jobs with:
+Objects are deduplicated by content, so one object may belong to several
+jobs. Every job has a record in `STATE/artifacts/retention/` naming its
+objects. The record is written as each object is committed and stays
+pending, keeping its objects, until the job is given its last retained unix
+second (the paid path does this itself; the default mode with
+`--retain-until`). Objects stored without a job get a permanent hold
+(`<object>.hold`). Sweep expired jobs with:
 
 ```bash
 /usr/local/libexec/tos-service/software-work-execute artifacts-gc \
@@ -191,15 +217,24 @@ objects and the last unix second they are kept. Sweep expired jobs with:
 
 The sweep deletes at most `--limit` (1–1024) expired jobs per call and prints
 a JSON report (`deleted_jobs`, `deleted_objects`, `kept_shared`, `deferred`,
-`live`); rerun it while `deferred` is non-zero, for example from a systemd
-timer. An object stays while any unexpired or deferred job still names it.
+`live`, `held`); rerun it while `deferred` is non-zero, for example from a
+systemd timer. An object stays while a pending, unexpired or deferred job
+names it or a hold keeps it, so a sweep never deletes an object that a
+running job just committed or deduplicated. Committing an object, retaining
+a job and sweeping take one retention lock; each waits up to 60 seconds for
+the others, and a sweep's work per call is bounded, so a timer-driven sweep
+does not fail a run that finishes at the same moment.
+
 Each deletion is marked by a tombstone first, so an interrupted sweep leaves
 no live record pointing at a deleted object and the next run finishes it.
-The sweep refuses, without deleting anything, when another process holds the
-store's retention lock, when any record is malformed or unexpected, or when
-an object is not a regular file; it never follows symlinks. Objects without a
-retention record (for example from a run without `--retain-until`) are never
-swept.
+Before deleting anything, the sweep refuses when it cannot get the lock in
+time or when any record or hold is malformed or unexpected. An object that
+turns out not to be a regular file stops the sweep at that job: jobs deleted
+earlier in the same call stay deleted, the offending job keeps its tombstone
+and object, and a rerun after the operator fixes it continues. The sweep
+never follows symlinks. Jobs whose record stays pending (for example
+default-mode runs without `--retain-until`, or a run that crashed before it
+was retained) keep their objects until a deadline is set.
 
 ## Settlement and signing custody
 

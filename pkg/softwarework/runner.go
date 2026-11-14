@@ -127,7 +127,9 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Outcome, error) 
 	if err != nil {
 		return Outcome{}, errors.New("encode software-work report")
 	}
-	report, err := r.store.Put(ctx, ReportMediaType, bytes.NewReader(reportBytes))
+	// Both objects are bound to this execution as they are committed, so a
+	// sweep keeps them until the caller retains the job with a deadline.
+	report, err := r.store.PutFor(ctx, request.ExecutionID, ReportMediaType, bytes.NewReader(reportBytes))
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -135,7 +137,7 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Outcome, error) 
 	if err != nil {
 		return Outcome{}, err
 	}
-	artifact, err := r.store.Put(ctx, ArtifactMediaType, bytes.NewReader(artifactBytes))
+	artifact, err := r.store.PutFor(ctx, request.ExecutionID, ArtifactMediaType, bytes.NewReader(artifactBytes))
 	if err != nil {
 		return Outcome{}, err
 	}

@@ -69,9 +69,9 @@ func runLocal(args []string, stdout, stderr io.Writer) int {
 	inputDigest := flags.String("input-digest", "", "canonical job input digest")
 	manifestDigest := flags.String("manifest-digest", "", "published manifest digest the sandbox binds (default: the frozen manifest)")
 	outputBytes := flags.Uint64("output-bytes", 0, "output bound the published manifest states (default: the frozen bound)")
-	retainUntil := flags.Int64("retain-until", 0, "unix second until which the job's artifacts are retained (default: no retention record; kept until removed by hand)")
+	retainUntil := flags.Int64("retain-until", 0, "unix second until which the job's artifacts are retained (default: the job's record stays pending and its artifacts are never swept)")
 	if err := flags.Parse(args); err != nil {
-		return exitError
+		return parseFailure(err)
 	}
 	if flags.NArg() != 0 {
 		return failLocal(stderr, fmt.Errorf("unexpected argument %q", flags.Arg(0)))
@@ -253,6 +253,15 @@ func requirePrivateOwnedDirectory(path string) error {
 
 func ownedByCurrentUser(info os.FileInfo) bool {
 	return osguard.CurrentUserOwns(info)
+}
+
+// parseFailure keeps the conventional exit codes of a flag parse: success
+// for an explicit help request, 2 for a command line that does not parse.
+func parseFailure(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return exitOK
+	}
+	return exitUsage
 }
 
 func failLocal(stderr io.Writer, err error) int {

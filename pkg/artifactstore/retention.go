@@ -24,9 +24,12 @@ import (
 // leaves either a live record whose objects are all present or a tombstone
 // the next sweep finishes; no surviving record ever names a deleted object.
 //
-// The store keeps objects that no record names: they may belong to a job
-// whose retention is not recorded yet, so deleting them could break a
-// result that is about to be bound.
+// Objects are deduplicated by content, so one object may belong to several
+// jobs. Every commit binds the object under the retention lock: PutFor adds
+// it to its job's record, pending until Retain gives the job a deadline, and
+// Put leaves a permanent hold (<object hex>.hold). A sweep keeps any object a
+// pending, unexpired or deferred record or a hold names, so it never deletes
+// an object a job that is still running or retained depends on.
 const (
 	retentionSchema = "tos.ai.artifact-retention.v1"
 	// MaxRetentionRecords bounds the records a sweep reads, so one call has
@@ -41,23 +44,33 @@ const (
 	retentionLockName       = ".retention.lock"
 	recordSuffix            = ".json"
 	tombstoneSuffix         = ".expired"
+	holdSuffix              = ".hold"
 	retentionTempPrefix     = ".retain-"
+	retentionRetryInterval  = 20 * time.Millisecond
+
+	// DefaultRetentionWait bounds how long a commit, Retain or Sweep waits
+	// for another process to release the retention lock. A sweep's work is
+	// bounded per call, so a waiter normally gets the lock well within it.
+	DefaultRetentionWait = 60 * time.Second
 )
 
-// ErrRetentionBusy reports that another process is retaining or sweeping
-// this store; the caller retries later.
+// ErrRetentionBusy reports that another process held the retention lock for
+// longer than the bounded wait; the caller retries later.
 var ErrRetentionBusy = errors.New("artifact retention is held by another process")
 
+// retentionRecord binds objects to a job. A pending record has no deadline
+// yet and keeps its objects until Retain sets one.
 type retentionRecord struct {
 	Schema          string   `json:"schema"`
 	Job             string   `json:"job"`
+	Pending         bool     `json:"pending"`
 	RetainUntilUnix int64    `json:"retain_until_unix"`
 	Objects         []string `json:"objects"`
 }
 
 func (r retentionRecord) valid() bool {
-	if r.Schema != retentionSchema || !digestPattern.MatchString(r.Job) || r.RetainUntilUnix <= 0 ||
-		len(r.Objects) == 0 || len(r.Objects) > MaxObjectsPerJob {
+	if r.Schema != retentionSchema || !digestPattern.MatchString(r.Job) || r.Pending != (r.RetainUntilUnix == 0) ||
+		r.RetainUntilUnix < 0 || len(r.Objects) == 0 || len(r.Objects) > MaxObjectsPerJob {
 		return false
 	}
 	for index, object := range r.Objects {
@@ -77,15 +90,18 @@ type SweepReport struct {
 	KeptShared int `json:"kept_shared"`
 	// Deferred counts expired jobs left for a later sweep by the limit.
 	Deferred int `json:"deferred"`
-	// Live counts unexpired jobs.
+	// Live counts unexpired jobs, pending ones included.
 	Live int `json:"live"`
+	// Held counts objects kept by a permanent hold.
+	Held int `json:"held"`
 }
 
-// Retain records that job keeps objects until retainUntil (inclusive). The
-// job and every object are sha256:<64 lowercase hex> digests, and every
-// object must already be stored. Retaining a job again may add objects and
-// extend its deadline but never shortens it, so a retried completion cannot
-// expire a result early.
+// Retain records that job keeps objects until retainUntil (inclusive),
+// turning a pending record final. The job and every object are
+// sha256:<64 lowercase hex> digests, and every object must already be
+// stored. Retaining a job again may add objects and extend its deadline but
+// never shortens it, so a retried completion cannot expire a result early.
+// It waits a bounded time for a concurrent sweep to finish.
 func (s *Store) Retain(ctx context.Context, job string, retainUntil time.Time, objects []string) error {
 	if s == nil || s.root == "" || ctx == nil || !digestPattern.MatchString(job) || retainUntil.Unix() <= 0 ||
 		len(objects) == 0 || len(objects) > MaxObjectsPerJob {
@@ -99,22 +115,35 @@ func (s *Store) Retain(ctx context.Context, job string, retainUntil time.Time, o
 			return errors.New("invalid artifact retention object")
 		}
 	}
-	lock, retention, err := s.lockRetention()
+	lock, retention, err := s.acquireRetention(ctx)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
+	return s.bindLocked(retention, job, retainUntil.Unix(), objects)
+}
+
+// bindLocked adds objects to job's record while the retention lock is held.
+// retainUntil zero keeps the record's current state (a new record is
+// pending); a positive value sets a pending record's deadline or extends a
+// final one, never shortening it.
+func (s *Store) bindLocked(retention, job string, retainUntil int64, objects []string) error {
 	name := strings.TrimPrefix(job, "sha256:")
 	if _, err := os.Lstat(filepath.Join(retention, name+tombstoneSuffix)); err == nil {
 		return errors.New("artifact retention job is being deleted")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("stat artifact retention tombstone")
 	}
-	record := retentionRecord{Schema: retentionSchema, Job: job, RetainUntilUnix: retainUntil.Unix()}
+	record := retentionRecord{Schema: retentionSchema, Job: job, Pending: retainUntil == 0, RetainUntilUnix: retainUntil}
 	existing, err := readRetentionRecord(retention, name+recordSuffix)
 	switch {
 	case err == nil:
-		record.RetainUntilUnix = max(record.RetainUntilUnix, existing.RetainUntilUnix)
+		switch {
+		case retainUntil == 0:
+			record.Pending, record.RetainUntilUnix = existing.Pending, existing.RetainUntilUnix
+		case !existing.Pending:
+			record.RetainUntilUnix = max(retainUntil, existing.RetainUntilUnix)
+		}
 		record.Objects = append(record.Objects, existing.Objects...)
 	case errors.Is(err, os.ErrNotExist):
 	default:
@@ -133,7 +162,8 @@ func (s *Store) Retain(ctx context.Context, job string, retainUntil time.Time, o
 			return err
 		}
 	}
-	if existing.valid() && existing.RetainUntilUnix == record.RetainUntilUnix && slices.Equal(existing.Objects, record.Objects) {
+	if existing.valid() && existing.Pending == record.Pending && existing.RetainUntilUnix == record.RetainUntilUnix &&
+		slices.Equal(existing.Objects, record.Objects) {
 		return nil
 	}
 	return writeRetentionRecord(retention, name+recordSuffix, record)
@@ -152,7 +182,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 	if err := ctx.Err(); err != nil {
 		return SweepReport{}, err
 	}
-	lock, retention, err := s.lockRetention()
+	lock, retention, err := s.acquireRetention(ctx)
 	if err != nil {
 		return SweepReport{}, err
 	}
@@ -170,6 +200,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 		return SweepReport{}, errors.New("artifact retention directory exceeds its record bound")
 	}
 	var tombstones, expired, surviving []retentionRecord
+	held := map[string]struct{}{}
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
@@ -179,10 +210,19 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 			if err := removeRegular(filepath.Join(retention, name)); err != nil {
 				return SweepReport{}, err
 			}
+		case strings.HasSuffix(name, holdSuffix):
+			digest, err := readHold(retention, name)
+			if err != nil {
+				return SweepReport{}, err
+			}
+			held[digest] = struct{}{}
 		case strings.HasSuffix(name, tombstoneSuffix):
 			record, err := readRetentionRecord(retention, name)
 			if err != nil {
 				return SweepReport{}, err
+			}
+			if record.Pending {
+				return SweepReport{}, fmt.Errorf("artifact retention tombstone %s is pending", name)
 			}
 			tombstones = append(tombstones, record)
 		case strings.HasSuffix(name, recordSuffix):
@@ -190,7 +230,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 			if err != nil {
 				return SweepReport{}, err
 			}
-			if record.RetainUntilUnix < now.Unix() {
+			if !record.Pending && record.RetainUntilUnix < now.Unix() {
 				expired = append(expired, record)
 			} else {
 				surviving = append(surviving, record)
@@ -209,7 +249,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 	}
 	slices.SortFunc(expired, byDeadline)
 	slices.SortFunc(tombstones, byDeadline)
-	report := SweepReport{Live: len(surviving)}
+	report := SweepReport{Live: len(surviving), Held: len(held)}
 	// Interrupted deletions finish first; they count against the limit.
 	if len(tombstones) > limit {
 		report.Deferred = len(tombstones) - limit + len(expired)
@@ -221,8 +261,9 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, limit int) (SweepRepor
 		expired = expired[:remaining]
 	}
 	// An object stays while any record that is not deleted in this call
-	// names it, including an expired record deferred to a later sweep.
-	referenced := map[string]struct{}{}
+	// names it, including an expired record deferred to a later sweep, or
+	// while a hold keeps it.
+	referenced := held
 	for _, record := range surviving {
 		for _, object := range record.Objects {
 			referenced[object] = struct{}{}
@@ -305,6 +346,61 @@ func (s *Store) lockRetention() (*dirlock.Lock, string, error) {
 		return nil, "", err
 	}
 	return lock, retention, nil
+}
+
+// acquireRetention takes the retention lock, waiting up to the store's
+// bounded wait while another process holds it.
+func (s *Store) acquireRetention(ctx context.Context) (*dirlock.Lock, string, error) {
+	deadline := time.Now().Add(s.lockWait)
+	for {
+		lock, retention, err := s.lockRetention()
+		if !errors.Is(err, ErrRetentionBusy) {
+			return lock, retention, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, "", ErrRetentionBusy
+		}
+		timer := time.NewTimer(retentionRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// writeHold durably records that an object committed without a job is kept
+// permanently.
+func writeHold(retention, digest string) error {
+	path := filepath.Join(retention, strings.TrimPrefix(digest, "sha256:")+holdSuffix)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		_, err := readHold(retention, filepath.Base(path))
+		return err
+	}
+	if err != nil {
+		return errors.New("create artifact hold")
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return errors.New("sync artifact hold")
+	}
+	if err := file.Close(); err != nil {
+		return errors.New("close artifact hold")
+	}
+	return syncDirectory(retention)
+}
+
+// readHold validates a hold: an empty owner-only regular file named by the
+// object it keeps.
+func readHold(retention, name string) (string, error) {
+	digest := "sha256:" + strings.TrimSuffix(name, holdSuffix)
+	info, err := os.Lstat(filepath.Join(retention, name))
+	if !digestPattern.MatchString(digest) || err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 0 {
+		return "", fmt.Errorf("artifact hold %s is invalid", name)
+	}
+	return digest, nil
 }
 
 // requireObject checks that an object is a stored, read-only regular file

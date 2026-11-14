@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-ai/internal/dirlock"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
 	"github.com/tosnetwork/tos-ai/pkg/railgate"
 	"github.com/tosnetwork/tos-ai/pkg/softwarework"
@@ -32,9 +33,11 @@ var (
 )
 
 func TestPaidExitCodesAreDistinctAndOnlyCompletionIsSuccess(t *testing.T) {
-	codes := map[int]string{exitRefused: statusRefused}
+	// Unavailable shares exit 1 with a refused run: both mean nothing was
+	// admitted and the run may be retried.
+	codes := map[int]string{exitRefused: statusRefused, exitUsage: statusUsage}
 	for _, status := range []railgate.Status{railgate.StatusCompleted, railgate.StatusAlreadyTaken, railgate.StatusNotPendingNow,
-		railgate.StatusAmbiguous, railgate.StatusNotAdmitted, railgate.StatusExecutionFailed} {
+		railgate.StatusAmbiguous, railgate.StatusNotAdmitted, railgate.StatusExecutionFailed, railgate.StatusRefusedBeforeExecution} {
 		code := exitCodeFor(status)
 		if previous, taken := codes[code]; taken {
 			t.Fatalf("%s and %s share exit code %d", status, previous, code)
@@ -42,7 +45,8 @@ func TestPaidExitCodesAreDistinctAndOnlyCompletionIsSuccess(t *testing.T) {
 		codes[code] = string(status)
 	}
 	want := map[railgate.Status]int{railgate.StatusCompleted: 0, railgate.StatusAlreadyTaken: 3, railgate.StatusNotPendingNow: 4,
-		railgate.StatusAmbiguous: 5, railgate.StatusNotAdmitted: 6, railgate.StatusExecutionFailed: 7}
+		railgate.StatusAmbiguous: 5, railgate.StatusNotAdmitted: 6, railgate.StatusExecutionFailed: 7,
+		railgate.StatusRefusedBeforeExecution: 8, railgate.StatusUnavailable: 1}
 	for status, code := range want {
 		if got := exitCodeFor(status); got != code {
 			t.Errorf("%s = %d, documented %d", status, got, code)
@@ -109,6 +113,19 @@ func TestRunPaidRefusesIncompleteOrMalformedInputs(t *testing.T) {
 				t.Fatalf("report = %+v", report)
 			}
 		})
+	}
+}
+
+func TestRunPaidKeepsConventionalUsageExitCodes(t *testing.T) {
+	var stdout bytes.Buffer
+	if code := run([]string{"paid", "--no-such-flag"}, &stdout, io.Discard); code != exitUsage {
+		t.Fatalf("unknown flag: exit = %d", code)
+	}
+	if report := decodeReport(t, stdout.Bytes()); report.Status != statusUsage || report.ExitCode != exitUsage {
+		t.Fatalf("report = %+v", report)
+	}
+	if code := run([]string{"paid", "-h"}, io.Discard, io.Discard); code != exitOK {
+		t.Fatalf("help: exit = %d", code)
 	}
 }
 
@@ -271,11 +288,11 @@ func newPaidFixture(t *testing.T) *paidFixture {
 		sourceDigest: sha256Digest(archive), store: store, claim: railgate.Claim{RequestID: 5}}
 	f.job.run = func(ctx context.Context, request softwarework.Request) (softwarework.Outcome, error) {
 		f.runs++
-		report, err := store.Put(ctx, softwarework.ReportMediaType, strings.NewReader("report"))
+		report, err := store.PutFor(ctx, request.ExecutionID, softwarework.ReportMediaType, strings.NewReader("report"))
 		if err != nil {
 			return softwarework.Outcome{}, err
 		}
-		artifact, err := store.Put(ctx, softwarework.ArtifactMediaType, strings.NewReader("artifact"))
+		artifact, err := store.PutFor(ctx, request.ExecutionID, softwarework.ArtifactMediaType, strings.NewReader("artifact"))
 		if err != nil {
 			return softwarework.Outcome{}, err
 		}
@@ -333,25 +350,91 @@ func TestPaidExecuteRefusesBeforeRunningAnythingItCannotBind(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newPaidFixture(t)
 			edit(f)
+			// The pre-execution check refuses it, so the slot is abandoned
+			// rather than started.
+			if err := f.job.check(f.verified); err == nil {
+				t.Fatal("the pre-execution check accepted it")
+			}
 			if _, err := f.job.execute(context.Background(), f.verified); err == nil || f.runs != 0 {
 				t.Fatalf("err=%v runs=%d", err, f.runs)
 			}
 		})
+	}
+	if err := newPaidFixture(t).job.check(newPaidFixture(t).verified); err != nil {
+		t.Fatalf("the check refused a servable request: %v", err)
 	}
 	if _, err := newPaidFixture(t).job.execute(context.Background(), nil); err == nil {
 		t.Fatal("executed without a verified request")
 	}
 }
 
+// A sweep that holds the retention lock while a paid run finishes, or runs
+// concurrently with it, neither fails the run nor deletes the artifact it
+// shares with an expired job.
+func TestPaidExecuteSurvivesConcurrentSweeps(t *testing.T) {
+	f := newPaidFixture(t)
+	ctx := context.Background()
+	expiredJob := "sha256:" + strings.Repeat("e", 64)
+	shared, err := f.store.PutFor(ctx, expiredJob, softwarework.ArtifactMediaType, strings.NewReader("artifact"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Retain(ctx, expiredJob, time.Unix(1000, 0), []string{shared.Digest}); err != nil {
+		t.Fatal(err)
+	}
+	// Another process holds the lock when the run starts and releases it
+	// shortly after.
+	holder, err := dirlock.Acquire(f.storeRoot, ".retention.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = holder.Close()
+	}()
+	stop := make(chan struct{})
+	swept := make(chan error, 1)
+	go func() {
+		var sweepErr error
+		for {
+			select {
+			case <-stop:
+				swept <- sweepErr
+				return
+			default:
+			}
+			if _, err := f.store.Sweep(ctx, time.Now(), 4); err != nil && !errors.Is(err, artifactstore.ErrRetentionBusy) {
+				sweepErr = err
+			}
+		}
+	}()
+	hash, err := f.job.execute(ctx, f.verified)
+	close(stop)
+	if sweepErr := <-swept; sweepErr != nil {
+		t.Fatalf("sweep: %v", sweepErr)
+	}
+	if err != nil || hash == "" || f.job.outcome.Artifact.Digest != shared.Digest {
+		t.Fatalf("a concurrent sweep failed the paid run: %q %v", hash, err)
+	}
+	if _, err := f.store.Sweep(ctx, time.Now(), 8); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Get(ctx, shared.Digest); err != nil {
+		t.Fatalf("the paid run's artifact was deleted: %v", err)
+	}
+}
+
 func TestPaidExecuteNeverHashesAnUnsuccessfulOrUnstoredResult(t *testing.T) {
 	failed := newPaidFixture(t)
 	failed.exitCode = 1
-	if hash, err := failed.job.execute(context.Background(), failed.verified); err == nil || hash != "" || failed.job.receipt != nil {
+	hash, err := failed.job.execute(context.Background(), failed.verified)
+	if err == nil || !strings.Contains(err.Error(), "not a successful run") || hash != "" || failed.job.receipt != nil {
 		t.Fatalf("a failing run was hashed: %q %v", hash, err)
 	}
-	// A failing run's objects are not bound to the job either.
-	if report, err := failed.store.Sweep(context.Background(), time.Unix(1, 0), 8); err != nil || report.Live != 0 {
-		t.Fatalf("a failing run was retained: %+v %v", report, err)
+	// Its objects still get the job's deadline, so they do not stay pending
+	// (kept forever) after the slot failed.
+	if report, err := failed.store.Sweep(context.Background(), time.Unix(2_000_003_600+86400+1, 0), 8); err != nil || report.DeletedJobs != 1 {
+		t.Fatalf("a failing run's objects were left pending: %+v %v", report, err)
 	}
 	tampered := newPaidFixture(t)
 	inner := tampered.job.run

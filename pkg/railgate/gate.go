@@ -168,7 +168,9 @@ func (g *Gate) recover() error {
 
 // Admit verifies the claim at a fresh checkpoint and creates its slot. A
 // claim whose slot exists returns that slot and ErrSlotTaken, so a request is
-// admitted for execution at most once whatever the claim's transport.
+// admitted for execution at most once whatever the claim's transport. When
+// the local slot store fails after verification the verified claim is
+// returned with the error, so the caller can look the slot up.
 func (g *Gate) Admit(ctx context.Context, claim Claim) (Slot, *Verified, error) {
 	if g == nil {
 		return Slot{}, nil, errors.New("railgate: invalid gate")
@@ -181,14 +183,14 @@ func (g *Gate) Admit(ctx context.Context, claim Claim) (Slot, *Verified, error) 
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 	if existing, found, err := g.lookup(key); err != nil {
-		return Slot{}, nil, err
+		return Slot{}, verified, err
 	} else if found {
 		return existing, verified, ErrSlotTaken
 	}
 	slot := Slot{Schema: slotSchema, QuoteCommitment: key.QuoteCommitment, Actor: key.Actor, RequestID: key.RequestID,
 		RequestHash: hex.EncodeToString(verified.RequestHash[:]), State: SlotAdmitted, UpdatedUnix: g.now().Unix()}
 	if err := g.write(slot, true); err != nil {
-		return Slot{}, nil, err
+		return Slot{}, verified, err
 	}
 	return slot, verified, nil
 }

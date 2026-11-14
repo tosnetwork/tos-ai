@@ -27,7 +27,7 @@ func sweepArtifacts(args []string, stdout, stderr io.Writer, now func() time.Tim
 	root := flags.String("state-dir", "", "private execution state directory whose artifacts are swept")
 	limit := flags.Int("limit", 64, fmt.Sprintf("expired jobs deleted per call (1-%d)", artifactstore.MaxSweepJobs))
 	if err := flags.Parse(args); err != nil {
-		return exitError
+		return parseFailure(err)
 	}
 	if flags.NArg() != 0 {
 		return failLocal(stderr, fmt.Errorf("unexpected argument %q", flags.Arg(0)))

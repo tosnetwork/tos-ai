@@ -84,6 +84,31 @@ func TestRunnerBindsExactContractAndReturnsImmutableArtifacts(t *testing.T) {
 	}
 }
 
+// The runner binds both objects to its execution as it stores them: they are
+// kept while the job is pending and swept once the job is retained and
+// expires, rather than held forever or left unprotected.
+func TestRunnerBindsItsObjectsToTheExecution(t *testing.T) {
+	runner, _, journal, request := fixture(t)
+	defer journal.Close()
+	outcome, err := runner.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	pending, err := runner.store.Sweep(context.Background(), now, 8)
+	if err != nil || pending.Live != 1 || pending.DeletedObjects != 0 || pending.Held != 0 {
+		t.Fatalf("pending job = %+v %v", pending, err)
+	}
+	if err := runner.store.Retain(context.Background(), request.ExecutionID, now.Add(-time.Hour),
+		[]string{outcome.Artifact.Digest, outcome.Report.Digest}); err != nil {
+		t.Fatal(err)
+	}
+	swept, err := runner.store.Sweep(context.Background(), now, 8)
+	if err != nil || swept.DeletedJobs != 1 || swept.DeletedObjects != 2 {
+		t.Fatalf("expired job = %+v %v", swept, err)
+	}
+}
+
 func TestRunnerRejectsConflictingExecutionIdentity(t *testing.T) {
 	runner, backend, journal, request := fixture(t)
 	defer journal.Close()
