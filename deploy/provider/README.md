@@ -48,9 +48,56 @@ test "$(stat -c '%U:%G:%a' /run/tos-service-containerd/containerd.sock)" = root:
 ctr --address /run/tos-service-containerd/containerd.sock plugins ls
 ```
 
-Import the reproducible OCI archive into namespace `tos-service-paid-work`, verify its
-index digest independently, and unpack it for `overlayfs`. Never use a mutable
-tag without the manifest's exact `sha256:` digest.
+The unit tightens the socket (and the ttrpc socket beside it) to `0600` after
+the daemon reports readiness; containerd itself creates them `0660`, which the
+executor refuses. It runs with
+`UMask=0022` because the overlayfs snapshotter creates each layer's root
+directory itself: under a stricter umask those become `0700` and the
+unprivileged sandbox user cannot traverse `/`. The daemon's root and state
+directories remain `0700`, so this widens nothing on the host.
+
+Build the reproducible OCI archive with
+`build/software-work-go-1.26.5/build.sh` (it verifies the toolchain ZIP and the
+resulting index digest). Import it into namespace `tos-service-paid-work`,
+unpacked for `overlayfs`. The executor looks the image up by its exact
+digest-qualified reference, so that reference must exist as an image name.
+The pinned value is the OCI image *index* digest (the SHA-256 of the archive's
+`index.json`). Never use a mutable tag without it: the plain `$name` tag that the
+import creates is not used by the executor and may be removed after tagging.
+
+```bash
+socket=/run/tos-service-containerd/containerd.sock
+name=docker.io/tosnetwork/software-work-go:1.26.5
+digest=sha256:9624bca74096f810c5b24e489521dde124fadcfa1808581648b38bdc1ba1b105
+test "sha256:$(tar -xOf software-work-go-1.26.5.oci.tar index.json | sha256sum | cut -d' ' -f1)" = "$digest"
+ctr --address "$socket" -n tos-service-paid-work images import \
+  --index-name "$name" --snapshotter overlayfs software-work-go-1.26.5.oci.tar
+ctr --address "$socket" -n tos-service-paid-work images tag "$name" "$name@$digest"
+ctr --address "$socket" -n tos-service-paid-work images ls "name==$name@$digest" | grep -qF "$digest"
+ctr --address "$socket" -n tos-service-paid-work images check
+```
+
+Then run the live backend conformance suite against this daemon. Build the
+test binary as an unprivileged user and run only the binary as root:
+
+```bash
+GOWORK=off go test -c -o containerdbackend.test ./pkg/executor/containerdbackend
+install -d -o root -g root -m 0700 /run/tos-service-containerd/test-fifos
+env TOS_AI_CONTAINERD_TEST_SOCKET="$socket" \
+  TOS_AI_CONTAINERD_TEST_NAMESPACE=tos-service-paid-work \
+  TOS_AI_CONTAINERD_TEST_FIFO_DIR=/run/tos-service-containerd/test-fifos \
+  TOS_AI_CONTAINERD_TEST_IMAGE_REFERENCE="$name@$digest" \
+  TOS_AI_CONTAINERD_TEST_IMAGE_DIGEST="$digest" \
+  ./containerdbackend.test -test.run 'TestContainerdBackendLive(Conformance|Workspace)$' -test.v
+```
+
+Both tests must pass before the host serves paid work.
+
+Known limitation: the runc v2 shim of this daemon still keeps its runc state
+under the host-wide `/run/containerd/runc/<namespace>` and its shim sockets
+under `/run/containerd/s`, beside any distribution containerd. Their modes are
+set explicitly (not by the umask), but the private daemon does not yet have its
+own runc root.
 
 ## Paid path: admit, then execute
 
