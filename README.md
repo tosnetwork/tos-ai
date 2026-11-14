@@ -43,8 +43,10 @@ execution adapters were removed. They encoded the retired protocol and must not
 be treated as compatibility requirements for the new software-work schema.
 The escrow-gated A2A, MCP and Agent Packet adapters, their public HTTP
 boundary and the Messenger event worker were removed with stablecoin escrow:
-software work settles on the Service Actor rail, and an execution gate keyed
-by a pending Service Actor request is not provided here.
+software work settles on the Service Actor rail. `pkg/railgate` is the
+replacement gate: it admits a finalized pending Service Actor request at most
+once. `software-work-execute paid` admits through it before executing; the
+command's default mode is for work whose admission its caller already proved.
 
 ## Build and test
 
@@ -58,7 +60,11 @@ The provider-local `software-work-execute` command composes the frozen V1 job
 with the bounded executor. The execution contract is frozen in
 `tos-service-spec/docs/SOFTWARE_WORK_EXECUTION_V1.md`; settlement follows
 `tos-service-spec/docs/SERVICE_ACTOR_TVM_V1.md`. It does not resurrect the
-deleted inference RPC.
+deleted inference RPC. Its `paid` subcommand is the standalone paid path: it
+admits a finalized pending Service Actor request through `pkg/railgate`
+before executing it at most once. The default mode runs a job whose admission
+its caller already proved, and `artifacts-gc` deletes artifacts whose
+retention ended. See [the provider runbook](deploy/provider/README.md).
 
 Tests that check real ML-DSA-44 bytes run the pinned `tosctl` helper named by
 `TOS_SERVICE_TOSCTL` and `TOS_SERVICE_TOSCTL_SHA256`; they fail, rather than
@@ -83,7 +89,7 @@ pkg/executor/backendtest/       reusable lifecycle conformance suite
 executor/gpuisolation/          exclusive operator-named GPU leases
 pkg/softwarework/               bound jobs and at-most-once outcome journal
 pkg/railgate/                   finalized pending-request admission for paid Service Actor work
-pkg/artifactstore/              immutable content-addressed output storage
+pkg/artifactstore/              immutable content-addressed output storage with bounded retention
 pkg/commercegate/               Action Authority gated local execution admission
 pkg/privateingress/             Action Authority gated private content ingress
 pkg/probe/                      privacy-minimized local resource probes

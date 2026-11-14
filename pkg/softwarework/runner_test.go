@@ -84,6 +84,68 @@ func TestRunnerBindsExactContractAndReturnsImmutableArtifacts(t *testing.T) {
 	}
 }
 
+// The runner binds both objects to its execution as it stores them: they are
+// kept while the job is pending and swept once the job is retained and
+// expires, rather than held forever or left unprotected.
+func TestRunnerBindsItsObjectsToTheExecution(t *testing.T) {
+	runner, _, journal, request := fixture(t)
+	defer journal.Close()
+	outcome, err := runner.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	pending, err := runner.store.Sweep(context.Background(), now, 8)
+	if err != nil || pending.Pending != 1 || pending.Live != 0 || pending.DeletedObjects != 0 || pending.Held != 0 {
+		t.Fatalf("pending job = %+v %v", pending, err)
+	}
+	if err := runner.store.Retain(context.Background(), request.ExecutionID, now.Add(-time.Hour),
+		[]string{outcome.Artifact.Digest, outcome.Report.Digest}); err != nil {
+		t.Fatal(err)
+	}
+	swept, err := runner.store.Sweep(context.Background(), now, 8)
+	if err != nil || swept.DeletedJobs != 1 || swept.DeletedObjects != 2 {
+		t.Fatalf("expired job = %+v %v", swept, err)
+	}
+}
+
+// Pre-admitted work that never sets a deadline keeps running however full
+// the store's record bound is: its pending records are never refused.
+func TestRunnerKeepsRunningPastTheRecordBound(t *testing.T) {
+	runner, backend, journal, request := fixture(t)
+	defer journal.Close()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifactstore.Open(filepath.Join(root, "artifacts"), 1<<20, artifactstore.WithRecordBound(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.store = store
+	filler := digest([]byte("retained job"))
+	object, err := store.PutFor(context.Background(), filler, "application/octet-stream", bytes.NewReader([]byte("retained")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Retain(context.Background(), filler, time.Unix(1_900_000_000, 0), []string{object.Digest}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckCapacity(context.Background(), 1); err == nil {
+		t.Fatal("the store is not at its bound")
+	}
+	for index := range 5 {
+		request.ExecutionID = digest([]byte{byte(index)})
+		if _, err := runner.Execute(context.Background(), request); err != nil {
+			t.Fatalf("execution %d past the bound: %v", index, err)
+		}
+	}
+	report, err := store.Sweep(context.Background(), time.Unix(1_800_000_000, 0), 8)
+	if err != nil || report.Pending != 5 || report.Live != 1 || backend.calls != 5 {
+		t.Fatalf("report = %+v %v calls=%d", report, err, backend.calls)
+	}
+}
+
 func TestRunnerRejectsConflictingExecutionIdentity(t *testing.T) {
 	runner, backend, journal, request := fixture(t)
 	defer journal.Close()

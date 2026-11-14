@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const MaxObjectBytesHard = uint64(64 << 20)
@@ -29,13 +30,42 @@ type Descriptor struct {
 }
 
 type Store struct {
-	objects string
-	maximum uint64
+	root     string
+	objects  string
+	maximum  uint64
+	lockWait time.Duration
+	// maxRecords bounds deadline-bearing records; MaxRetentionRecords
+	// unless lowered with WithRecordBound.
+	maxRecords int
 }
 
-func Open(root string, maximum uint64) (*Store, error) {
+// Option adjusts a store opened by Open.
+type Option func(*Store) error
+
+// WithRecordBound lowers the bound on deadline-bearing job records below
+// MaxRetentionRecords, for an operator with less disk to spare.
+func WithRecordBound(records int) Option {
+	return func(s *Store) error {
+		if records <= 0 || records > MaxRetentionRecords {
+			return errors.New("artifact record bound is outside 1..MaxRetentionRecords")
+		}
+		s.maxRecords = records
+		return nil
+	}
+}
+
+func Open(root string, maximum uint64, options ...Option) (*Store, error) {
 	if !filepath.IsAbs(root) || maximum == 0 || maximum > MaxObjectBytesHard {
 		return nil, errors.New("invalid artifact store configuration")
+	}
+	store := &Store{lockWait: DefaultRetentionWait, maxRecords: MaxRetentionRecords, maximum: maximum}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("invalid artifact store option")
+		}
+		if err := option(store); err != nil {
+			return nil, err
+		}
 	}
 	clean := filepath.Clean(root)
 	if clean != root {
@@ -58,10 +88,28 @@ func Open(root string, maximum uint64) (*Store, error) {
 	if err := requirePrivateDirectory(objects); err != nil {
 		return nil, err
 	}
-	return &Store{objects: objects, maximum: maximum}, nil
+	store.root, store.objects = clean, objects
+	return store, nil
 }
 
+// Put stores an object that belongs to no job. It is held permanently: a
+// sweep never deletes it, even when an expired job retained the same bytes.
 func (s *Store) Put(ctx context.Context, mediaType string, reader io.Reader) (Descriptor, error) {
+	return s.put(ctx, "", mediaType, reader)
+}
+
+// PutFor stores an object on behalf of job (sha256:<64 lowercase hex>). The
+// job's retention record names the object from the moment it is committed;
+// until Retain gives the job a deadline the record is pending, and a sweep
+// keeps every object a pending record names.
+func (s *Store) PutFor(ctx context.Context, job string, mediaType string, reader io.Reader) (Descriptor, error) {
+	if !digestPattern.MatchString(job) {
+		return Descriptor{}, errors.New("invalid artifact put job")
+	}
+	return s.put(ctx, job, mediaType, reader)
+}
+
+func (s *Store) put(ctx context.Context, job string, mediaType string, reader io.Reader) (Descriptor, error) {
 	if s == nil || s.objects == "" || ctx == nil || reader == nil || !mediaTypePattern.MatchString(mediaType) {
 		return Descriptor{}, errors.New("invalid artifact put request")
 	}
@@ -89,6 +137,14 @@ func (s *Store) Put(ctx context.Context, mediaType string, reader io.Reader) (De
 		return Descriptor{}, errors.New("protect artifact temporary object")
 	}
 	digest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	// Committing and binding the object happen under the retention lock, so
+	// a sweep can neither delete a deduplicated object between its commit
+	// and its binding nor find an object that nothing protects.
+	lock, retention, err := s.acquireRetention(ctx)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	defer lock.Close()
 	target := s.path(digest)
 	if err := os.Link(temporaryName, target); err != nil {
 		if !errors.Is(err, os.ErrExist) {
@@ -99,6 +155,14 @@ func (s *Store) Put(ctx context.Context, mediaType string, reader io.Reader) (De
 			return Descriptor{}, errors.New("existing artifact object failed verification")
 		}
 	} else if err := syncDirectory(s.objects); err != nil {
+		return Descriptor{}, err
+	}
+	if job == "" {
+		err = s.writeHold(retention, digest)
+	} else {
+		err = s.bindLocked(retention, job, 0, []string{digest})
+	}
+	if err != nil {
 		return Descriptor{}, err
 	}
 	return Descriptor{Digest: digest, MediaType: mediaType, SizeBytes: written}, nil

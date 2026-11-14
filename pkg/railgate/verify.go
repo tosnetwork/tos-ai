@@ -35,6 +35,10 @@ const (
 	MaxBudget = 24 * time.Hour
 )
 
+// ErrResolverUnavailable reports that no finalized checkpoint could be
+// opened, so nothing was proven either way; the claim may be retried.
+var ErrResolverUnavailable = errors.New("railgate: no finalized checkpoint is available")
+
 var (
 	cellDigestPattern = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 	agentPattern      = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
@@ -214,7 +218,7 @@ func (v *Verifier) verify(ctx context.Context, claim Claim, budget time.Duration
 
 	session, err := v.config.Reader.BeginSession(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrResolverUnavailable, err)
 	}
 	evidence, err := serviceactor.Gather(ctx, session, v.config.Network, v.config.Manifests, proposal.CapabilityId, proposal.CapabilityVersion)
 	if err != nil {
