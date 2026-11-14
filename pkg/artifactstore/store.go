@@ -29,6 +29,7 @@ type Descriptor struct {
 }
 
 type Store struct {
+	root    string
 	objects string
 	maximum uint64
 }
@@ -58,7 +59,7 @@ func Open(root string, maximum uint64) (*Store, error) {
 	if err := requirePrivateDirectory(objects); err != nil {
 		return nil, err
 	}
-	return &Store{objects: objects, maximum: maximum}, nil
+	return &Store{root: clean, objects: objects, maximum: maximum}, nil
 }
 
 func (s *Store) Put(ctx context.Context, mediaType string, reader io.Reader) (Descriptor, error) {

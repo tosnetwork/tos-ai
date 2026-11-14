@@ -1,5 +1,10 @@
-// Command software-work-execute runs one already-authorized V1 job through the
+// Command software-work-execute runs one V1 software-work job through the
 // production bounded executor and prints its content-addressed outcome.
+//
+// The default mode runs a job whose admission its caller already proved. The
+// "paid" subcommand is the standalone paid path: it admits a finalized
+// pending Service Actor request at most once before executing it. The
+// "artifacts-gc" subcommand deletes artifacts whose retention ended.
 package main
 
 import (
@@ -14,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tosnetwork/tos-ai/internal/osguard"
 	"github.com/tosnetwork/tos-ai/pkg/artifactstore"
@@ -26,66 +32,140 @@ const (
 	maxSourceBytes = 16 << 20
 )
 
-func main() {
-	socket := flag.String("containerd-socket", "", "private containerd socket")
-	fifo := flag.String("fifo-dir", "", "private FIFO directory")
-	root := flag.String("state-dir", "", "private execution state directory")
-	source := flag.String("source", "", "deterministic USTAR source archive")
-	quote := flag.String("quote", "", "Accepted Quote commitment")
-	executionID := flag.String("execution-id", "", "execution identity")
-	inputDigest := flag.String("input-digest", "", "canonical job input digest")
-	manifestDigest := flag.String("manifest-digest", "", "published manifest digest the sandbox binds (default: the frozen manifest)")
-	outputBytes := flag.Uint64("output-bytes", 0, "output bound the published manifest states (default: the frozen bound)")
-	flag.Parse()
+// Exit codes shared by every mode. The paid mode adds the statuses in
+// paid.go.
+const (
+	exitOK    = 0
+	exitError = 1
+)
+
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+
+// run dispatches on an optional leading subcommand. Without one the command
+// runs a job whose admission its caller already proved (the default mode);
+// "paid" admits a Service Actor request itself before executing it, and
+// "artifacts-gc" sweeps expired artifact retention.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "paid":
+			return runPaid(args[1:], stdout, stderr)
+		case "artifacts-gc":
+			return runArtifactsGC(args[1:], stdout, stderr)
+		}
+	}
+	return runLocal(args, stdout, stderr)
+}
+
+func runLocal(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("software-work-execute", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	socket := flags.String("containerd-socket", "", "private containerd socket")
+	fifo := flags.String("fifo-dir", "", "private FIFO directory")
+	root := flags.String("state-dir", "", "private execution state directory")
+	source := flags.String("source", "", "deterministic USTAR source archive")
+	quote := flags.String("quote", "", "Accepted Quote commitment")
+	executionID := flags.String("execution-id", "", "execution identity")
+	inputDigest := flags.String("input-digest", "", "canonical job input digest")
+	manifestDigest := flags.String("manifest-digest", "", "published manifest digest the sandbox binds (default: the frozen manifest)")
+	outputBytes := flags.Uint64("output-bytes", 0, "output bound the published manifest states (default: the frozen bound)")
+	retainUntil := flags.Int64("retain-until", 0, "unix second until which the job's artifacts are retained (default: no retention record; kept until removed by hand)")
+	if err := flags.Parse(args); err != nil {
+		return exitError
+	}
+	if flags.NArg() != 0 {
+		return failLocal(stderr, fmt.Errorf("unexpected argument %q", flags.Arg(0)))
+	}
+	if *retainUntil < 0 {
+		return failLocal(stderr, errors.New("retain-until must be a positive unix second"))
+	}
 	contract, err := publishedContract(*manifestDigest, *outputBytes)
 	if err != nil {
-		fail(err)
+		return failLocal(stderr, err)
 	}
 	if *socket == "" || *fifo == "" || *root == "" || *source == "" {
-		fail(fmt.Errorf("all path flags are required"))
+		return failLocal(stderr, fmt.Errorf("all path flags are required"))
 	}
 	if err := requirePrivateOwnedDirectory(*root); err != nil {
-		fail(err)
+		return failLocal(stderr, err)
 	}
 	archive, err := readPrivateSource(*source)
 	if err != nil {
-		fail(err)
+		return failLocal(stderr, err)
 	}
+	execution, err := openExecution(*socket, *fifo, *root, contract)
+	if err != nil {
+		return failLocal(stderr, err)
+	}
+	defer execution.Close()
+	outcome, err := execution.runner.Execute(context.Background(), softwarework.Request{QuoteCommitment: *quote,
+		ExecutionID: *executionID, InputDigest: *inputDigest, SourceDigest: sha256Digest(archive), SourceArchive: archive})
+	if err != nil {
+		return failLocal(stderr, err)
+	}
+	if *retainUntil > 0 {
+		if err := execution.store.Retain(context.Background(), outcome.ExecutionID, time.Unix(*retainUntil, 0),
+			[]string{outcome.Artifact.Digest, outcome.Report.Digest}); err != nil {
+			return failLocal(stderr, fmt.Errorf("record artifact retention: %w", err))
+		}
+	}
+	encoded, err := json.MarshalIndent(outcome, "", "  ")
+	if err != nil {
+		return failLocal(stderr, errors.New("encode outcome"))
+	}
+	fmt.Fprintln(stdout, string(encoded))
+	return exitOK
+}
+
+// execution is the bounded executor, artifact store and journal of one
+// private state directory.
+type execution struct {
+	backend *containerdbackend.Backend
+	store   *artifactstore.Store
+	journal *softwarework.Journal
+	runner  *softwarework.Runner
+}
+
+func (e *execution) Close() error {
+	var failures []error
+	if e.journal != nil {
+		failures = append(failures, e.journal.Close())
+	}
+	if e.backend != nil {
+		failures = append(failures, e.backend.Close())
+	}
+	return errors.Join(failures...)
+}
+
+func openExecution(socket, fifo, root string, contract softwarework.Contract) (*execution, error) {
 	limits := softwarework.FrozenV1Limits()
 	backend, err := containerdbackend.Open(context.Background(), containerdbackend.Config{
-		SocketPath: *socket, Namespace: "tos-service-paid-work", Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
-		FIFODir: *fifo, MaxActive: 1, PolicyLimits: limits,
+		SocketPath: socket, Namespace: "tos-service-paid-work", Snapshotter: "overlayfs", Runtime: "io.containerd.runc.v2",
+		FIFODir: fifo, MaxActive: 1, PolicyLimits: limits,
 		ImageReference: softwarework.FrozenV1ImageReference, ImageDigest: softwarework.FrozenV1ImageDigest,
 		ImagePlatform: "linux/amd64",
 	})
 	if err != nil {
-		fail(err)
+		return nil, err
 	}
-	defer backend.Close()
+	result := &execution{backend: backend}
 	bound, err := executor.NewPolicyExecutor(softwarework.FrozenV1Policy(), backend)
 	if err != nil {
-		fail(err)
+		return nil, errors.Join(err, result.Close())
 	}
-	store, err := artifactstore.Open(filepath.Join(*root, "artifacts"), 64<<20)
+	result.store, err = artifactstore.Open(filepath.Join(root, "artifacts"), artifactstore.MaxObjectBytesHard)
 	if err != nil {
-		fail(err)
+		return nil, errors.Join(err, result.Close())
 	}
-	journal, err := softwarework.OpenJournal(filepath.Join(*root, "journal"))
+	result.journal, err = softwarework.OpenJournal(filepath.Join(root, "journal"))
 	if err != nil {
-		fail(err)
+		return nil, errors.Join(err, result.Close())
 	}
-	defer journal.Close()
-	runner, err := softwarework.NewRunner(bound, store, journal, contract)
+	result.runner, err = softwarework.NewRunner(bound, result.store, result.journal, contract)
 	if err != nil {
-		fail(err)
+		return nil, errors.Join(err, result.Close())
 	}
-	outcome, err := runner.Execute(context.Background(), softwarework.Request{QuoteCommitment: *quote,
-		ExecutionID: *executionID, InputDigest: *inputDigest, SourceDigest: sha256Digest(archive), SourceArchive: archive})
-	if err != nil {
-		fail(err)
-	}
-	encoded, _ := json.MarshalIndent(outcome, "", "  ")
-	fmt.Println(string(encoded))
+	return result, nil
 }
 
 // publishedContract is the frozen contract bound to a provider's published
@@ -120,33 +200,39 @@ func sha256Digest(value []byte) string {
 // privileged caller turn its path flags into a confused-deputy file read or
 // state write. Operators must stage both inputs under the executor identity.
 func readPrivateSource(path string) ([]byte, error) {
+	return readPrivateFile(path, maxSourceBytes, "source archive")
+}
+
+// readPrivateFile reads a bounded regular file owned by the executor
+// identity, not readable by others, inside a private owned directory.
+func readPrivateFile(path string, maximum int64, what string) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errors.New("source archive path must be canonical and absolute")
+		return nil, fmt.Errorf("%s path must be canonical and absolute", what)
 	}
 	if err := requirePrivateOwnedDirectory(filepath.Dir(path)); err != nil {
-		return nil, errors.New("source archive parent must be private and owned")
+		return nil, fmt.Errorf("%s parent must be private and owned", what)
 	}
 	before, err := os.Lstat(path)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 ||
 		before.Mode().Perm()&0o077 != 0 || !ownedByCurrentUser(before) ||
-		before.Size() < 0 || before.Size() > maxSourceBytes {
-		return nil, errors.New("source archive must be a bounded private owned regular file")
+		before.Size() < 0 || before.Size() > maximum {
+		return nil, fmt.Errorf("%s must be a bounded private owned regular file", what)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, errors.New("open source archive")
+		return nil, fmt.Errorf("open %s", what)
 	}
 	defer file.Close()
 	after, err := file.Stat()
 	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() ||
 		after.Mode().Perm()&0o077 != 0 || !ownedByCurrentUser(after) {
-		return nil, errors.New("source archive changed while opening")
+		return nil, fmt.Errorf("%s changed while opening", what)
 	}
-	archive, err := io.ReadAll(io.LimitReader(file, maxSourceBytes+1))
-	if err != nil || len(archive) > maxSourceBytes || int64(len(archive)) != after.Size() {
-		return nil, errors.New("read bounded source archive")
+	value, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(value)) > maximum || int64(len(value)) != after.Size() {
+		return nil, fmt.Errorf("read bounded %s", what)
 	}
-	return archive, nil
+	return value, nil
 }
 
 func requirePrivateOwnedDirectory(path string) error {
@@ -169,4 +255,7 @@ func ownedByCurrentUser(info os.FileInfo) bool {
 	return osguard.CurrentUserOwns(info)
 }
 
-func fail(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
+func failLocal(stderr io.Writer, err error) int {
+	fmt.Fprintln(stderr, err)
+	return exitError
+}
