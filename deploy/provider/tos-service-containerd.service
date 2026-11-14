@@ -7,6 +7,10 @@ Wants=local-fs.target
 [Service]
 Type=notify
 ExecStart=/usr/bin/containerd --config /etc/tos-service/containerd.toml
+# containerd creates its socket mode 0660 for the configured group; the
+# executor accepts only an owner-only 0600 socket, so tighten it once the
+# daemon reports readiness (Type=notify), on every start.
+ExecStartPost=/usr/bin/chmod 0600 /run/tos-service-containerd/containerd.sock
 Restart=on-failure
 RestartSec=5s
 Delegate=yes
@@ -14,7 +18,12 @@ KillMode=process
 OOMScoreAdjust=-500
 LimitNOFILE=1048576
 TasksMax=infinity
-UMask=0077
+# Layer tars carry no entry for their root directory, so the overlayfs
+# snapshotter creates each layer root itself; under 0077 those become 0700
+# and the unprivileged sandbox user cannot traverse /. The daemon's root
+# and state directories stay 0700 (StateDirectoryMode/RuntimeDirectoryMode)
+# and the socket is tightened to 0600 below, so 0022 widens nothing on the host.
+UMask=0022
 # Ubuntu's containerd build appends /etc/containerd/conf.d/*.toml even when
 # imports is empty. Hide that host-global directory inside this unit.
 TemporaryFileSystem=/etc/containerd/conf.d:ro
