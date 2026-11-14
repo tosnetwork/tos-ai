@@ -48,7 +48,7 @@ by a pending Service Actor request is not provided here.
 
 ## Build and test
 
-The module uses Go 1.26.5.
+The module uses Go 1.26.11.
 
 ```bash
 go test ./...
